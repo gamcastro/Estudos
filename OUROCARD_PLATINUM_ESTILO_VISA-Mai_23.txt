@@ -1,0 +1,232 @@
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                 SISBB - Sistema de Informações Banco do Brasil                 
+26/04/2023                       Auto-Atendimento                       07:42:53
+                           Fatura do Cartão de Crédito                          
+ 
+ 
+Cliente         : GEORGE A M CASTRO                
+Nr.Cartão       : 4984.****.****.4867         
+Modalidade      : OUROCARD PLATINUM ESTILO VISA    
+ 
+Vencimento      : 10.05.2023          
+Total da fatura : R$ 9.881,89       
+Pagamento mínimo: R$ 1.544,63       
+ 
+DEMONSTRATIVO
+--------------------------------------------------------------------------------
+Data     Transações                             País        Valor R$   Valor US$
+--------------------------------------------------------------------------------
+                                                     
+ 
+         1 - GEORGE A M CASTRO                       
+                                                     
+         SALDO FATURA ANTERIOR                  BR          4.307,33        0,00
+                                                     
+ 
+         Pagamentos/Créditos                         
+10.04.2023PGTO DEBITO CONTA 5784 000009673  200211           -2.559,10        0,00
+20.04.2023PGTO DEBITO CONTA 5784 000009673  200211           -1.748,23        0,00
+                                                     
+ 
+         Bancos                                      
+29.03.2023TITULO ITAU UNIBANCO S.A.            BR            6.113,29        0,00
+29.03.2023JUROS PAGAMENTO TITULO               BR              258,43        0,00
+29.03.2023IOF ADICIONAL PF PGTO TIT/CONV/TRIB  BR               23,39        0,00
+29.03.2023IOF PF PGTO TIT/CONV/TRIB            BR               21,20        0,00
+29.03.2023PAGAMENTOCONTAS                      BR                9,90        0,00
+15.04.2023SAQUE AGEN.8392 PSO SAO LUIS         -MA               90,00        0,00
+18.04.2023SAQUE AGEN.2953 AREINHA              -MA               80,00        0,00
+                                                     
+ 
+         Restaurantes                                
+29.03.2023EC*SHELLBOX            OSASCO        BR              208,71        0,00
+31.03.2023RIO ANIL SHOPPING      SAO LUIS      BR                5,00        0,00
+01.04.2023ifood  *IFD*Tempero d  SAO PAULO     BR               48,99        0,00
+02.04.2023ifood  *IFD*Chef Burg  SAO PAULO     BR               54,90        0,00
+05.04.2023LA CASA DE MACARRONADA SAO LUIS      BR               44,00        0,00
+09.04.2023HUERTON L S BARBOSA    Morros        BR               76,00        0,00
+13.04.2023CAPPTA *PASTEL DA KENI SAO LUIS      BR               13,00        0,00
+13.04.2023PAG*IvanLimaCortes     SAO LUIS      BR               40,00        0,00
+15.04.2023LA CASA DE MACARRONADA SAO LUIS      BR               32,00        0,00
+16.04.2023TERVIC FAST FOOD LTDA  SAO LUIS      BR                5,00        0,00
+16.04.2023MAKEMILLY REST         SAO LUIS      BR               81,84        0,00
+16.04.2023L INACIO SOBRINHO      SAO LUIS      BR                7,00        0,00
+                                                     
+ 
+         Saúde                                       
+02.04.2023DROGASIL               SAO LUIS      BR               42,74        0,00
+10.04.20233572DROGASIL           SAO LUIS      BR              165,15        0,00
+16.04.2023EXTRAFARMA TURU        SAO LUIS      BR               21,37        0,00
+                                                     
+ 
+         Serviços                                    
+28.03.2023PADARIA  CASA DO PAO   SAO LUIS      BR                7,00        0,00
+30.03.2023MERCPAGO*SCOOBYLANCHES SAO LUIS      BR               26,00        0,00
+31.03.2023PADARIA  CASA DO PAO   SAO LUIS      BR                7,00        0,00
+01.04.2023LINDEZA BIJUTERIAS     SAO LUIS      BR               66,00        0,00
+01.04.2023KALUNGA RIO ANILL      SAO LUIS      BR               66,00        0,00
+01.04.2023RIO ANIL SHOPPING      SAO LUIS      BR                9,00        0,00
+02.04.2023DM*Udemy               SAO PAULO     BR               22,90        0,00
+04.04.2023DECASA PRESENTES E VA  SAO LUIS      BR               20,50        0,00
+04.04.2023FENIX VARIEDADES       SAO LUIS      BR               22,00        0,00
+10.04.2023LAVANDERIA LAVO PRA VOCSAO LUIS      BR              200,00        0,00
+12.04.2023NET PGT*Fatura Claro   SAO PAULO     BR               58,79        0,00
+15.04.2023RIO ANIL SHOPPING      SAO LUIS      BR                9,00        0,00
+15.04.2023DEPYL ACTION SRA       SAO LUIS      BR               67,76        0,00
+15.04.2023PRE PAGAMENTO RESERVAS SAO PAULO     BR              105,02        0,00
+16.04.2023ESPACO 7               SAO JOSE DE R BR               48,50        0,00
+16.04.2023AGUIA PETROLIO         SAO LUIS      BR               45,07        0,00
+18.04.2023PADARIA  CASA DO PAO   SAO LUIS      BR                7,00        0,00
+24.04.2023MERCPAGO*DIVERSOESEMGE PINDARE MIRIM BR               27,00        0,00
+                                                     
+ 
+         Supermercados                               
+31.03.2023DIAS EMPREENDIMENTOS   SAO LUIS      BR               26,20        0,00
+02.04.2023MATEUS SUPERMERCADO    SAO LUIS      BR              464,44        0,00
+03.04.2023MATEUS SUPERMERCADOS   SAO LUIS      BR               13,95        0,00
+05.04.2023MATEUS SUPERMERCADOS   SAO LUIS      BR              403,43        0,00
+05.04.2023CARONE LOJA 1          SAO LUIS      BR               19,75        0,00
+10.04.2023MATEUS SUPERMERCADOS   SAO LUIS      BR               12,69        0,00
+15.04.2023MATEUS SUPERMERCADOS   SAO LUIS      BR               92,58        0,00
+16.04.2023MATEUS HIPERMERCADO    SAO LUIS      BR               13,23        0,00
+16.04.2023HAVAN SAO LUIS         SAO LUIS      BR               39,99        0,00
+                                                     
+ 
+         Transporte                                  
+30.03.2023UBER *TRIP HELP.UBER.COSAO PAULO     BR               24,97        0,00
+30.03.2023UBER *TRIP HELP.UBER.COSAO PAULO     BR                9,93        0,00
+03.04.2023UBER *TRIP HELP.UBER.COSAO PAULO     BR               12,91        0,00
+05.04.2023UBER *TRIP HELP.UBER.COSAO PAULO     BR               11,90        0,00
+05.04.2023UBER *TRIP HELP.UBER.COSAO PAULO     BR                9,96        0,00
+06.04.2023UBER *TRIP HELP.UBER.COSAO PAULO     BR               13,92        0,00
+09.04.2023UBER *TRIP HELP.UBER.COSAO PAULO     BR               19,96        0,00
+14.04.2023UBER *TRIP HELP.UBER.COSAO PAULO     BR               27,94        0,00
+15.04.2023UBER *TRIP HELP.UBER.COSAO PAULO     BR               10,95        0,00
+15.04.2023UBER *TRIP HELP.UBER.COSAO PAULO     BR               16,99        0,00
+                                                     
+ 
+         Vestuário                                   
+02.04.2023CACAU E CHOCOLATES DO  SAO LUIS      BR               89,90        0,00
+                                                     
+ 
+         Outros lançamentos                          
+25.04.2023ENCARGOS DE SAQUES                                    16,67        0,00
+25.04.2023ENCARGOS FINANC ROTATIVO                              73,36        0,00
+24.04.2023ANUIDADE DIFERENCIADA TIT-PARC 04/12 BR               45,50        0,00
+03.04.2023IOF DIAR ROT PF REF.03/23            BR                5,79        0,00
+03.04.2023IOF ADIC ROT PF REF.03/23            BR               24,39        0,00
+10.04.2023CONVENIO CLARO S.A.                  BR               57,99        0,00
+10.04.2023PAGAMENTOCONTAS                      BR                9,90        0,00
+10.04.2023JUROS PAGAMENTO COVENIOS             BR                1,74        0,00
+10.04.2023IOF ADICIONAL PF PGTO TIT/CONV/TRIB  BR                0,22        0,00
+10.04.2023IOF PF PGTO TIT/CONV/TRIB            BR                0,14        0,00
+15.04.2023RETIRADA-País AG 8392                BR               15,00        0,00
+18.04.2023RETIRADA-País AG 2953                BR               15,00        0,00
+                                                     
+ 
+         Compras parceladas                          
+27.02.2023EBW*CANVA     PARC 02/12 CURITIBA    BR               24,15        0,00
+                                                     
+ 
+         SubTotal                                           9.881,89        0,00
+                                                     
+ 
+         Total                                              9.881,89        0,00
+                                                     
+                                                     
+ 
+         Declaração de quitação                      
+         Em cumprimento ao disposto na Lei 12.007,                0,00            
+         declaramos que no ano 2022 foram efetuados os                0,00            
+         seguintes pagamentos na conta cartão, vinculada ao                0,00            
+         cartão de crédito objeto desta fatura, em relação                0,00            
+         aos quais damos plena quitação:                        0,00            
+         Janeiro                                              428,88        0,00
+         Fevereiro                                            415,87        0,00
+         Março                                                435,51        0,00
+         Abril                                                425,62        0,00
+         Maio                                                 424,58        0,00
+         Junho                                                415,66        0,00
+         Julho                                                504,75        0,00
+         Agosto                                                 0,00            
+         Setembro                                               0,00            
+         Outubro                                                0,00            
+         Novembro                                               0,00            
+         Dezembro                                           6.422,29        0,00
+         Nos termos do artigo 4o. da mencionada Lei,                0,00            
+         informamos que a presente declaração de quitação                0,00            
+         substitui os comprovantes dos pagamentos que foram                0,00            
+         efetivamente lançados nas respectivas faturas,                0,00            
+         inclusive aqueles relativos a anos anteriores, os                0,00            
+         quais consideramos quitados até a data de                0,00            
+         vencimento da fatura de Dezembro/2022.                 0,00            
+ 
+ 
+RESUMO EM REAL
+--------------------------------------------------------------------------------
+   Saldo      Pagamento/    Compras/       Total     Lim. extra         Saldo   
+  Anterior     Créditos     Débitos          R$       utilizado      Atual - R$ 
+--------------------------------------------------------------------------------
+  4.307,33 -  -4.307,33 +   9.881,89 =    9.881,89 -       0,00 =       9.881,89
+--------------------------------------------------------------------------------
+ 
+RESUMO EM DÓLAR
+--------------------------------------------------------------------------------
+  Compras/     Outros                      Saldo       Taxa de         Saldo    
+   Saques      débitos      Créditos      Atual U$    conversão      convertido 
+--------------------------------------------------------------------------------
+      0,00 -       0,00 +       0,00 =        0,00   X   0,0000 =           0,00
+--------------------------------------------------------------------------------
+ 
+ 
+LIMITES - R$
+--------------------------------------------------------------------------------
+Total para transações à vista        : 17.112,00
+Saques                               : 17.112,00
+(Incluido no total transação à vista)
+Total para transações parceladas     :    0,00
+Crediário                            : 115.080,00
+ 
+ 
+ENCARGOS FINANCEIROS - R$              1         2
+--------------------------------------------------------------------------------
+Crédito Rotativo :                 12,48     19,98
+Crédito Parcelado:                  3,19     12,98
+Permanência      :                  1,00      1,00
+Multa            :                  2,00      2,00
+1. Para o periodo %am         
+2. Máximo próximo periodo %am 
+ 
+ 
+PONTO PRA VOCÊ/LIVELO
+--------------------------------------------------------------------------------
+    Pontuação acumulada Até 24.04.2023 :       0
+--------------------------------------------------------------------------------
+
+
+
+
+
+
+
+
+
+
