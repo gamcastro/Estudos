@@ -1554,8 +1554,14 @@ function Get-OcsComputadoresDaZona {
         $TamanhoPagina itens) ou deu erro, paramos de disparar novos lotes -
         pode sobrar 1-2 chamadas "a mais" perto do fim (paginas que ja
         passaram do total), o que e barato comparado ao ganho de tempo.
+
+        $PrefixoRede (opcional, ex: "10.198.54.") tambem inclui no resultado
+        qualquer maquina cujo ULTIMO IP CONHECIDO (hardware.IPADDR) comece
+        com esse prefixo, mesmo que o nome nao bata com nenhum padrao -
+        usado para resolver hostname pelo IP de hosts que responderam a
+        varredura mas nao tem DNS reverso/NetBIOS funcionando.
     #>
-    param([string[]]$Padroes, [int]$TamanhoPagina = 150, [int]$TimeoutSec = 30, [int]$MaxPaginas = 40, [int]$Paralelismo = 5)
+    param([string[]]$Padroes, [string]$PrefixoRede = $null, [int]$TamanhoPagina = 150, [int]$TimeoutSec = 30, [int]$MaxPaginas = 40, [int]$Paralelismo = 5)
 
     $scriptBlockPagina = {
         param($UrlBase, $Start, $Limite, $TimeoutSec)
@@ -1620,9 +1626,12 @@ function Get-OcsComputadoresDaZona {
                     $hw = $comp.hardware
                     if (-not $hw -or -not $hw.NAME) { continue }
                     $nomeUpper = $hw.NAME.ToUpper()
+                    $bateNome = $false
                     foreach ($padrao in $Padroes) {
-                        if ($nomeUpper.Contains($padrao)) { $encontrados.Add($comp); break }
+                        if ($nomeUpper.Contains($padrao)) { $bateNome = $true; break }
                     }
+                    $bateIp = $PrefixoRede -and $hw.IPADDR -and $hw.IPADDR.StartsWith($PrefixoRede)
+                    if ($bateNome -or $bateIp) { $encontrados.Add($comp) }
                 }
 
                 if ($r.Itens.Count -lt $TamanhoPagina) { $terminou = $true }
@@ -2789,14 +2798,91 @@ function Invoke-BuscarDesligadosOcs {
     $zona = [int]$numZona.Value
     $zonaPad = "{0:D3}" -f $zona
     $padroes = @("ZMA$zonaPad", "CMA$zonaPad", "ZE-$zonaPad", "ZE$zonaPad")
+    $resolucaoAtual = Resolve-RedeDaZona -Zona $zona
 
     Add-Log "=== Buscando no OCS Inventory maquinas da Zona $zonaPad que nao apareceram na varredura (paginando o inventario completo) ===" "Yellow"
     $grid.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
 
-    $comps = Get-OcsComputadoresDaZona -Padroes $padroes
-    Add-Log "$($comps.Count) maquina(s) da zona encontrada(s) no cadastro do OCS Inventory (por nome)." "Gray"
+    $comps = Get-OcsComputadoresDaZona -Padroes $padroes -PrefixoRede $resolucaoAtual.Prefixo
+    Add-Log "$($comps.Count) maquina(s) da zona encontrada(s) no cadastro do OCS Inventory (por nome ou IP)." "Gray"
 
-    # Nomes curtos (maiusculo) ja vistos online nesta varredura
+    # Preenche o Hostname de quem respondeu a varredura mas ficou "(sem
+    # resolucao de nome)" (DNS reverso/NetBIOS falharam) - cruza pelo ULTIMO
+    # IP CONHECIDO no OCS. Precisa rodar ANTES de montar $nomesOnline
+    # abaixo, senao essas maquinas (agora online, mas ainda sem nome
+    # conhecido no momento do calculo) seriam contadas de novo como
+    # "possivelmente desligadas" por engano.
+    $corrigidos = 0
+    for ($indiceResultado = 0; $indiceResultado -lt $script:Resultados.Count; $indiceResultado++) {
+        $cand = $script:Resultados[$indiceResultado]
+        if (-not $cand.Online -or ($cand.Hostname -and $cand.Hostname -ne "(sem resolucao de nome)")) { continue }
+
+        $compAchado = $null
+        foreach ($comp in $comps) {
+            if ($comp.hardware.IPADDR -eq $cand.IP -and $comp.hardware.NAME) { $compAchado = $comp; break }
+        }
+        if (-not $compAchado) { continue }
+        $hwComp = $compAchado.hardware
+
+        # Nem mutar o objeto original nem ".Copy()" + reatribuir depois
+        # funcionaram (o GetHashCode "igual" que parecia confirmar isso era
+        # um alarme falso - PSCustomObject nao tem GetHashCode confiavel
+        # para identidade). O padrao que ja e comprovadamente confiavel no
+        # resto do script e construir o objeto novo com o VALOR CERTO JA NA
+        # CRIACAO (igual aos pseudo-resultados de "Possivelmente
+        # Desligado"), entao calculamos tudo primeiro e so then construimos
+        # o literal [PSCustomObject]@{} uma unica vez.
+        $modeloNovo = $cand.Modelo
+        $biosComp = @($compAchado.bios) | Select-Object -First 1
+        if ($biosComp -and $biosComp.SMODEL -and $modeloNovo -eq "-") {
+            $modeloNovo = Resolve-ModeloAmigavel -ModeloOriginal $biosComp.SMODEL
+        }
+        $versaoSisNovo = $cand.VersaoSis
+        $registryComp = @($compAchado.registry)
+        $entradaSisComp = @($registryComp) | Where-Object { $_.NAME -eq "VERSAO_SIS" } | Select-Object -First 1
+        if ($entradaSisComp -and $entradaSisComp.REGVALUE -and $versaoSisNovo -eq "-") {
+            $versaoSisNovo = $entradaSisComp.REGVALUE
+        }
+        $pertenceZonaNovo = $cand.PertenceZonaAtual
+        if ($script:RedeCompartilhada) {
+            $pertenceZonaNovo = Test-HostnamePertenceZona -Hostname $hwComp.NAME -Zona $script:ZonaAtual
+        }
+
+        $copia = [PSCustomObject]@{
+            IP                 = $cand.IP
+            Online             = $cand.Online
+            Hostname           = $hwComp.NAME
+            TempoMs            = $cand.TempoMs
+            PossivelImpressora = $cand.PossivelImpressora
+            PortasAbertas      = $cand.PortasAbertas
+            DetectadoPor       = "$($cand.DetectadoPor) (nome via OCS Inventory)"
+            VncAtivo           = $cand.VncAtivo
+            RcIvantiAtivo      = $cand.RcIvantiAtivo
+            VersaoSis          = $versaoSisNovo
+            Modelo             = $modeloNovo
+            EhGateway          = $cand.EhGateway
+            EhNobreakCentral   = $cand.EhNobreakCentral
+            EhTelefoneVoip     = $cand.EhTelefoneVoip
+            PertenceZonaAtual  = $pertenceZonaNovo
+        }
+        foreach ($sisExtra in $script:SistemasEleitoraisExtra) {
+            $valorExtraNovo = $cand.($sisExtra.Propriedade)
+            $entradaExtraComp = @($registryComp) | Where-Object { $_.NAME -eq $sisExtra.Chave } | Select-Object -First 1
+            if ($entradaExtraComp -and $entradaExtraComp.REGVALUE -and $valorExtraNovo -eq "-") {
+                $valorExtraNovo = $entradaExtraComp.REGVALUE
+            }
+            $copia | Add-Member -NotePropertyName $sisExtra.Propriedade -NotePropertyValue $valorExtraNovo
+        }
+
+        $script:Resultados[$indiceResultado] = $copia
+        $corrigidos++
+    }
+    if ($corrigidos -gt 0) {
+        Add-Log "$corrigidos hostname(s) resolvido(s) via OCS Inventory (por ultimo IP conhecido) - DNS reverso/NetBIOS nao encontraram esses." "Cyan"
+    }
+
+    # Nomes curtos (maiusculo) ja vistos online nesta varredura (agora
+    # incluindo os que acabaram de ser resolvidos acima)
     $nomesOnline = @{}
     foreach ($r in $script:Resultados) {
         if ($r.Online -and $r.Hostname -and $r.Hostname -ne "(sem resolucao de nome)") {
