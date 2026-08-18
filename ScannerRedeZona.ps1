@@ -72,6 +72,12 @@ $script:PortasImpressora = @(9100, 515, 631)   # RAW/AppSocket, LPR, IPP
 $script:PortaVnc         = 5900
 $script:PortaRcIvanti    = 9535   # Ivanti/LANDesk Remote Control legado (RCViewer.exe)
 $script:UrlOcsApiBase    = "http://inventario.tre-ma.jus.br/ocsapi/v1"
+# Console web do OCS Inventory (diferente da API acima) - usado so para
+# montar o link direto da tela de exclusao de computador, ja que a API REST
+# do OCS so suporta GET (confirmado na doc oficial: POST/DELETE/PUT "not
+# implemented") - excluir so da pra fazer pelo console mesmo.
+$script:UrlOcsWebConsole = "https://inventario.tre-ma.jus.br/ocsreports"
+$script:MesesParaCandidatoExclusaoOcs = 6
 $script:MapaModelos = @{
     "C4400"                            = "Mini-Positivo"
     "HP Elite Mini 800 G9 Desktop PC"  = "Mini-HP"
@@ -1515,6 +1521,12 @@ function Open-RcViewer {
 # ============================================================
 # OCS INVENTORY: consulta via API REST
 # ============================================================
+# NOTA: a API REST do OCS Inventory NG so suporta GET - confirmado na
+# documentacao oficial (wiki.ocsinventory-ng.org/11.Rest-API), que lista
+# POST/DELETE/PUT como "not implemented". Ou seja, nao ha como excluir,
+# criar ou alterar registros por essa API - qualquer acao de escrita no
+# OCS (excluir maquina, etc.) precisa ser feita pelo console web mesmo.
+
 function Get-OcsComputadoresDaZona {
     <#
         Enumera as maquinas de uma zona percorrendo TODO o inventario do
@@ -2201,6 +2213,27 @@ function Invoke-AcaoEnviarCvcDrive {
     Start-ProcessoNaoElevado -Caminho $script:UrlDrivePastaCvc
 }
 
+function Invoke-AcaoAbrirExclusaoOcs {
+    <#
+        A API REST do OCS so suporta GET (confirmado na doc oficial) - nao
+        da pra excluir por ali. Em vez disso, abre direto no navegador a
+        tela "Remocao de Computadores" do console web do OCS, ja com esta
+        maquina marcada (mesma URL que o proprio OCS usa quando voce
+        seleciona um computador e clica em "Apagar" na listagem:
+        index.php?function=sup_search&head=1&idchecked=<ID>&comp=1) - falta
+        so um clique manual no botao "Apagar" daquela tela pra confirmar.
+    #>
+    param($Resultado)
+    if (-not $Resultado -or -not $Resultado.HardwareId) {
+        [System.Windows.Forms.MessageBox]::Show("Nao foi possivel identificar o ID desta maquina no OCS Inventory.", "Aviso", "OK", "Warning") | Out-Null
+        return
+    }
+
+    $url = "$($script:UrlOcsWebConsole)/index.php?function=sup_search&head=1&idchecked=$($Resultado.HardwareId)&comp=1"
+    Add-Log "Abrindo tela de remocao do OCS Inventory para '$($Resultado.Hostname)' (ID $($Resultado.HardwareId)) - clique em 'Apagar' na pagina que abrir para confirmar." "Cyan"
+    Start-ProcessoNaoElevado -Caminho $url
+}
+
 # --- Botoes inferiores ---
 $btnExportar = New-Object System.Windows.Forms.Button
 $btnExportar.Text = "Exportar CSV"
@@ -2211,37 +2244,13 @@ $btnExportar.Anchor = "Bottom,Left"
 $btnExportar.Enabled = $false
 $form.Controls.Add($btnExportar)
 
-$btnConfigVnc = New-Object System.Windows.Forms.Button
-$btnConfigVnc.Text = "Configurar VNC Viewer..."
-$btnConfigVnc.Location = New-Object System.Drawing.Point(145, 611)
-$btnConfigVnc.Width = 165
-$btnConfigVnc.Height = 28
-$btnConfigVnc.Anchor = "Bottom,Left"
-$form.Controls.Add($btnConfigVnc)
-
-$btnConfigRc = New-Object System.Windows.Forms.Button
-$btnConfigRc.Text = "Configurar RCViewer..."
-$btnConfigRc.Location = New-Object System.Drawing.Point(325, 611)
-$btnConfigRc.Width = 165
-$btnConfigRc.Height = 28
-$btnConfigRc.Anchor = "Bottom,Left"
-$form.Controls.Add($btnConfigRc)
-
-$btnConfigSnmp = New-Object System.Windows.Forms.Button
-$btnConfigSnmp.Text = "Configurar SNMP..."
-$btnConfigSnmp.Location = New-Object System.Drawing.Point(505, 611)
-$btnConfigSnmp.Width = 140
-$btnConfigSnmp.Height = 28
-$btnConfigSnmp.Anchor = "Bottom,Left"
-$form.Controls.Add($btnConfigSnmp)
-
-$btnConfigDrive = New-Object System.Windows.Forms.Button
-$btnConfigDrive.Text = "Configurar Envio Drive..."
-$btnConfigDrive.Location = New-Object System.Drawing.Point(655, 611)
-$btnConfigDrive.Width = 170
-$btnConfigDrive.Height = 28
-$btnConfigDrive.Anchor = "Bottom,Left"
-$form.Controls.Add($btnConfigDrive)
+$btnConfiguracoes = New-Object System.Windows.Forms.Button
+$btnConfiguracoes.Text = "Configuracoes..."
+$btnConfiguracoes.Location = New-Object System.Drawing.Point(145, 611)
+$btnConfiguracoes.Width = 150
+$btnConfiguracoes.Height = 28
+$btnConfiguracoes.Anchor = "Bottom,Left"
+$form.Controls.Add($btnConfiguracoes)
 
 $btnFechar = New-Object System.Windows.Forms.Button
 $btnFechar.Text = "Fechar"
@@ -2260,7 +2269,8 @@ function Add-LinhaGrid {
 
     $temNomeResolvido = $Resultado.Hostname -and $Resultado.Hostname -ne "(sem resolucao de nome)"
     $tipo =
-        if ($Resultado.PossivelmenteDesligado) { "Possivelmente Desligado" }
+        if ($Resultado.PossivelmenteDesligado -and $Resultado.CandidatoExclusaoOcs) { "Desligado - candidata a exclusao" }
+        elseif ($Resultado.PossivelmenteDesligado) { "Possivelmente Desligado" }
         elseif ($Resultado.EhGateway) { "Gateway / Roteador" }
         elseif ($Resultado.PossivelImpressora) { "Impressora Pantum?" }
         elseif ($Resultado.EhNobreakCentral) { "Nobreak Central" }
@@ -2284,7 +2294,11 @@ function Add-LinhaGrid {
     $row = $grid.Rows[$rowIndex]
     $row.Tag = $Resultado
 
-    if ($Resultado.PossivelmenteDesligado) {
+    if ($Resultado.PossivelmenteDesligado -and $Resultado.CandidatoExclusaoOcs) {
+        $row.DefaultCellStyle.BackColor = [System.Drawing.Color]::FromArgb(255, 220, 200)
+        $row.DefaultCellStyle.ForeColor = [System.Drawing.Color]::FromArgb(150, 60, 0)
+        $row.DefaultCellStyle.Font = New-Object System.Drawing.Font($grid.Font, [System.Drawing.FontStyle]::Bold)
+    } elseif ($Resultado.PossivelmenteDesligado) {
         $row.DefaultCellStyle.BackColor = [System.Drawing.Color]::FromArgb(230, 230, 230)
         $row.DefaultCellStyle.ForeColor = [System.Drawing.Color]::FromArgb(110, 110, 110)
     } elseif ($Resultado.PossivelImpressora) {
@@ -2577,55 +2591,186 @@ $btnExportar.Add_Click({
 })
 
 # ============================================================
-# EVENTO: Configurar VNC Viewer manualmente
+# JANELA UNICA DE CONFIGURACOES (VNC Viewer, RCViewer, SNMP, Envio Drive)
 # ============================================================
-$btnConfigVnc.Add_Click({
-    $ofd = New-Object System.Windows.Forms.OpenFileDialog
-    $ofd.Title = "Localizar vncviewer.exe"
-    $ofd.Filter = "Executavel (*.exe)|*.exe"
-    if ($script:VncViewerPath -and (Test-Path (Split-Path $script:VncViewerPath))) {
-        $ofd.InitialDirectory = Split-Path $script:VncViewerPath
-    }
-    if ($ofd.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
-        $script:VncViewerPath = $ofd.FileName
-        Set-Content -Path $script:ArquivoConfigVnc -Value $ofd.FileName -Encoding UTF8
-        Add-Log "VNC Viewer configurado manualmente: $($ofd.FileName)" "Cyan"
-    }
-})
+function Show-Configuracoes {
+    $dlg = New-Object System.Windows.Forms.Form
+    $dlg.Text = "Configuracoes da Ferramenta"
+    $dlg.Size = New-Object System.Drawing.Size(530, 440)
+    $dlg.StartPosition = "CenterParent"
+    $dlg.FormBorderStyle = "FixedDialog"
+    $dlg.MaximizeBox = $false
+    $dlg.MinimizeBox = $false
+    $dlg.Font = New-Object System.Drawing.Font("Segoe UI", 9)
 
-$btnConfigRc.Add_Click({
-    $ofd = New-Object System.Windows.Forms.OpenFileDialog
-    $ofd.Title = "Localizar RCViewer.exe"
-    $ofd.Filter = "Executavel (*.exe)|*.exe"
-    if ($script:RcViewerPath -and (Test-Path (Split-Path $script:RcViewerPath))) {
-        $ofd.InitialDirectory = Split-Path $script:RcViewerPath
-    }
-    if ($ofd.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
-        $script:RcViewerPath = $ofd.FileName
-        Set-Content -Path $script:ArquivoConfigRc -Value $ofd.FileName -Encoding UTF8
-        Add-Log "RCViewer configurado manualmente: $($ofd.FileName)" "Cyan"
-    }
-})
+    $tabs = New-Object System.Windows.Forms.TabControl
+    $tabs.Location = New-Object System.Drawing.Point(12, 12)
+    $tabs.Size = New-Object System.Drawing.Size(495, 335)
+    $dlg.Controls.Add($tabs)
 
-# ============================================================
-# EVENTO: Configurar comunidade SNMP
-# ============================================================
-$btnConfigSnmp.Add_Click({
-    $novaComunidade = [Microsoft.VisualBasic.Interaction]::InputBox(
-        "Comunidade SNMP v1/v2c usada pelas impressoras (padrao das Pantum do TRE-MA: public):",
-        "Configurar SNMP",
-        $script:SnmpCommunity
-    )
-    if ($novaComunidade) {
-        $script:SnmpCommunity = $novaComunidade.Trim()
-        Add-Log "Comunidade SNMP configurada: $($script:SnmpCommunity)" "Cyan"
-    }
-})
+    # --- Aba VNC Viewer ---
+    $tabVnc = New-Object System.Windows.Forms.TabPage
+    $tabVnc.Text = "VNC Viewer"
+    $tabs.TabPages.Add($tabVnc)
 
-# ============================================================
-# EVENTO: Configurar envio automatico de CVC ao Google Drive
-# ============================================================
-$btnConfigDrive.Add_Click({ [void](Read-ConfigEnvioDriveInterativo) })
+    $lblVnc = New-Object System.Windows.Forms.Label
+    $lblVnc.Text = "Caminho do vncviewer.exe (usado no botao 'Abrir VNC' de cada linha):"
+    $lblVnc.Location = New-Object System.Drawing.Point(15, 20)
+    $lblVnc.Size = New-Object System.Drawing.Size(455, 20)
+    $tabVnc.Controls.Add($lblVnc)
+
+    $txtVnc = New-Object System.Windows.Forms.TextBox
+    $txtVnc.Location = New-Object System.Drawing.Point(15, 45)
+    $txtVnc.Width = 355
+    $txtVnc.Text = $script:VncViewerPath
+    $tabVnc.Controls.Add($txtVnc)
+
+    $btnProcurarVnc = New-Object System.Windows.Forms.Button
+    $btnProcurarVnc.Text = "Procurar..."
+    $btnProcurarVnc.Location = New-Object System.Drawing.Point(378, 43)
+    $btnProcurarVnc.Width = 95
+    $btnProcurarVnc.Height = 25
+    $tabVnc.Controls.Add($btnProcurarVnc)
+    $btnProcurarVnc.Add_Click({
+        $ofd = New-Object System.Windows.Forms.OpenFileDialog
+        $ofd.Title = "Localizar vncviewer.exe"
+        $ofd.Filter = "Executavel (*.exe)|*.exe"
+        if ($txtVnc.Text -and (Test-Path $txtVnc.Text -ErrorAction SilentlyContinue)) {
+            $ofd.InitialDirectory = Split-Path $txtVnc.Text
+        }
+        if ($ofd.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { $txtVnc.Text = $ofd.FileName }
+    }.GetNewClosure())
+
+    # --- Aba RCViewer ---
+    $tabRc = New-Object System.Windows.Forms.TabPage
+    $tabRc.Text = "RCViewer"
+    $tabs.TabPages.Add($tabRc)
+
+    $lblRc = New-Object System.Windows.Forms.Label
+    $lblRc.Text = "Caminho do RCViewer.exe (Ivanti/LANDesk - botao 'Abrir RCViewer' de cada linha):"
+    $lblRc.Location = New-Object System.Drawing.Point(15, 20)
+    $lblRc.Size = New-Object System.Drawing.Size(455, 20)
+    $tabRc.Controls.Add($lblRc)
+
+    $txtRc = New-Object System.Windows.Forms.TextBox
+    $txtRc.Location = New-Object System.Drawing.Point(15, 45)
+    $txtRc.Width = 355
+    $txtRc.Text = $script:RcViewerPath
+    $tabRc.Controls.Add($txtRc)
+
+    $btnProcurarRc = New-Object System.Windows.Forms.Button
+    $btnProcurarRc.Text = "Procurar..."
+    $btnProcurarRc.Location = New-Object System.Drawing.Point(378, 43)
+    $btnProcurarRc.Width = 95
+    $btnProcurarRc.Height = 25
+    $tabRc.Controls.Add($btnProcurarRc)
+    $btnProcurarRc.Add_Click({
+        $ofd = New-Object System.Windows.Forms.OpenFileDialog
+        $ofd.Title = "Localizar RCViewer.exe"
+        $ofd.Filter = "Executavel (*.exe)|*.exe"
+        if ($txtRc.Text -and (Test-Path $txtRc.Text -ErrorAction SilentlyContinue)) {
+            $ofd.InitialDirectory = Split-Path $txtRc.Text
+        }
+        if ($ofd.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { $txtRc.Text = $ofd.FileName }
+    }.GetNewClosure())
+
+    # --- Aba SNMP ---
+    $tabSnmp = New-Object System.Windows.Forms.TabPage
+    $tabSnmp.Text = "SNMP"
+    $tabs.TabPages.Add($tabSnmp)
+
+    $lblSnmp = New-Object System.Windows.Forms.Label
+    $lblSnmp.Text = "Comunidade SNMP v1/v2c usada pelas impressoras (padrao das Pantum do TRE-MA: public):"
+    $lblSnmp.Location = New-Object System.Drawing.Point(15, 20)
+    $lblSnmp.Size = New-Object System.Drawing.Size(455, 35)
+    $tabSnmp.Controls.Add($lblSnmp)
+
+    $txtSnmp = New-Object System.Windows.Forms.TextBox
+    $txtSnmp.Location = New-Object System.Drawing.Point(15, 60)
+    $txtSnmp.Width = 200
+    $txtSnmp.Text = $script:SnmpCommunity
+    $tabSnmp.Controls.Add($txtSnmp)
+
+    # --- Aba Envio ao Google Drive ---
+    $tabDrive = New-Object System.Windows.Forms.TabPage
+    $tabDrive.Text = "Envio ao Drive"
+    $tabs.TabPages.Add($tabDrive)
+
+    $cfgDriveAtual = Get-ConfigEnvioDrive
+
+    $lblDriveUrl = New-Object System.Windows.Forms.Label
+    $lblDriveUrl.Text = "URL do Web App do Apps Script (Implantar > Nova implantacao), termina em /exec:"
+    $lblDriveUrl.Location = New-Object System.Drawing.Point(15, 20)
+    $lblDriveUrl.Size = New-Object System.Drawing.Size(455, 20)
+    $tabDrive.Controls.Add($lblDriveUrl)
+
+    $txtDriveUrl = New-Object System.Windows.Forms.TextBox
+    $txtDriveUrl.Location = New-Object System.Drawing.Point(15, 45)
+    $txtDriveUrl.Width = 455
+    $txtDriveUrl.Text = if ($cfgDriveAtual) { $cfgDriveAtual.UrlWebApp } else { "" }
+    $tabDrive.Controls.Add($txtDriveUrl)
+
+    $lblDriveToken = New-Object System.Windows.Forms.Label
+    $lblDriveToken.Text = "Token combinado com o script (mesmo valor da constante TOKEN no Apps Script):"
+    $lblDriveToken.Location = New-Object System.Drawing.Point(15, 80)
+    $lblDriveToken.Size = New-Object System.Drawing.Size(455, 20)
+    $tabDrive.Controls.Add($lblDriveToken)
+
+    $txtDriveToken = New-Object System.Windows.Forms.TextBox
+    $txtDriveToken.Location = New-Object System.Drawing.Point(15, 105)
+    $txtDriveToken.Width = 455
+    $txtDriveToken.Text = if ($cfgDriveAtual) { $cfgDriveAtual.Token } else { "" }
+    $tabDrive.Controls.Add($txtDriveToken)
+
+    # --- Botoes ---
+    $btnSalvarConfig = New-Object System.Windows.Forms.Button
+    $btnSalvarConfig.Text = "Salvar"
+    $btnSalvarConfig.Location = New-Object System.Drawing.Point(320, 358)
+    $btnSalvarConfig.Width = 90
+    $btnSalvarConfig.Height = 30
+    $btnSalvarConfig.BackColor = [System.Drawing.Color]::FromArgb(46, 125, 50)
+    $btnSalvarConfig.ForeColor = [System.Drawing.Color]::White
+    $dlg.Controls.Add($btnSalvarConfig)
+
+    $btnFecharConfig = New-Object System.Windows.Forms.Button
+    $btnFecharConfig.Text = "Fechar"
+    $btnFecharConfig.Location = New-Object System.Drawing.Point(415, 358)
+    $btnFecharConfig.Width = 90
+    $btnFecharConfig.Height = 30
+    $dlg.Controls.Add($btnFecharConfig)
+
+    $btnSalvarConfig.Add_Click({
+        $itensSalvos = New-Object System.Collections.Generic.List[string]
+
+        if ($txtVnc.Text -and $txtVnc.Text.Trim()) {
+            $script:VncViewerPath = $txtVnc.Text.Trim()
+            Set-Content -Path $script:ArquivoConfigVnc -Value $script:VncViewerPath -Encoding UTF8
+            $itensSalvos.Add("VNC Viewer")
+        }
+        if ($txtRc.Text -and $txtRc.Text.Trim()) {
+            $script:RcViewerPath = $txtRc.Text.Trim()
+            Set-Content -Path $script:ArquivoConfigRc -Value $script:RcViewerPath -Encoding UTF8
+            $itensSalvos.Add("RCViewer")
+        }
+        if ($txtSnmp.Text -and $txtSnmp.Text.Trim()) {
+            $script:SnmpCommunity = $txtSnmp.Text.Trim()
+            $itensSalvos.Add("SNMP")
+        }
+        if ($txtDriveUrl.Text.Trim() -and $txtDriveToken.Text.Trim()) {
+            Set-ConfigEnvioDrive -UrlWebApp $txtDriveUrl.Text.Trim() -Token $txtDriveToken.Text.Trim()
+            $itensSalvos.Add("Envio ao Drive")
+        }
+
+        Add-Log "Configuracoes salvas: $($itensSalvos -join ', ')." "Cyan"
+        [System.Windows.Forms.MessageBox]::Show("Configuracoes salvas.", "Concluido", "OK", "Information") | Out-Null
+    }.GetNewClosure())
+
+    $btnFecharConfig.Add_Click({ $dlg.Close() }.GetNewClosure())
+
+    [void]$dlg.ShowDialog()
+}
+
+$btnConfiguracoes.Add_Click({ Show-Configuracoes })
 
 # ============================================================
 # BUSCA DE MAQUINAS POSSIVELMENTE DESLIGADAS (cadastradas no OCS Inventory
@@ -2677,15 +2822,18 @@ function Invoke-BuscarDesligadosOcs {
 
         $ultimoContatoBruto = if ($hw.LASTDATE) { $hw.LASTDATE } elseif ($hw.LASTCOME) { $hw.LASTCOME } else { $null }
         $ultimoContato = $null
+        $candidatoExclusaoOcs = $false   # ultimo contato ha mais de X meses - possivel "lixo" pra revisar no OCS
         if ($ultimoContatoBruto) {
             $dataParseada = [DateTime]::MinValue
             if ([DateTime]::TryParseExact($ultimoContatoBruto, "yyyy-MM-dd HH:mm:ss", [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::None, [ref]$dataParseada)) {
                 $ultimoContato = $dataParseada.ToString("dd/MM/yy HH:mm:ss")
+                $candidatoExclusaoOcs = $dataParseada -lt (Get-Date).AddMonths(-$script:MesesParaCandidatoExclusaoOcs)
             } else {
                 $ultimoContato = $ultimoContatoBruto   # formato inesperado - mostra cru em vez de esconder a informacao
             }
         }
         $detectadoPor = if ($ultimoContato) { "OCS Inventory - ultimo contato $ultimoContato" } else { "OCS Inventory (sem resposta na varredura)" }
+        if ($candidatoExclusaoOcs) { $detectadoPor += " (candidata a exclusao - +$($script:MesesParaCandidatoExclusaoOcs)m sem contato)" }
 
         $pseudo = [PSCustomObject]@{
             IP                     = if ($hw.IPADDR) { $hw.IPADDR } else { "-" }
@@ -2704,6 +2852,8 @@ function Invoke-BuscarDesligadosOcs {
             EhTelefoneVoip         = $false
             PertenceZonaAtual      = $true
             PossivelmenteDesligado = $true
+            HardwareId             = $hw.ID
+            CandidatoExclusaoOcs   = $candidatoExclusaoOcs
         }
         foreach ($sis in $script:SistemasEleitoraisExtra) {
             $entradaExtra = @($registry) | Where-Object { $_.NAME -eq $sis.Chave } | Select-Object -First 1
@@ -2716,7 +2866,8 @@ function Invoke-BuscarDesligadosOcs {
 
     Reconstruir-Grid
     $grid.Cursor = [System.Windows.Forms.Cursors]::Default
-    Add-Log "=== $($script:MaquinasDesligadasOcs.Count) maquina(s) da Zona $zonaPad parecem desligadas/desconectadas (cadastradas no OCS, sem resposta na varredura) ===" "OrangeRed"
+    $qtdCandidatas = @($script:MaquinasDesligadasOcs | Where-Object { $_.CandidatoExclusaoOcs }).Count
+    Add-Log "=== $($script:MaquinasDesligadasOcs.Count) maquina(s) da Zona $zonaPad parecem desligadas/desconectadas (cadastradas no OCS, sem resposta na varredura) - $qtdCandidatas com mais de $($script:MesesParaCandidatoExclusaoOcs) meses sem contato ===" "OrangeRed"
 }
 
 # ============================================================
@@ -2806,6 +2957,9 @@ $menuContextoGrid.Add_Opening({
             $itemCvc = $menuContextoGrid.Items.Add("Enviar CVC para o Google Drive...")
             $itemCvc.Add_Click({ Invoke-AcaoEnviarCvcDrive -Resultado $r }.GetNewClosure())
         }
+    } elseif ($r.PossivelmenteDesligado -and $r.HardwareId) {
+        $itemAbrirExclusao = $menuContextoGrid.Items.Add("Abrir para Excluir no OCS Inventory...")
+        $itemAbrirExclusao.Add_Click({ Invoke-AcaoAbrirExclusaoOcs -Resultado $r }.GetNewClosure())
     }
 
     if ($menuContextoGrid.Items.Count -eq 0) { $e.Cancel = $true }
