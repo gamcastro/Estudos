@@ -106,7 +106,14 @@ $script:UrlDrivePastaCvc   = "https://drive.google.com/drive/folders/1ssTe5V1qtD
 $script:PastaLocalEnvioCvc = Join-Path $env:TEMP "CVC_GoogleDrive"
 $script:ArquivoConfigDrive = Join-Path $PSScriptRoot "drive_upload_config.json"
 
-# --- Planilha de Zonas Eleitorais (Zona -> Sede), com override local de rede ---
+# --- Planilha de Zonas Eleitorais (Zona, Sede, Rede Padrao, Substituta,
+# Observacao) - fonte unica de verdade para as redes de cada zona. A coluna
+# "Substituta" e o override temporario (ex: link caido, rede alternativa) -
+# editavel pela tela "Gerenciar Zonas", que grava de volta na PROPRIA
+# planilha via um Web App do Google Apps Script (ver
+# apps_script_atualizar_zonas.gs), assim qualquer tecnico com a ferramenta
+# ja ve a mesma informacao, sem precisar copiar arquivo de override entre
+# maquinas.
 # ATENCAO: para o link abaixo funcionar, a planilha (ou pelo menos a aba
 # "Zonas") precisa estar compartilhada como "Qualquer pessoa com o link -
 # Leitor". Isso expoe TODAS as abas do arquivo a quem tiver o link, nao so
@@ -114,9 +121,8 @@ $script:ArquivoConfigDrive = Join-Path $PSScriptRoot "drive_upload_config.json"
 # uma planilha separada e compartilhe so essa.
 $script:UrlPlanilhaZonasCSV  = "https://docs.google.com/spreadsheets/d/1_2aZhFgplRqCdPVV_lq4XJT9wgqkfbZpEFZRu1Zu9_I/export?format=csv&gid=0"
 $script:ArquivoZonasCache    = Join-Path $PSScriptRoot "zonas_cache.csv"
-$script:ArquivoOverridesRede = Join-Path $PSScriptRoot "zonas_overrides_rede.csv"
-$script:TabelaZonas          = @{}   # int (zona) -> string (sede)
-$script:TabelaOverrides      = @{}   # int (zona) -> PSCustomObject { Rede; Observacao }
+$script:ArquivoConfigZonasWebApp = Join-Path $PSScriptRoot "zonas_webapp_config.json"
+$script:TabelaZonas          = @{}   # int (zona) -> PSCustomObject { Sede; RedePadrao; Substituta; Observacao }
 $script:ZonaAtual            = 0
 $script:RedeCompartilhada    = $false   # true quando a rede da varredura atual e compartilhada entre zonas (ex: Sao Luis)
 
@@ -313,7 +319,7 @@ $numZona.Value = 1
 $form.Controls.Add($numZona)
 
 $chkFiltrarZona = New-Object System.Windows.Forms.CheckBox
-$chkFiltrarZona.Text = "Mostrar so hosts desta zona (rede compartilhada, ex: Sao Luis)"
+$chkFiltrarZona.Text = "Mostrar so hosts desta zona (rede compartilhada entre zonas, ex: mesmo predio)"
 $chkFiltrarZona.Location = New-Object System.Drawing.Point(230, 17)
 $chkFiltrarZona.AutoSize = $true
 $chkFiltrarZona.Checked = $true
@@ -472,13 +478,55 @@ function Remove-Acentos {
     return $sb.ToString().Normalize([System.Text.NormalizationForm]::FormC)
 }
 
+function ConvertTo-PrefixoRede {
+    <#
+        Converte uma rede no formato "10.198.4.0/24" (como vem da coluna
+        "Rede Padrao"/"Substituta" da planilha) para o prefixo "10.198.4."
+        que o resto da ferramenta usa internamente para montar IPs (ex:
+        "10.198.4.15"). Tambem aceita "10.198.4.0" sem mascara, ou "10.198.4"
+        (3 octetos, atalho comum). Devolve $null se vier vazio ou nao
+        reconhecer o formato.
+    #>
+    param([string]$Rede)
+    if (-not $Rede) { return $null }
+    $Rede = $Rede.Trim()
+    if (-not $Rede) { return $null }
+    if ($Rede.EndsWith(".") -and ($Rede -notmatch '/')) { return $Rede }   # ja esta no formato prefixo
+
+    $semMascara = ($Rede -split '/')[0].TrimEnd('.')
+    $partes = $semMascara -split '\.'
+    if ($partes.Count -eq 4) { return "$($partes[0]).$($partes[1]).$($partes[2])." }
+    if ($partes.Count -eq 3) { return "$($partes[0]).$($partes[1]).$($partes[2])." }
+    return $null
+}
+
+function ConvertTo-CidrRede {
+    <#
+        Normaliza o que o tecnico digita no campo "Substituta" (ex:
+        "10.50.3", "10.50.3.", "10.50.3.0/24") para o formato CIDR
+        "10.50.3.0/24", igual ao usado na coluna "Rede Padrao" da planilha -
+        mantem a planilha com formato consistente independente de como foi
+        digitado na tela.
+    #>
+    param([string]$Rede)
+    if (-not $Rede) { return "" }
+    $Rede = $Rede.Trim()
+    if (-not $Rede) { return "" }
+    $semMascara = ($Rede -split '/')[0].TrimEnd('.')
+    $partes = $semMascara -split '\.'
+    if ($partes.Count -eq 3 -or $partes.Count -eq 4) {
+        return "$($partes[0]).$($partes[1]).$($partes[2]).0/24"
+    }
+    return $Rede   # formato nao reconhecido - grava cru em vez de tentar adivinhar
+}
+
 function Import-TabelaZonas {
     <#
-        Carrega o mapeamento Zona -> Sede a partir da planilha Google Sheets
-        publicada como CSV (exige a planilha/aba compartilhada como
-        "Qualquer pessoa com o link - Leitor"). Se a busca falhar (sem
-        internet, planilha com acesso restrito, etc.), cai para o cache
-        local salvo na ultima vez que funcionou.
+        Carrega Zona -> {Sede, RedePadrao, Substituta, Observacao} a partir
+        da planilha Google Sheets publicada como CSV (exige a planilha/aba
+        compartilhada como "Qualquer pessoa com o link - Leitor"). Se a
+        busca falhar (sem internet, planilha com acesso restrito, etc.),
+        cai para o cache local salvo na ultima vez que funcionou.
     #>
     param([switch]$ForcarCache)
 
@@ -519,62 +567,73 @@ function Import-TabelaZonas {
     foreach ($l in $linhas) {
         $numZona = 0
         if ([int]::TryParse($l.'Zona Eleitoral', [ref]$numZona)) {
-            $script:TabelaZonas[$numZona] = $l.Sede
+            $script:TabelaZonas[$numZona] = [PSCustomObject]@{
+                Sede       = $l.Sede
+                RedePadrao = $l.'Rede Padrão'
+                Substituta = $l.Substituta
+                Observacao = $l.'Observação'
+            }
         }
     }
     return $true
 }
 
-function Import-TabelaOverrides {
-    $script:TabelaOverrides = @{}
-    if (-not (Test-Path $script:ArquivoOverridesRede)) { return }
-    $linhas = Import-Csv -Path $script:ArquivoOverridesRede
-    foreach ($l in $linhas) {
-        $numZona = 0
-        if ([int]::TryParse($l.Zona, [ref]$numZona)) {
-            $script:TabelaOverrides[$numZona] = [PSCustomObject]@{ Rede = $l.Rede; Observacao = $l.Observacao }
-        }
-    }
-}
-
-function Save-TabelaOverrides {
-    $linhas = @(
-        foreach ($zona in ($script:TabelaOverrides.Keys | Sort-Object)) {
-            [PSCustomObject]@{
-                Zona       = $zona
-                Rede       = $script:TabelaOverrides[$zona].Rede
-                Observacao = $script:TabelaOverrides[$zona].Observacao
-            }
-        }
-    )
-    if ($linhas.Count -gt 0) {
-        $linhas | Export-Csv -Path $script:ArquivoOverridesRede -NoTypeInformation -Encoding UTF8
-    } elseif (Test-Path $script:ArquivoOverridesRede) {
-        Remove-Item $script:ArquivoOverridesRede -Force
-    }
-}
-
 function Resolve-RedeDaZona {
     <#
         Decide o prefixo de rede a varrer para uma zona, nesta ordem de
-        prioridade: (1) override manual (link temporario), (2) rede fixa de
-        Sao Luis (10.11.81.), (3) padrao do interior (10.198.<zona>.).
+        prioridade: (1) coluna "Substituta" da planilha (override temporario,
+        editavel pela tela Gerenciar Zonas), (2) coluna "Rede Padrao" da
+        planilha, (3) se a planilha nao tiver essa zona ou vier com as
+        colunas de rede vazias, calcula como antes (10.11.81. para Sao
+        Luis, 10.198.<zona>. para o resto) - assim a ferramenta continua
+        funcionando mesmo com a planilha incompleta ou fora do ar.
     #>
     param([int]$Zona)
 
-    $sede = $script:TabelaZonas[$Zona]
+    $zonaInfo = $script:TabelaZonas[$Zona]
+    $sede = if ($zonaInfo) { $zonaInfo.Sede } else { $null }
 
-    if ($script:TabelaOverrides.ContainsKey($Zona)) {
-        $ov = $script:TabelaOverrides[$Zona]
-        return [PSCustomObject]@{ Prefixo = $ov.Rede; Origem = "Override temporario"; Sede = $sede }
+    $prefixoSubstituta = if ($zonaInfo) { ConvertTo-PrefixoRede $zonaInfo.Substituta } else { $null }
+    if ($prefixoSubstituta) {
+        return [PSCustomObject]@{ Prefixo = $prefixoSubstituta; Origem = "Substituta (planilha)"; Sede = $sede; Observacao = $zonaInfo.Observacao; EhSubstituta = $true }
+    }
+
+    $prefixoPadrao = if ($zonaInfo) { ConvertTo-PrefixoRede $zonaInfo.RedePadrao } else { $null }
+    if ($prefixoPadrao) {
+        return [PSCustomObject]@{ Prefixo = $prefixoPadrao; Origem = "Rede Padrao (planilha)"; Sede = $sede; Observacao = $null; EhSubstituta = $false }
     }
 
     $sedeSemAcento = (Remove-Acentos $sede).ToUpper().Trim()
     if ($sedeSemAcento -eq "SAO LUIS") {
-        return [PSCustomObject]@{ Prefixo = "10.11.81."; Origem = "Sao Luis (rede fixa)"; Sede = $sede }
+        return [PSCustomObject]@{ Prefixo = "10.11.81."; Origem = "Sao Luis (calculado, planilha incompleta)"; Sede = $sede; Observacao = $null; EhSubstituta = $false }
     }
 
-    return [PSCustomObject]@{ Prefixo = "10.198.$Zona."; Origem = "Padrao interior"; Sede = $sede }
+    return [PSCustomObject]@{ Prefixo = "10.198.$Zona."; Origem = "Padrao interior (calculado, planilha incompleta)"; Sede = $sede; Observacao = $null; EhSubstituta = $false }
+}
+
+function Test-RedeEhCompartilhada {
+    <#
+        Uma rede e "compartilhada" quando mais de uma zona eleitoral resolve
+        para o mesmo prefixo - normalmente porque varias zonas dividem o
+        mesmo predio/rede (ex: zonas 004/005/006 todas atendidas por
+        10.198.4.0/24, a rede da zona mais baixa do grupo; ou as zonas de
+        Sao Luis, todas em 10.11.81.0/24). Detectado dinamicamente
+        percorrendo a planilha (via Resolve-RedeDaZona de cada zona) em vez
+        de fixo so para Sao Luis - cobre qualquer grupo que a planilha
+        descrever, sem precisar hardcodar cada caso aqui no script.
+    #>
+    param([string]$Prefixo)
+    if (-not $Prefixo) { return $false }
+
+    $contagem = 0
+    foreach ($z in $script:TabelaZonas.Keys) {
+        $res = Resolve-RedeDaZona -Zona $z
+        if ($res.Prefixo -eq $Prefixo) {
+            $contagem++
+            if ($contagem -gt 1) { return $true }
+        }
+    }
+    return $false
 }
 
 function Test-HostnamePertenceZona {
@@ -1582,10 +1641,13 @@ function Update-LabelSedeInfo {
     $sedeTxt = if ($resolucao.Sede) { $resolucao.Sede } else { "(nao encontrada na planilha)" }
 
     $texto = "ZE $zonaTxt $sedeTxt   Rede a varrer: $($resolucao.Prefixo)0/24"
-    if ($resolucao.Origem -eq "Override temporario") { $texto += "   (OVERRIDE TEMPORARIO)" }
+    if ($resolucao.EhSubstituta) {
+        $texto += "   (SUBSTITUTA)"
+        if ($resolucao.Observacao) { $texto += " - $($resolucao.Observacao)" }
+    }
     $lblSedeInfo.Text = $texto
 
-    if ($resolucao.Origem -eq "Override temporario") {
+    if ($resolucao.EhSubstituta) {
         $lblSedeInfo.ForeColor = [System.Drawing.Color]::FromArgb(200, 120, 0)
     } elseif (-not $resolucao.Sede) {
         $lblSedeInfo.ForeColor = [System.Drawing.Color]::Gray
@@ -1603,7 +1665,7 @@ function Atualizar-MaximoZona {
 
 function Show-GerenciarZonas {
     $dlg = New-Object System.Windows.Forms.Form
-    $dlg.Text = "Gerenciar Zonas Eleitorais - Redes e Overrides"
+    $dlg.Text = "Gerenciar Zonas Eleitorais - Redes e Substitutas (planilha)"
     $dlg.Size = New-Object System.Drawing.Size(780, 620)
     $dlg.MinimumSize = New-Object System.Drawing.Size(650, 400)
     $dlg.StartPosition = "CenterParent"
@@ -1651,9 +1713,9 @@ function Show-GerenciarZonas {
     }
     Add-ColunaGridZonas "Zona" "Zona" 55 $true
     Add-ColunaGridZonas "Sede" "Sede" 160 $true
-    Add-ColunaGridZonas "RedePadrao" "Rede Padrao" 160 $true
-    Add-ColunaGridZonas "Override" "Override (ex: 10.50.3.)" 150 $false
-    Add-ColunaGridZonas "Observacao" "Observacao" 190 $false
+    Add-ColunaGridZonas "RedePadrao" "Rede Padrao" 150 $true
+    Add-ColunaGridZonas "Override" "Substituta (ex: 10.50.3.0/24)" 170 $false
+    Add-ColunaGridZonas "Observacao" "Observacao" 160 $false
 
     $dlg.Controls.Add($gridZonas)
 
@@ -1666,20 +1728,25 @@ function Show-GerenciarZonas {
         $GridZonas.Rows.Clear()
         $filtroLower = $Filtro.Trim().ToLower()
         foreach ($z in ($script:TabelaZonas.Keys | Sort-Object)) {
-            $sede = $script:TabelaZonas[$z]
+            $zonaInfo = $script:TabelaZonas[$z]
+            $sede = $zonaInfo.Sede
             if ($filtroLower) {
                 $bate = ("$z".Contains($filtroLower)) -or ($sede -and $sede.ToLower().Contains($filtroLower))
                 if (-not $bate) { continue }
             }
 
-            $sedeSemAcento = (Remove-Acentos $sede).ToUpper().Trim()
-            $redePadraoTxt = if ($sedeSemAcento -eq "SAO LUIS") { "10.11.81.0/24 (Sao Luis)" } else { "10.198.$z.0/24" }
+            $redePadraoTxt = if ($zonaInfo.RedePadrao) {
+                $zonaInfo.RedePadrao
+            } else {
+                $sedeSemAcento = (Remove-Acentos $sede).ToUpper().Trim()
+                if ($sedeSemAcento -eq "SAO LUIS") { "10.11.81.0/24 (calculado)" } else { "10.198.$z.0/24 (calculado)" }
+            }
 
-            $overrideAtual = if ($script:TabelaOverrides.ContainsKey($z)) { $script:TabelaOverrides[$z].Rede } else { "" }
-            $obsAtual = if ($script:TabelaOverrides.ContainsKey($z)) { $script:TabelaOverrides[$z].Observacao } else { "" }
+            $substitutaAtual = if ($zonaInfo.Substituta) { $zonaInfo.Substituta } else { "" }
+            $obsAtual = if ($zonaInfo.Observacao) { $zonaInfo.Observacao } else { "" }
 
-            $rowIndex = $GridZonas.Rows.Add("$z", $sede, $redePadraoTxt, $overrideAtual, $obsAtual)
-            if ($overrideAtual) {
+            $rowIndex = $GridZonas.Rows.Add("$z", $sede, $redePadraoTxt, $substitutaAtual, $obsAtual)
+            if ($substitutaAtual) {
                 $GridZonas.Rows[$rowIndex].DefaultCellStyle.BackColor = [System.Drawing.Color]::FromArgb(255, 245, 220)
             }
         }
@@ -1704,15 +1771,15 @@ function Show-GerenciarZonas {
     }.GetNewClosure())
 
     $lblAjuda = New-Object System.Windows.Forms.Label
-    $lblAjuda.Text = "Preencha 'Override' (ex: 10.50.3.) para forcar uma rede diferente da padrao nesta zona (ex: link temporario por queda do link principal). Deixe em branco para usar a rede padrao."
+    $lblAjuda.Text = "Preencha 'Substituta' (ex: 10.50.3 ou 10.50.3.0/24) para forcar uma rede diferente da padrao nesta zona (ex: link temporario por queda do link principal). Deixe em branco para usar a rede padrao. Salvar grava direto na planilha do Google - qualquer tecnico com a ferramenta ja ve a mudanca."
     $lblAjuda.Location = New-Object System.Drawing.Point(180, 520)
-    $lblAjuda.Size = New-Object System.Drawing.Size(410, 45)
+    $lblAjuda.Size = New-Object System.Drawing.Size(410, 60)
     $lblAjuda.Anchor = "Bottom,Left"
     $lblAjuda.ForeColor = [System.Drawing.Color]::Gray
     $dlg.Controls.Add($lblAjuda)
 
     $btnSalvar = New-Object System.Windows.Forms.Button
-    $btnSalvar.Text = "Salvar Overrides"
+    $btnSalvar.Text = "Salvar na Planilha"
     $btnSalvar.Location = New-Object System.Drawing.Point(15, 520)
     $btnSalvar.Width = 150
     $btnSalvar.Height = 30
@@ -1730,23 +1797,62 @@ function Show-GerenciarZonas {
     $dlg.Controls.Add($btnFecharGz)
 
     $btnSalvar.Add_Click({
+        $cfgZonas = Get-ConfigZonasWebApp
+        if (-not $cfgZonas) { $cfgZonas = Read-ConfigZonasWebAppInterativo }
+        if (-not $cfgZonas) { return }
+
+        $alterados = New-Object System.Collections.Generic.List[object]
         foreach ($row in $gridZonas.Rows) {
             $z = [int]$row.Cells["Zona"].Value
-            $overrideVal = "$($row.Cells["Override"].Value)".Trim()
-            $obsVal = "$($row.Cells["Observacao"].Value)".Trim()
+            $substitutaGrid = ConvertTo-CidrRede "$($row.Cells["Override"].Value)"
+            $obsGrid = "$($row.Cells["Observacao"].Value)".Trim()
 
-            if ($overrideVal) {
-                if (-not $overrideVal.EndsWith(".")) { $overrideVal = "$overrideVal." }
-                $script:TabelaOverrides[$z] = [PSCustomObject]@{ Rede = $overrideVal; Observacao = $obsVal }
-            } elseif ($script:TabelaOverrides.ContainsKey($z)) {
-                $script:TabelaOverrides.Remove($z)
+            $zonaInfo = $script:TabelaZonas[$z]
+            $substitutaAtual = if ($zonaInfo -and $zonaInfo.Substituta) { $zonaInfo.Substituta.Trim() } else { "" }
+            $obsAtual = if ($zonaInfo -and $zonaInfo.Observacao) { $zonaInfo.Observacao.Trim() } else { "" }
+
+            if ($substitutaGrid -ne $substitutaAtual -or $obsGrid -ne $obsAtual) {
+                $alterados.Add([PSCustomObject]@{ Zona = $z; Substituta = $substitutaGrid; Observacao = $obsGrid })
             }
         }
-        Save-TabelaOverrides
-        Add-Log "Overrides de rede salvos ($($script:TabelaOverrides.Count) zona(s) com override ativo)." "Cyan"
+
+        if ($alterados.Count -eq 0) {
+            [System.Windows.Forms.MessageBox]::Show("Nenhuma alteracao para salvar.", "Aviso", "OK", "Information") | Out-Null
+            return
+        }
+
+        $dlg.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
+        $sucesso = 0
+        $falha = 0
+        foreach ($alt in $alterados) {
+            $ok = Send-AtualizacaoZonaViaAppsScript -Config $cfgZonas -Zona $alt.Zona -Substituta $alt.Substituta -Observacao $alt.Observacao
+            if ($ok) {
+                $sucesso++
+                if ($script:TabelaZonas.ContainsKey($alt.Zona)) {
+                    $script:TabelaZonas[$alt.Zona].Substituta = $alt.Substituta
+                    $script:TabelaZonas[$alt.Zona].Observacao = $alt.Observacao
+                }
+            } else {
+                $falha++
+            }
+        }
+        $dlg.Cursor = [System.Windows.Forms.Cursors]::Default
+
+        Add-Log "Planilha de zonas atualizada: $sucesso zona(s) salva(s)$(if ($falha -gt 0) { ", $falha falharam (ver log)" })." "Cyan"
+        if ($sucesso -gt 0) {
+            # Rebusca a planilha de verdade (mesmo mecanismo do botao
+            # "Atualizar da Planilha") em vez de confiar so na atualizacao
+            # em memoria - garante que a tela mostra exatamente o que esta
+            # gravado, sem depender de nenhum passo intermediario.
+            [void](Import-TabelaZonas)
+            Atualizar-MaximoZona
+        }
         Update-LabelSedeInfo
         & $populaGridZonas -GridZonas $gridZonas -LblContagem $lblContagem -Filtro $txtFiltro.Text
-        [System.Windows.Forms.MessageBox]::Show("Overrides salvos.", "OK", "OK", "Information") | Out-Null
+
+        $msg = "$sucesso zona(s) salva(s) na planilha."
+        if ($falha -gt 0) { $msg += "`r`n$falha falharam - ver log da janela principal." }
+        [System.Windows.Forms.MessageBox]::Show($msg, "Concluido", "OK", "Information") | Out-Null
     }.GetNewClosure())
 
     $btnFecharGz.Add_Click({ $dlg.Close() }.GetNewClosure())
@@ -1886,6 +1992,93 @@ function Read-ConfigEnvioDriveInterativo {
     Set-ConfigEnvioDrive -UrlWebApp $url.Trim() -Token $token.Trim()
     Add-Log "Configuracao de envio automatico ao Google Drive salva." "Cyan"
     return (Get-ConfigEnvioDrive)
+}
+
+# ============================================================
+# CONFIGURACAO DE ATUALIZACAO DA PLANILHA DE ZONAS (Web App do Apps Script)
+# ============================================================
+function Get-ConfigZonasWebApp {
+    if (-not (Test-Path $script:ArquivoConfigZonasWebApp)) { return $null }
+    try {
+        $cfg = Get-Content -Path $script:ArquivoConfigZonasWebApp -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($cfg.UrlWebApp -and $cfg.Token) { return $cfg }
+    } catch {}
+    return $null
+}
+
+function Set-ConfigZonasWebApp {
+    param([string]$UrlWebApp, [string]$Token)
+    [PSCustomObject]@{ UrlWebApp = $UrlWebApp; Token = $Token } |
+        ConvertTo-Json | Set-Content -Path $script:ArquivoConfigZonasWebApp -Encoding UTF8
+}
+
+function Read-ConfigZonasWebAppInterativo {
+    <#
+        Pede a URL do Web App (Apps Script) que atualiza a planilha de zonas
+        e o token combinado, pre-preenchendo com o que ja estiver salvo (se
+        houver). Devolve $null se o usuario cancelar.
+    #>
+    $atual = Get-ConfigZonasWebApp
+
+    $url = [Microsoft.VisualBasic.Interaction]::InputBox(
+        "URL do Web App do Google Apps Script para ATUALIZAR a planilha de zonas (Implantar > Nova implantacao > Aplicativo da web), termina em /exec:`r`n`r`nVer instrucoes em apps_script_atualizar_zonas.gs.",
+        "Configurar Atualizacao da Planilha de Zonas - URL",
+        $(if ($atual) { $atual.UrlWebApp } else { "" })
+    )
+    if (-not $url) { return $null }
+
+    $token = [Microsoft.VisualBasic.Interaction]::InputBox(
+        "Token combinado com o script (mesmo valor da constante TOKEN no Apps Script):",
+        "Configurar Atualizacao da Planilha de Zonas - Token",
+        $(if ($atual) { $atual.Token } else { "" })
+    )
+    if (-not $token) { return $null }
+
+    Set-ConfigZonasWebApp -UrlWebApp $url.Trim() -Token $token.Trim()
+    Add-Log "Configuracao de atualizacao da planilha de zonas salva." "Cyan"
+    return (Get-ConfigZonasWebApp)
+}
+
+function Send-AtualizacaoZonaViaAppsScript {
+    <#
+        Manda a Substituta/Observacao de uma zona por HTTP POST ao Web App
+        do Apps Script, que grava direto nas colunas D/E da linha
+        correspondente na planilha "Zonas". Devolve $true/$false - quem
+        chama decide o que fazer em caso de falha (a mudanca so fica
+        aplicada na planilha se devolver $true).
+    #>
+    param($Config, [int]$Zona, [string]$Substituta, [string]$Observacao)
+
+    $zonaPad = "{0:D3}" -f $Zona
+    try {
+        $corpo = @{ token = $Config.Token; zona = $zonaPad; rede = $Substituta; observacao = $Observacao } | ConvertTo-Json -Compress
+        $resp = Invoke-RestMethod -Uri $Config.UrlWebApp -Method Post -Body $corpo -ContentType "application/json" -TimeoutSec 20
+    } catch {
+        # O Web App do Apps Script as vezes devolve erro HTTP (ex: 404) no
+        # redirecionamento interno da resposta (script.google.com ->
+        # script.googleusercontent.com) MESMO quando o doPost ja gravou
+        # certinho - confirmado na pratica (planilha correta, POST reportou
+        # erro). Por isso, antes de considerar falha de verdade, confere se
+        # o valor foi mesmo gravado buscando a planilha de novo.
+        Add-Log "[AVISO] Erro HTTP ao atualizar zona ${zonaPad}: $($_.Exception.Message) - conferindo se a gravacao aconteceu mesmo assim..." "Yellow"
+        if (Import-TabelaZonas) {
+            $zonaInfo = $script:TabelaZonas[$Zona]
+            $substitutaGravada = if ($zonaInfo -and $zonaInfo.Substituta) { $zonaInfo.Substituta.Trim() } else { "" }
+            $obsGravada = if ($zonaInfo -and $zonaInfo.Observacao) { $zonaInfo.Observacao.Trim() } else { "" }
+            if ($substitutaGravada -eq $Substituta.Trim() -and $obsGravada -eq $Observacao.Trim()) {
+                Add-Log "Confirmado: zona $zonaPad foi gravada na planilha apesar do erro HTTP (falso alarme conhecido do Apps Script)." "Cyan"
+                return $true
+            }
+        }
+        Add-Log "[ERRO] Falha ao atualizar zona $zonaPad na planilha: $($_.Exception.Message)" "OrangeRed"
+        return $false
+    }
+
+    if (-not $resp.ok) {
+        Add-Log "[ERRO] Planilha recusou atualizar a zona ${zonaPad}: $($resp.erro)" "OrangeRed"
+        return $false
+    }
+    return $true
 }
 
 function Send-ArquivoParaGoogleDriveViaAppsScript {
@@ -2287,7 +2480,11 @@ $btnIniciar.Add_Click({
     $baseIP = $resolucao.Prefixo
 
     $script:ZonaAtual = $zona
-    $script:RedeCompartilhada = ($resolucao.Origem -eq "Sao Luis (rede fixa)")
+    # "Rede compartilhada" = a mesma rede /24 atende mais de uma zona ao
+    # mesmo tempo (varias zonas no mesmo predio, ex: 004/005/006 ou as
+    # zonas de Sao Luis) - detectado dinamicamente a partir da planilha,
+    # nao mais fixo so para Sao Luis.
+    $script:RedeCompartilhada = Test-RedeEhCompartilhada -Prefixo $resolucao.Prefixo
 
     $grid.Rows.Clear()
     $rtbLog.Clear()
@@ -2626,14 +2823,14 @@ $form.Add_FormClosing({
 })
 
 # ============================================================
-# INICIALIZACAO: carrega a planilha de zonas e os overrides locais
-# de rede antes de exibir a janela
+# INICIALIZACAO: carrega a planilha de zonas (Sede, Rede Padrao,
+# Substituta, Observacao) antes de exibir a janela
 # ============================================================
 Add-Log "Carregando planilha de zonas eleitorais..." "Gray"
 $okZonasInicial = Import-TabelaZonas
-Import-TabelaOverrides
 if ($okZonasInicial) {
-    Add-Log "$($script:TabelaZonas.Count) zona(s) carregada(s). $($script:TabelaOverrides.Count) override(s) de rede ativo(s)." "Cyan"
+    $qtdSubstitutas = @($script:TabelaZonas.Values | Where-Object { $_.Substituta }).Count
+    Add-Log "$($script:TabelaZonas.Count) zona(s) carregada(s). $qtdSubstitutas com rede substituta ativa." "Cyan"
     Atualizar-MaximoZona
 }
 Update-LabelSedeInfo
