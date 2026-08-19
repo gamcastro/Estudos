@@ -1014,7 +1014,7 @@ function Invoke-DownloadArquivoComProgresso {
             $cronometro = [System.Diagnostics.Stopwatch]::StartNew()
 
             while (($lidos = $streamResposta.Read($buffer, 0, $buffer.Length)) -gt 0) {
-                $streamArquivo.Write($buffer, 0, $lidos)
+                Write-BlocoStreamComDoEvents -Stream $streamArquivo -Buffer $buffer -Count $lidos
                 $totalLido += $lidos
 
                 if ($totalBytes -gt 0) {
@@ -1240,6 +1240,28 @@ function Get-StatusPacoteNoDestino {
     return [PSCustomObject]@{ Existe = $false; NomeConhecido = [bool]$nomeConhecido; Tamanho = $null; TamanhoConfere = $null; Data = $null; ArquivoDestino = $null; PastaDestinoUnc = $pastaDestinoUnc; ForaDoPadrao = $false }
 }
 
+function Write-BlocoStreamComDoEvents {
+    <#
+        Escreve um bloco no stream de forma ASSINCRONA (BeginWrite/EndWrite),
+        bombeando DoEvents a cada 100ms enquanto espera o Write terminar -
+        em vez de um Write() sincrono comum, que bloqueia a thread da UI
+        ATE a rede confirmar aquele bloco inteiro. Num link de zona
+        instavel, um unico bloco de 256KB pode levar varios segundos pra
+        confirmar - e nesse intervalo, com Write() sincrono, NENHUM
+        DoEvents roda, entao o Windows marca a janela como "Not
+        Responding" ate aquele bloco especifico terminar (mesmo com
+        DoEvents sendo chamado logo depois de CADA bloco - o problema e
+        DURANTE um bloco lento, nao entre blocos).
+    #>
+    param([System.IO.Stream]$Stream, [byte[]]$Buffer, [int]$Count)
+
+    $resultadoAsync = $Stream.BeginWrite($Buffer, 0, $Count, $null, $null)
+    while (-not $resultadoAsync.AsyncWaitHandle.WaitOne(100)) {
+        [System.Windows.Forms.Application]::DoEvents()
+    }
+    $Stream.EndWrite($resultadoAsync)
+}
+
 function Copy-ArquivoComProgresso {
     <#
         Copia um arquivo local pro destino (UNC do InstSeg) em blocos de
@@ -1266,7 +1288,7 @@ function Copy-ArquivoComProgresso {
             $cronometro = [System.Diagnostics.Stopwatch]::StartNew()
 
             while (($lidos = $streamOrigem.Read($buffer, 0, $buffer.Length)) -gt 0) {
-                $streamDestino.Write($buffer, 0, $lidos)
+                Write-BlocoStreamComDoEvents -Stream $streamDestino -Buffer $buffer -Count $lidos
                 $totalCopiado += $lidos
 
                 if ($totalBytes -gt 0) {
@@ -1408,8 +1430,36 @@ function Invoke-AcaoBaixarPacote {
         # copia pra hash levaria tanto tempo quanto a copia em si em
         # pacotes de 500MB. O botao "Verificar Hash" na janela de Pacotes
         # faz a conferencia forte (hash completo), sob demanda.
-        $tamanhoLocal = (Get-Item $caminhos.ArquivoLocal).Length
-        $tamanhoRemoto = (Get-Item $arquivoDestinoUnc).Length
+        #
+        # Os dois Get-Item (local + remoto/UNC) rodam num runspace em
+        # segundo plano, com a thread principal so bombeando DoEvents
+        # enquanto espera - mesmo padrao ja usado pra listar o InstSeg em
+        # Show-JanelaPacotes. Get-Item no arquivo remoto e uma chamada de
+        # rede (SMB) que pode demorar alguns segundos num link de zona
+        # ruim; rodando direto na thread da UI (sem DoEvents no meio), a
+        # janela ficava "Not Responding" bem nesse intervalo, entre o
+        # ultimo % logado e a caixa de mensagem final.
+        $scriptBlockChecarTamanhos = {
+            param($CaminhoLocal, $CaminhoRemoto)
+            [PSCustomObject]@{
+                TamanhoLocal  = (Get-Item -Path $CaminhoLocal).Length
+                TamanhoRemoto = (Get-Item -Path $CaminhoRemoto).Length
+            }
+        }
+        $psChecagem = [powershell]::Create()
+        try {
+            [void]$psChecagem.AddScript($scriptBlockChecarTamanhos).AddArgument($caminhos.ArquivoLocal).AddArgument($arquivoDestinoUnc)
+            $handleChecagem = $psChecagem.BeginInvoke()
+            while (-not $handleChecagem.IsCompleted) {
+                [System.Windows.Forms.Application]::DoEvents()
+                Start-Sleep -Milliseconds 50
+            }
+            $resultadoChecagem = $psChecagem.EndInvoke($handleChecagem)
+        } finally {
+            $psChecagem.Dispose()
+        }
+        $tamanhoLocal = $resultadoChecagem.TamanhoLocal
+        $tamanhoRemoto = $resultadoChecagem.TamanhoRemoto
         $bateTamanho = $tamanhoLocal -eq $tamanhoRemoto
 
         if ($bateTamanho) {
