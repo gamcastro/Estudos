@@ -67,6 +67,51 @@ $script:Total        = 0
 $script:Escaneando   = $false
 $script:VncViewerPath = $null
 
+# Controles da barra de progresso da janela "Pacotes de Instalacao" (ver
+# Show-JanelaPacotes) - ficam em $script: pra esse callback poder ser
+# definido UMA VEZ SO, em nivel de script (sem closure nenhuma), e
+# continuar funcionando corretamente nao importa de qual funcao/scriptblock
+# aninhado seja invocado depois (Invoke-AcaoBaixarPacote ->
+# Invoke-DownloadArquivoComProgresso / Copy-ArquivoComProgresso) - dentro
+# de FUNCOES normais (nao-closure), $script: sempre resolve certo contra
+# este escopo aqui.
+#
+# CUIDADO ao usar essas variaveis $script: DENTRO de um scriptblock que
+# foi criado com .GetNewClosure() (ex: os handlers de clique da propria
+# Show-JanelaPacotes): confirmado na pratica que .GetNewClosure() cria um
+# escopo "$script:" PROPRIO/ISOLADO pro scriptblock resultante, separado
+# do $script: deste arquivo - variaveis LOCAIS (sem prefixo) capturam
+# certo (ex: $dlg), mas "$script:barraProgressoPacoteAtual" ali dentro
+# aponta pro $script: isolado do closure (sempre $null), nao pra este
+# aqui, mesmo tendo sido atribuida segundos antes. Dava "The property
+# 'Value' cannot be found on this object" (ou seja, chegava $null). A
+# solucao dentro de um .GetNewClosure() e copiar pra um alias LOCAL (ex:
+# "$barraProgressoLocal = $script:barraProgressoPacoteAtual") ANTES do
+# .GetNewClosure() e usar o alias local no corpo do scriptblock.
+$script:barraProgressoPacoteAtual = $null
+$script:lblProgressoPacoteAtual = $null
+$script:AoAtualizarProgressoPacoteCallback = {
+    <#
+        Alem de mudar .Value/.Text, forca .Refresh() (repintura SINCRONA,
+        imediata) em cada controle - so trocar a propriedade e chamar
+        DoEvents() nao bastou na pratica: num loop rapido (muitas
+        atualizacoes por segundo em link veloz), a mensagem de repintura
+        podia nunca "vencer a fila" do DoEvents a tempo de aparecer na
+        tela antes da proxima rodada. .Refresh() pinta na hora, sem
+        depender da fila de mensagens.
+    #>
+    param($Percent, $TextoStatus)
+    if ($script:barraProgressoPacoteAtual) {
+        $script:barraProgressoPacoteAtual.Value = [Math]::Min([Math]::Max([int]$Percent, 0), 100)
+        $script:barraProgressoPacoteAtual.Refresh()
+    }
+    if ($script:lblProgressoPacoteAtual) {
+        $script:lblProgressoPacoteAtual.Text = $TextoStatus
+        $script:lblProgressoPacoteAtual.Refresh()
+    }
+    [System.Windows.Forms.Application]::DoEvents()
+}
+
 $script:PortasFallback   = @(445, 9100, 631)   # usadas quando o ICMP esta bloqueado
 $script:PortasImpressora = @(9100, 515, 631)   # RAW/AppSocket, LPR, IPP
 $script:PortaVnc         = 5900
@@ -87,12 +132,33 @@ $script:MapaModelos = @{
 
 # Sistemas eleitorais adicionais (alem do VERSAO_SIS), lidos da mesma secao
 # "registry" do OCS Inventory (HKLM\SOFTWARE\Sistemas Eleitorais\...). Cada
-# entrada aqui vira automaticamente uma coluna na grade e e resolvida durante
-# a propria varredura (dentro do $scriptBlock por IP).
+# entrada aqui e resolvida automaticamente durante a propria varredura
+# (dentro do $scriptBlock por IP), independente de aparecer ou nao como
+# coluna na grade principal.
+# ComNomeAmigavel controla se essa coluna participa do mapeamento por nome
+# amigavel da planilha de Versoes de Sistemas (ver Resolve-NomeAmigavelVersao)
+# - BitLocker nao tem "nome de praia" como os sistemas eleitorais, entao fica
+# de fora; SIS (tratado a parte, nao faz parte desta lista) tambem fica fora.
+# NaGradePrincipal controla se vira coluna na tela principal - PADA-UE e FBR
+# ficam de fora por enquanto (dado ainda e coletado normalmente, so nao
+# aparece na grade - a ideia e mostrar via menu de contexto mais pra frente).
 $script:SistemasEleitoraisExtra = @(
-    [PSCustomObject]@{ Chave = "BITLOCKER"; Propriedade = "VersaoBitlocker"; Coluna = "Bitlocker"; Titulo = "BitLocker"; Largura = 90 }
-    [PSCustomObject]@{ Chave = "GEDAI";     Propriedade = "VersaoGedai";     Coluna = "Gedai";     Titulo = "GEDAI";     Largura = 80 }
-    [PSCustomObject]@{ Chave = "HOLOCRON";  Propriedade = "VersaoHolocron";  Coluna = "Holocron";  Titulo = "Holocron";  Largura = 90 }
+    [PSCustomObject]@{ Chave = "BITLOCKER"; Propriedade = "VersaoBitlocker"; Coluna = "Bitlocker"; Titulo = "BitLocker"; Largura = 90; ComNomeAmigavel = $false; NaGradePrincipal = $true }
+    # Chave interna continua "GEDAI" (e o que o OCS Inventory reporta no
+    # registro, confirmado na pratica) - o produto so passou a se chamar
+    # "GEDAI-UE" comercialmente, entao o Titulo (nome de EXIBICAO) foi
+    # atualizado, mas a Chave (usada pra bater com o registro do OCS e com
+    # a coluna "Sistema" da planilha) fica igual.
+    [PSCustomObject]@{ Chave = "GEDAI";     Propriedade = "VersaoGedai";     Coluna = "Gedai";     Titulo = "GEDAI-UE";  Largura = 150; ComNomeAmigavel = $true; NaGradePrincipal = $true }
+    [PSCustomObject]@{ Chave = "HOLOCRON";  Propriedade = "VersaoHolocron";  Coluna = "Holocron";  Titulo = "Holocron";  Largura = 150; ComNomeAmigavel = $true; NaGradePrincipal = $true }
+    # ATENCAO: "PADA-UE" e "FBR" abaixo sao um PALPITE de qual e o campo NAME
+    # exato que o OCS Inventory usa pra esses dois sistemas na secao
+    # "registry" (seguindo o mesmo padrao curto do GEDAI/HOLOCRON) - ainda
+    # NAO confirmado. Se ao mostrar em algum lugar o valor aparecer sempre
+    # "-", confira no OCS Inventory (Inventario > Software/Registro da
+    # maquina) qual e o NAME exato dessas chaves e ajuste aqui.
+    [PSCustomObject]@{ Chave = "PADA-UE";   Propriedade = "VersaoPadaUe";     Coluna = "PadaUe";    Titulo = "PADA-UE";   Largura = 150; ComNomeAmigavel = $true; NaGradePrincipal = $false }
+    [PSCustomObject]@{ Chave = "FBR";       Propriedade = "VersaoFbr";        Coluna = "Fbr";       Titulo = "FBR";       Largura = 150; ComNomeAmigavel = $true; NaGradePrincipal = $false }
 )
 
 $script:ArquivoConfigVnc = Join-Path $PSScriptRoot "vnc_config.txt"
@@ -131,6 +197,34 @@ $script:ArquivoConfigZonasWebApp = Join-Path $PSScriptRoot "zonas_webapp_config.
 $script:TabelaZonas          = @{}   # int (zona) -> PSCustomObject { Sede; RedePadrao; Substituta; Observacao }
 $script:ZonaAtual            = 0
 $script:RedeCompartilhada    = $false   # true quando a rede da varredura atual e compartilhada entre zonas (ex: Sao Luis)
+
+# --- Planilha SEPARADA de Sistemas Eleitorais (Sistema, Versao,
+# NomeAmigavel, LinkDrive, PastaDestino, Atual) - FONTE UNICA pra dois
+# recursos: (1) mapeia a versao "crua" que o OCS Inventory reporta no
+# registro (ex: GEDAI = "6.27") para um nome amigavel (ex: "Praia de
+# Genipabu") e marca qual e a versao mais recente conhecida de cada
+# sistema, pra sinalizar instalacoes desatualizadas na grade; (2) lista os
+# pacotes de instalacao (LinkDrive + PastaDestino preenchidos) disponiveis
+# na janela "Pacotes de Instalacao". Diferente da planilha de Zonas, essa e
+# OPCIONAL e comeca sem URL nenhuma configurada: enquanto nao configurada
+# (tela "Configuracoes > Versoes de Sistemas") ou fora do ar, a ferramenta
+# simplesmente mostra a versao crua e nao oferece pacotes, como sempre
+# mostrou - sem erro.
+# Arquivos referenciados em LinkDrive precisam estar compartilhados como
+# "Qualquer pessoa com o link - Leitor" (ver Invoke-DownloadGoogleDrivePublico).
+# A entrega na maquina de destino reaproveita o MESMO compartilhamento
+# "InstSeg" ja usado pelo envio de CVC (\\IP\InstSeg\...) - essa pasta ja
+# fica compartilhada pra "todos" em toda estacao (D:\Comum\InstSeg pra
+# baixo), entao nao precisa de credencial nenhuma, igual o CVC ja nao
+# precisava. Por isso a coluna PastaDestino da planilha e um caminho
+# RELATIVO a essa pasta compartilhada (ex: "Eleicoes 2026"), nao um
+# caminho local tipo "C:\...".
+$script:ArquivoConfigVersoes = Join-Path $PSScriptRoot "versoes_config.json"
+$script:ArquivoVersoesCache  = Join-Path $PSScriptRoot "versoes_cache.csv"
+$script:TabelaVersoes         = @{}   # "SISTEMA|VERSAO" -> PSCustomObject { NomeAmigavel }
+$script:VersaoAtualPorSistema = @{}   # "SISTEMA" -> Versao marcada como mais recente na planilha
+$script:PastaCacheDownloads   = Join-Path $env:TEMP "ScannerRedeZona_Pacotes"
+$script:TabelaPacotes         = New-Object System.Collections.Generic.List[object]   # lista de { Pacote; IdArquivo; PastaDestino; Versao }
 
 # ============================================================
 # BLOCO DE TRABALHO EXECUTADO EM CADA RUNSPACE (1 por IP)
@@ -412,6 +506,7 @@ Add-ColunaGrid "Vnc" "VNC" 85
 Add-ColunaGrid "Rc" "RC Ivanti" 90
 Add-ColunaGrid "Sis" "SIS" 70
 foreach ($sis in $script:SistemasEleitoraisExtra) {
+    if (-not $sis.NaGradePrincipal) { continue }
     Add-ColunaGrid $sis.Coluna $sis.Titulo $sis.Largura
 }
 
@@ -663,6 +758,1145 @@ function Test-HostnamePertenceZona {
         $hostUpper.Contains("ZE-$zonaPad") -or
         $hostUpper.Contains("ZE$zonaPad")
     )
+}
+
+# ============================================================
+# PLANILHA DE VERSOES DE SISTEMAS (Sistema -> Nome Amigavel / versao mais
+# atual) - configuravel em "Configuracoes > Versoes de Sistemas"
+# ============================================================
+function Get-ConfigVersoes {
+    if (-not (Test-Path $script:ArquivoConfigVersoes)) { return $null }
+    try {
+        $cfg = Get-Content -Path $script:ArquivoConfigVersoes -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($cfg.SpreadsheetId) { return $cfg }
+    } catch {}
+    return $null
+}
+
+function Set-ConfigVersoes {
+    param([string]$SpreadsheetId, [string]$Gid = "0")
+    [PSCustomObject]@{ SpreadsheetId = $SpreadsheetId; Gid = $Gid } |
+        ConvertTo-Json | Set-Content -Path $script:ArquivoConfigVersoes -Encoding UTF8
+}
+
+function Resolve-IdEGidPlanilha {
+    <#
+        Aceita tanto o ID puro da planilha quanto a URL inteira colada do
+        navegador (https://docs.google.com/spreadsheets/d/<ID>/edit#gid=123456)
+        e devolve @{ Id; Gid }, pra o tecnico nao precisar recortar nada na
+        mao - inclusive quando a planilha tem VARIAS abas (Zonas, Versoes,
+        Pacotes etc na mesma planilha, cada uma com um gid diferente): so
+        colar a URL da aba certa que o gid certo ja vem junto. Se a URL nao
+        tiver gid (ou for so o ID puro), assume gid=0 (1a aba).
+    #>
+    param([string]$Entrada)
+    if (-not $Entrada) { return $null }
+    $Entrada = $Entrada.Trim()
+
+    $id = if ($Entrada -match "/d/([a-zA-Z0-9_-]+)") { $Matches[1] } else { $Entrada }
+    $gid = if ($Entrada -match "[#&?]gid=(\d+)") { $Matches[1] } else { "0" }
+
+    return [PSCustomObject]@{ Id = $id; Gid = $gid }
+}
+
+function Resolve-NomeExibicaoSistema {
+    <#
+        Alguns "Sistema" da planilha tem nome de exibicao diferente da
+        chave interna usada pra bater com o registro do OCS (ex: chave
+        interna continua "GEDAI", confirmado no registro do OCS, mas o
+        produto se chama comercialmente "GEDAI-UE" hoje) - reaproveita o
+        campo Titulo ja definido em $script:SistemasEleitoraisExtra pra
+        essa troca, que e a MESMA fonte usada nos cabecalhos da grade
+        principal (assim so precisa mudar em um lugar). Sistemas fora
+        dessa lista (ex: CRIPTOSIS, EXECJAVA, TRANSPORTADOR...) mostram o
+        proprio nome da planilha, sem alteracao.
+    #>
+    param([string]$Sistema)
+    if (-not $Sistema) { return $Sistema }
+    $entrada = $script:SistemasEleitoraisExtra | Where-Object { $_.Chave -eq $Sistema.ToUpper().Trim() } | Select-Object -First 1
+    if ($entrada) { return $entrada.Titulo }
+    return $Sistema
+}
+
+function Resolve-IdArquivoDrive {
+    <#
+        Aceita o link de compartilhamento inteiro do ARQUIVO (formatos
+        ".../file/d/<ID>/view..." ou "...?id=<ID>") ou so o ID puro, e
+        devolve so o ID - basta colar na planilha o link de "Compartilhar"
+        do arquivo no Drive, sem precisar recortar nada na mao.
+    #>
+    param([string]$Entrada)
+    if (-not $Entrada) { return $null }
+    $Entrada = $Entrada.Trim()
+    if ($Entrada -match "/file/d/([a-zA-Z0-9_-]+)") { return $Matches[1] }
+    if ($Entrada -match "[?&]id=([a-zA-Z0-9_-]+)") { return $Matches[1] }
+    return $Entrada
+}
+
+function ConvertTo-CaminhoRelativoInstSeg {
+    <#
+        A coluna PastaDestino da planilha aceita tanto um caminho JA
+        relativo ao compartilhamento InstSeg (ex: "Eleicoes 2026\Pacotes")
+        quanto um caminho local completo copiado da propria estacao (ex:
+        "D:\Comum\InstSeg\Eleicoes 2026") - nesse 2o caso, corta tudo ate
+        (e incluindo) o "InstSeg\" e fica so com o resto, que e o que
+        importa pra montar \\IP\InstSeg\<resto>.
+    #>
+    param([string]$Caminho)
+    if (-not $Caminho) { return $Caminho }
+    $Caminho = $Caminho.Trim().Trim('\')
+    if ($Caminho -match '(?i)InstSeg\\(.*)$') { return $Matches[1] }
+    return $Caminho
+}
+
+function Import-TabelaVersoes {
+    <#
+        Fonte UNICA de verdade pra tudo relacionado a sistemas eleitorais:
+        carrega, de UMA planilha/aba so, tanto o mapeamento Sistema+Versao
+        -> Nome Amigavel (usado na grade principal) quanto a lista de
+        pacotes de instalacao (usada na janela "Pacotes de Instalacao").
+        Colunas esperadas: Sistema | Versao | NomeAmigavel | LinkDrive |
+        PastaDestino | Atual | NomeArquivo | Hash | Tamanho (aba
+        compartilhada como "Qualquer pessoa com o link - Leitor").
+        LinkDrive e PastaDestino sao OPCIONAIS por linha - se faltar um
+        dos dois, essa linha participa so do mapeamento de versao/nome
+        amigavel, sem virar pacote baixavel. NomeArquivo tambem e
+        opcional - se preenchido, a ferramenta ja sabe o nome exato do
+        arquivo esperado no destino SEM precisar baixar nada primeiro
+        (senao, so descobre apos o 1o download, pelo cabecalho do Drive).
+        Hash (MD5) e Tamanho (bytes) sao opcionais, preenchidos pelo Apps
+        Script "Calcular Hashes e Tamanhos" (ver
+        apps_script_calcular_hash.gs) - usados pra conferir integridade
+        do que foi copiado sem precisar reler o arquivo pela rede toda
+        vez (Tamanho e checado automatico, mesmo em pacotes ja copiados
+        ha tempo; Hash so sob demanda, no botao "Verificar Hash"). Se
+        ainda nao estiver configurada, cai pro cache local; sem planilha
+        configurada E sem cache, simplesmente nao preenche nada - a
+        ferramenta continua funcionando normal (versao crua na grade,
+        sem menu de pacotes),
+        porque esse recurso inteiro e opcional.
+    #>
+    param([switch]$ForcarCache)
+
+    $script:TabelaVersoes = @{}
+    $script:VersaoAtualPorSistema = @{}
+    $script:TabelaPacotes = New-Object System.Collections.Generic.List[object]
+
+    $cfg = Get-ConfigVersoes
+    if (-not $cfg) { return $false }
+
+    $linhas = $null
+    if (-not $ForcarCache) {
+        try {
+            $gid = if ($cfg.Gid) { $cfg.Gid } else { "0" }
+            $urlCsv = "https://docs.google.com/spreadsheets/d/$($cfg.SpreadsheetId)/export?format=csv&gid=$gid"
+            $resp = Invoke-WebRequest -Uri $urlCsv -TimeoutSec 8 -UseBasicParsing
+            # Mesmo motivo do Import-TabelaZonas: decodificar como UTF-8 na
+            # mao pra nao corromper acentos (ex: "Genipabu" com til/acento
+            # em outra palavra da planilha).
+            $bytesResposta = $resp.RawContentStream.ToArray()
+            $textoUtf8 = [System.Text.Encoding]::UTF8.GetString($bytesResposta)
+            $linhas = $textoUtf8 | ConvertFrom-Csv
+            if ($linhas -and $linhas.Count -gt 0) {
+                $linhas | Export-Csv -Path $script:ArquivoVersoesCache -NoTypeInformation -Encoding UTF8
+            }
+        } catch {
+            Add-Log "[AVISO] Nao foi possivel buscar a planilha de sistemas eleitorais online: $($_.Exception.Message)" "Yellow"
+            $linhas = $null
+        }
+    }
+
+    if (-not $linhas -and (Test-Path $script:ArquivoVersoesCache)) {
+        Add-Log "Usando cache local de sistemas eleitorais (ultima planilha baixada com sucesso)." "Yellow"
+        $linhas = Import-Csv -Path $script:ArquivoVersoesCache
+    }
+
+    if (-not $linhas) { return $false }
+
+    foreach ($l in $linhas) {
+        $sistema = if ($l.Sistema) { $l.Sistema.ToUpper().Trim() } else { $null }
+        $versao  = if ($l.Versao) { $l.Versao.Trim() } else { $null }
+        if (-not $sistema -or -not $versao) { continue }
+
+        $script:TabelaVersoes["$sistema|$versao"] = [PSCustomObject]@{ NomeAmigavel = $l.NomeAmigavel }
+
+        $ehAtual = $l.Atual -and @("SIM", "S", "TRUE", "1", "X") -contains $l.Atual.ToUpper().Trim()
+        if ($ehAtual) { $script:VersaoAtualPorSistema[$sistema] = $versao }
+
+        if ($l.LinkDrive -and $l.PastaDestino) {
+            $script:TabelaPacotes.Add([PSCustomObject]@{
+                Pacote       = Resolve-NomeExibicaoSistema $sistema
+                Sistema      = $sistema
+                NomeAmigavel = $l.NomeAmigavel
+                IdArquivo    = Resolve-IdArquivoDrive $l.LinkDrive
+                PastaDestino = ConvertTo-CaminhoRelativoInstSeg $l.PastaDestino
+                Versao       = $versao
+                NomeArquivo  = if ($l.NomeArquivo) { $l.NomeArquivo.Trim() } else { $null }
+                Hash         = if ($l.Hash) { $l.Hash.Trim().ToUpper() } else { $null }
+                TamanhoEsperado = $(
+                    $tmp = 0L
+                    if ($l.Tamanho -and [long]::TryParse($l.Tamanho.Trim(), [ref]$tmp)) { $tmp } else { $null }
+                )
+            })
+        }
+    }
+    return $true
+}
+
+function Resolve-NomeAmigavelVersao {
+    <#
+        Devolve @{ NomeAmigavel; EhAtual } para a versao instalada de um
+        sistema (ex: Sistema="GEDAI", Versao="6.27"), de acordo com a
+        planilha de versoes - ou $null se nao houver mapeamento pra essa
+        combinacao (quem chama entao continua mostrando a versao crua).
+        EhAtual vem $null (nem $true nem $false) quando a planilha nao tem
+        NENHUMA versao marcada "Atual" pra esse sistema - nesse caso nao da
+        pra saber se esta desatualizado, entao nao sinalizamos nada.
+    #>
+    param([string]$Sistema, [string]$Versao)
+    if (-not $Versao -or $Versao -eq "-") { return $null }
+
+    $sistemaUpper = $Sistema.ToUpper()
+    $chave = "$sistemaUpper|$($Versao.Trim())"
+    if (-not $script:TabelaVersoes.ContainsKey($chave)) { return $null }
+
+    $versaoAtual = $script:VersaoAtualPorSistema[$sistemaUpper]
+    return [PSCustomObject]@{
+        NomeAmigavel = $script:TabelaVersoes[$chave].NomeAmigavel
+        EhAtual      = if ($versaoAtual) { $versaoAtual -eq $Versao.Trim() } else { $null }
+    }
+}
+
+function Get-NomeArquivoDeContentDisposition {
+    <# Extrai o nome de arquivo original do cabecalho Content-Disposition (se vier). #>
+    param($Headers)
+    if (-not $Headers) { return $null }
+    $cd = ($Headers["Content-Disposition"] -join ";")
+    if (-not $cd) { return $null }
+    if ($cd -match "filename\*=UTF-8''([^;]+)") { return [uri]::UnescapeDataString($Matches[1]) }
+    if ($cd -match 'filename="([^"]+)"') { return $Matches[1] }
+    if ($cd -match 'filename=([^;]+)') { return $Matches[1].Trim() }
+    return $null
+}
+
+function Invoke-DownloadArquivoComProgresso {
+    <#
+        Baixa uma URL ja resolvida (sem pagina de confirmacao pela frente)
+        direto pro disco, em blocos de 256KB, reportando progresso no log a
+        cada 5% (com velocidade media) e chamando DoEvents a cada bloco pra
+        a janela nao travar durante downloads grandes. Usa HttpWebRequest
+        em vez de Invoke-WebRequest justamente pra poder ler em blocos -
+        precisa do MESMO CookieContainer da negociacao anterior
+        (Invoke-WebRequest -SessionVariable), senao o Google devolve a
+        pagina de confirmacao de novo em vez do arquivo.
+
+        $AoAtualizarProgresso (opcional) - scriptblock chamado a cada 5%
+        com ($Percent, $TextoStatus), pra quem chamou atualizar algo visual
+        (barra de progresso, label) alem do log.
+    #>
+    param([string]$Url, [System.Net.CookieContainer]$Cookies, [string]$DestinoLocal, [string]$NomePacote = "pacote", [scriptblock]$AoAtualizarProgresso = $null)
+
+    $req = [System.Net.HttpWebRequest]::Create($Url)
+    $req.CookieContainer = $Cookies
+    $req.Timeout = 600000
+    $req.ReadWriteTimeout = 600000
+    $req.UserAgent = "Mozilla/5.0 (ScannerRedeZona-TRE-MA)"
+
+    $resp = $req.GetResponse()
+    try {
+        $totalBytes = $resp.ContentLength
+        $streamResposta = $resp.GetResponseStream()
+        $streamArquivo = [System.IO.File]::Create($DestinoLocal)
+        try {
+            $buffer = New-Object byte[] 262144
+            $totalLido = 0
+            $ultimoPercentLogado = -5
+            $cronometro = [System.Diagnostics.Stopwatch]::StartNew()
+
+            while (($lidos = $streamResposta.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                $streamArquivo.Write($buffer, 0, $lidos)
+                $totalLido += $lidos
+
+                if ($totalBytes -gt 0) {
+                    $percent = [Math]::Floor(($totalLido / $totalBytes) * 100)
+                    if ($percent -ge ($ultimoPercentLogado + 5)) {
+                        $mbLido = [Math]::Round($totalLido / 1MB, 1)
+                        $mbTotal = [Math]::Round($totalBytes / 1MB, 1)
+                        $velocidade = if ($cronometro.Elapsed.TotalSeconds -gt 0) { [Math]::Round(($totalLido / 1MB) / $cronometro.Elapsed.TotalSeconds, 1) } else { 0 }
+                        $textoStatus = "Baixando '$NomePacote': $percent% ($mbLido / $mbTotal MB, $velocidade MB/s)"
+                        Add-Log $textoStatus "Gray"
+                        if ($AoAtualizarProgresso) { & $AoAtualizarProgresso $percent $textoStatus }
+                        $ultimoPercentLogado = $percent
+                    }
+                }
+                [System.Windows.Forms.Application]::DoEvents()
+            }
+        } finally {
+            $streamArquivo.Close()
+            $streamResposta.Close()
+        }
+        return (Get-NomeArquivoDeContentDisposition -Headers $resp.Headers)
+    } finally {
+        $resp.Close()
+    }
+}
+
+function Invoke-DownloadGoogleDrivePublico {
+    <#
+        Baixa um arquivo publico do Google Drive ("Qualquer pessoa com o
+        link - Leitor") pelo ID, pro caminho local indicado. Arquivos
+        pequenos vem direto na 1a resposta; arquivos grandes (o Google nao
+        consegue rodar antivirus neles) devolvem uma pagina HTML de
+        confirmacao em vez do arquivo em si - essa pagina NAO e documentada
+        oficialmente pelo Google e o formato pode mudar sem aviso (ja
+        mudou no passado, segundo relatos). Tentamos os dois formatos
+        conhecidos atualmente; se nenhum bater, devolve erro claro com
+        instrucao de onde ajustar.
+
+        Devolve o NOME DE ARQUIVO ORIGINAL (achado no cabecalho
+        Content-Disposition da resposta), ou $null se nao vier - o
+        conteudo em si sempre e gravado em $DestinoLocal independente
+        disso. Quem chama usa esse nome pra saber como se chama o pacote
+        de verdade (ex: "GEDAI-UE_v82000-Praia_de_Genipabu.000.627.W.000.FULL"),
+        ja que o ID do Drive sozinho nao diz isso.
+    #>
+    param([string]$FileId, [string]$DestinoLocal, [string]$NomePacote = "pacote", [scriptblock]$AoAtualizarProgresso = $null)
+
+    $ProgressPreference = 'SilentlyContinue'   # a barra de progresso nativa do Invoke-WebRequest deixa downloads grandes bem mais lentos
+    $urlInicial = "https://drive.google.com/uc?export=download&id=$FileId"
+
+    $resp1 = Invoke-WebRequest -Uri $urlInicial -SessionVariable sessaoWeb -UseBasicParsing -TimeoutSec 30
+    $tipoConteudo = ($resp1.Headers["Content-Type"] -join ";")
+    $ehHtml = $tipoConteudo -match "text/html"
+
+    if (-not $ehHtml) {
+        [System.IO.File]::WriteAllBytes($DestinoLocal, $resp1.Content)
+        return (Get-NomeArquivoDeContentDisposition -Headers $resp1.Headers)
+    }
+
+    $html = $resp1.Content
+
+    # Se o arquivo nao estiver REALMENTE publico ("Qualquer pessoa com o
+    # link"), em vez do arquivo (ou da pagina de confirmacao de arquivo
+    # grande) o Google devolve uma pagina de login/acesso negado - sem essa
+    # checagem, o parser abaixo tentava interpretar essa pagina como se
+    # fosse o formulario de confirmacao e acabava gerando uma URL invalida
+    # (erro confuso "Invalid URI: The hostname could not be parsed").
+    if ($html -match "(?i)accounts\.google\.com" -or $html -match "(?i)ServiceLogin" -or $html -match "(?i)You need permission" -or $html -match "(?i)Sign in to continue") {
+        throw "O arquivo nao esta publico no Google Drive (o Google pediu login em vez de mandar o arquivo). Verifique o compartilhamento do arquivo: precisa ser 'Qualquer pessoa com o link', nao so o dominio TRE-MA."
+    }
+
+    $urlFinal = $null
+
+    # Formato mais recente conhecido: <form action="https://drive.usercontent.google.com/download">
+    # com varios <input type="hidden"> - remonta como querystring GET.
+    if ($html -match 'action="([^"]+)"') {
+        $acao = $Matches[1] -replace "&amp;", "&"
+        $campos = [ordered]@{}
+        foreach ($m in [regex]::Matches($html, '<input\s+type="hidden"\s+name="([^"]+)"\s+value="([^"]*)"')) {
+            $campos[$m.Groups[1].Value] = $m.Groups[2].Value
+        }
+        if ($campos.Count -gt 0) {
+            $qs = ($campos.GetEnumerator() | ForEach-Object { "$($_.Key)=$([uri]::EscapeDataString($_.Value))" }) -join "&"
+            $urlFinal = "$acao`?$qs"
+        }
+    }
+
+    # Formato mais antigo conhecido: link com "confirm=<token>" na propria pagina
+    if (-not $urlFinal -and $html -match 'confirm=([0-9A-Za-z_-]+)&amp;id=') {
+        $urlFinal = "https://drive.google.com/uc?export=download&confirm=$($Matches[1])&id=$FileId"
+    }
+
+    if (-not $urlFinal) {
+        throw "Nao consegui reconhecer a pagina de confirmacao de download grande do Google Drive (formato mudou) - ajustar o parser em Invoke-DownloadGoogleDrivePublico."
+    }
+
+    return (Invoke-DownloadArquivoComProgresso -Url $urlFinal -Cookies $sessaoWeb.Cookies -DestinoLocal $DestinoLocal -NomePacote $NomePacote -AoAtualizarProgresso $AoAtualizarProgresso)
+}
+
+function Get-CaminhosCachePacote {
+    <#
+        Monta os 3 caminhos de cache local de um pacote: o arquivo baixado
+        em si, o sidecar com o nome original (achado no cabecalho
+        Content-Disposition do Drive) e o sidecar com o hash MD5 ja
+        calculado - os dois sidecars sao reaproveitados entre downloads e
+        copias futuras, sem precisar recalcular toda vez. MD5 (nao SHA256)
+        de proposito - e o MESMO algoritmo que o Google Drive ja calcula
+        sozinho pra cada arquivo (coluna Hash da planilha, preenchida via
+        Apps Script), entao da pra comparar direto com a origem sem
+        precisar calcular nada do lado do Drive.
+    #>
+    param($Pacote)
+    $nomeArquivoCache = "$($Pacote.IdArquivo)_$($Pacote.Pacote -replace '[\\/:*?"<>|]', '_')"
+    $base = Join-Path $script:PastaCacheDownloads $nomeArquivoCache
+    return [PSCustomObject]@{
+        ArquivoLocal = $base
+        ArquivoNome  = "$base.nome"
+        ArquivoHash  = "$base.md5"
+    }
+}
+
+function Get-CaminhoDestinoUnc {
+    param($Resultado, $Pacote)
+    return "\\$($Resultado.IP)\InstSeg\$($Pacote.PastaDestino.Trim('\'))"
+}
+
+function Get-NomeArquivoConhecidoPacote {
+    <#
+        Descobre o nome de arquivo esperado do pacote no destino, na ordem:
+        (1) coluna NomeArquivo da planilha, se preenchida - mais confiavel,
+        o tecnico sabe exatamente qual e o nome antes de baixar qualquer
+        coisa; (2) sidecar .nome do cache local, gravado apos um download
+        anterior (Content-Disposition do Drive) - so existe se esse pacote
+        ja foi baixado do Drive alguma vez, em QUALQUER maquina. Devolve
+        $null se nenhuma das duas fontes tiver o nome ainda.
+    #>
+    param($Pacote)
+    if ($Pacote.NomeArquivo) { return $Pacote.NomeArquivo }
+    $caminhos = Get-CaminhosCachePacote -Pacote $Pacote
+    if (Test-Path $caminhos.ArquivoNome) { return (Get-Content -Path $caminhos.ArquivoNome -Raw -Encoding UTF8).Trim() }
+    return $null
+}
+
+function Get-ArquivosInstSeg {
+    <#
+        Lista (recursivo, ate 6 niveis) TODOS os arquivos do
+        compartilhamento \\IP\InstSeg de uma maquina, de uma vez so - usada
+        pra conferir varios pacotes sem repetir a varredura de rede pra
+        cada um (o link da zona pode ser lento). Devolve $null se o
+        compartilhamento nao estiver acessivel.
+    #>
+    param($Resultado)
+    $raizInstSeg = "\\$($Resultado.IP)\InstSeg"
+    if (-not (Test-Path $raizInstSeg)) { return $null }
+    try {
+        return @(Get-ChildItem -Path $raizInstSeg -File -Recurse -Depth 6 -ErrorAction SilentlyContinue)
+    } catch {
+        return $null
+    }
+}
+
+function Find-PacoteEmArquivosInstSeg {
+    <#
+        Procura, na lista de arquivos ja levantada por Get-ArquivosInstSeg,
+        um arquivo cujo NOME bata EXATAMENTE com o NomeArquivo configurado
+        na planilha pra esse pacote (comparacao ja e case-insensitive por
+        padrao no PowerShell). E TOLERANTE SO QUANTO A PASTA - acha o
+        arquivo em qualquer lugar do InstSeg, nao so na PastaDestino
+        configurada (cobre o caso real de usuario final baixando
+        manualmente e guardando numa pasta a criterio proprio, ex: "Praia
+        de Genipabu" em vez de "Eleicoes 2026"). NAO E tolerante quanto ao
+        NOME - um arquivo .zip, renomeado, ou so "parecido" (ex: mesma
+        palavra "GEDAI" no nome) NAO conta como copiado, so o nome exato
+        oficial da coluna NomeArquivo. Sem NomeArquivo configurado pra esse
+        pacote, nao ha o que procurar - devolve $null.
+    #>
+    param($Pacote, $ArquivosInstSeg)
+    if (-not $ArquivosInstSeg -or -not $Pacote.NomeArquivo) { return $null }
+    return ($ArquivosInstSeg | Where-Object { $_.Name -eq $Pacote.NomeArquivo } | Select-Object -First 1)
+}
+
+function Get-StatusPacoteNoDestino {
+    <#
+        Confere se o pacote ja esta na maquina de destino, SEM baixar nem
+        copiar nada. Primeiro tenta o caminho EXATO esperado
+        (\\IP\InstSeg\PastaDestino\NomeArquivo); se nao achar ali (ou nem
+        souber o nome esperado ainda), cai pra uma busca tolerante em TODO
+        o compartilhamento InstSeg (Find-PacoteEmArquivosInstSeg) - cobre o
+        caso de alguem ter baixado manualmente numa pasta/nome diferente do
+        padrao. $ArquivosInstSeg (opcional, de Get-ArquivosInstSeg) evita
+        repetir a varredura de rede quando chamado varias vezes seguidas
+        pra maquina.
+        Se a planilha tiver a coluna Tamanho (bytes) pra esse pacote,
+        TamanhoConfere vem $true/$false comparando contra o tamanho real
+        do arquivo no destino - SEM RELER O CONTEUDO (so metadado,
+        instantaneo), e funciona ate pra pacotes copiados HA TEMPO, ja que
+        roda toda vez que o status e calculado (nao so na hora da copia).
+        Vem $null se a planilha nao tiver Tamanho pra comparar.
+
+        Devolve @{ Existe; NomeConhecido; Tamanho; TamanhoConfere; Data;
+        ArquivoDestino; PastaDestinoUnc; ForaDoPadrao }.
+    #>
+    param($Resultado, $Pacote, $ArquivosInstSeg = $null)
+
+    $pastaDestinoUnc = Get-CaminhoDestinoUnc -Resultado $Resultado -Pacote $Pacote
+    $nomeConhecido = Get-NomeArquivoConhecidoPacote -Pacote $Pacote
+
+    if ($nomeConhecido) {
+        $arquivoDestino = Join-Path $pastaDestinoUnc $nomeConhecido
+        if (Test-Path $arquivoDestino) {
+            $info = Get-Item $arquivoDestino
+            $tamanhoConfere = if ($Pacote.TamanhoEsperado) { $info.Length -eq $Pacote.TamanhoEsperado } else { $null }
+            return [PSCustomObject]@{ Existe = $true; NomeConhecido = $true; Tamanho = $info.Length; TamanhoConfere = $tamanhoConfere; Data = $info.LastWriteTime; ArquivoDestino = $arquivoDestino; PastaDestinoUnc = $pastaDestinoUnc; ForaDoPadrao = $false }
+        }
+    }
+
+    $achadoFora = Find-PacoteEmArquivosInstSeg -Pacote $Pacote -ArquivosInstSeg $ArquivosInstSeg
+    if ($achadoFora) {
+        $tamanhoConfere = if ($Pacote.TamanhoEsperado) { $achadoFora.Length -eq $Pacote.TamanhoEsperado } else { $null }
+        return [PSCustomObject]@{ Existe = $true; NomeConhecido = [bool]$nomeConhecido; Tamanho = $achadoFora.Length; TamanhoConfere = $tamanhoConfere; Data = $achadoFora.LastWriteTime; ArquivoDestino = $achadoFora.FullName; PastaDestinoUnc = $pastaDestinoUnc; ForaDoPadrao = $true }
+    }
+
+    return [PSCustomObject]@{ Existe = $false; NomeConhecido = [bool]$nomeConhecido; Tamanho = $null; TamanhoConfere = $null; Data = $null; ArquivoDestino = $null; PastaDestinoUnc = $pastaDestinoUnc; ForaDoPadrao = $false }
+}
+
+function Copy-ArquivoComProgresso {
+    <#
+        Copia um arquivo local pro destino (UNC do InstSeg) em blocos de
+        256KB, reportando progresso no log a cada 5% (com velocidade
+        media) e chamando DoEvents a cada bloco - substitui o Copy-Item
+        simples, que e uma "caixa preta" sem feedback nenhum enquanto
+        copia (podia parecer que a janela tinha travado em arquivos
+        grandes/links de zona lentos).
+
+        $AoAtualizarProgresso (opcional) - mesmo padrao de
+        Invoke-DownloadArquivoComProgresso: scriptblock chamado a cada 5%
+        com ($Percent, $TextoStatus).
+    #>
+    param([string]$Origem, [string]$Destino, [string]$NomePacote = "pacote", [scriptblock]$AoAtualizarProgresso = $null)
+
+    $streamOrigem = [System.IO.File]::OpenRead($Origem)
+    try {
+        $streamDestino = [System.IO.File]::Create($Destino)
+        try {
+            $totalBytes = $streamOrigem.Length
+            $buffer = New-Object byte[] 262144
+            $totalCopiado = 0
+            $ultimoPercentLogado = -5
+            $cronometro = [System.Diagnostics.Stopwatch]::StartNew()
+
+            while (($lidos = $streamOrigem.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                $streamDestino.Write($buffer, 0, $lidos)
+                $totalCopiado += $lidos
+
+                if ($totalBytes -gt 0) {
+                    $percent = [Math]::Floor(($totalCopiado / $totalBytes) * 100)
+                    if ($percent -ge ($ultimoPercentLogado + 5)) {
+                        $mbCopiado = [Math]::Round($totalCopiado / 1MB, 1)
+                        $mbTotal = [Math]::Round($totalBytes / 1MB, 1)
+                        $velocidade = if ($cronometro.Elapsed.TotalSeconds -gt 0) { [Math]::Round(($totalCopiado / 1MB) / $cronometro.Elapsed.TotalSeconds, 1) } else { 0 }
+                        $textoStatus = "Copiando '$NomePacote': $percent% ($mbCopiado / $mbTotal MB, $velocidade MB/s)"
+                        Add-Log $textoStatus "Gray"
+                        if ($AoAtualizarProgresso) { & $AoAtualizarProgresso $percent $textoStatus }
+                        $ultimoPercentLogado = $percent
+                    }
+                }
+                [System.Windows.Forms.Application]::DoEvents()
+            }
+        } finally {
+            $streamDestino.Close()
+        }
+    } finally {
+        $streamOrigem.Close()
+    }
+}
+
+function Invoke-AcaoBaixarPacote {
+    <#
+        Baixa o pacote do Google Drive (com cache local - so baixa de novo
+        se ainda nao tiver em disco) e copia pra pasta configurada na
+        maquina de destino via \\IP\InstSeg\<PastaDestino> - o MESMO
+        compartilhamento ja usado pelo envio de CVC, que ja fica aberto
+        pra "todos" em toda estacao (D:\Comum\InstSeg pra baixo) e por
+        isso NAO precisa de credencial nenhuma (confirmado pelo usuario:
+        o Explorer abre \\IP\InstSeg direto, sem pedir login).
+
+        Depois de BAIXAR (antes de copiar), calcula o hash MD5 do arquivo
+        local (so na 1a vez - fica cacheado no sidecar .md5) e, se a
+        planilha tiver a coluna Hash preenchida (o MD5 oficial que o
+        proprio Google Drive ja calculou no upload), compara - isso e
+        BARATO (leitura local, sem rede) e confirma que o DOWNLOAD do
+        Drive veio integro, sem precisar reler nada pela rede da zona
+        depois.
+
+        Depois de COPIAR pro destino, a conferencia automatica e so de
+        TAMANHO (metadado, instantaneo) - nao rele o arquivo inteiro pela
+        rede a cada copia, porque em pacotes de 500MB isso levaria tanto
+        tempo quanto a copia em si. Pra uma conferencia mais forte (hash
+        completo) depois de copiado, use o botao "Verificar Hash" na
+        janela de Pacotes, sob demanda.
+
+        Fluxo sincrono/bloqueante de proposito - pacotes grandes podem
+        levar minutos, mas tanto o download quanto a copia agora reportam
+        progresso (log + $AoAtualizarProgresso opcional) e chamam DoEvents
+        a cada bloco, entao a janela nao fica "travada" sem explicacao.
+        Devolve $true se copiou E o tamanho confere, $false em qualquer
+        outro caso (falha, ou tamanho divergente).
+    #>
+    param($Resultado, $Pacote, [scriptblock]$AoAtualizarProgresso = $null)
+
+    if (-not $Pacote -or -not $Pacote.IdArquivo) {
+        [System.Windows.Forms.MessageBox]::Show("Pacote sem ID de arquivo do Drive valido.", "Aviso", "OK", "Warning") | Out-Null
+        return $false
+    }
+    if (-not $Pacote.PastaDestino) {
+        [System.Windows.Forms.MessageBox]::Show("Pasta de destino nao informada na planilha para este pacote.", "Erro", "OK", "Error") | Out-Null
+        return $false
+    }
+
+    $grid.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
+    $pastaDestinoUnc = Get-CaminhoDestinoUnc -Resultado $Resultado -Pacote $Pacote
+    $caminhos = Get-CaminhosCachePacote -Pacote $Pacote
+    try {
+        if (-not (Test-Path $script:PastaCacheDownloads)) {
+            New-Item -ItemType Directory -Path $script:PastaCacheDownloads -Force | Out-Null
+        }
+
+        if (Test-Path $caminhos.ArquivoLocal) {
+            Add-Log "Pacote '$($Pacote.Pacote)' ja esta em cache local ($($caminhos.ArquivoLocal)) - pulando novo download." "Gray"
+            $nomeArquivoOriginal = if (Test-Path $caminhos.ArquivoNome) { (Get-Content -Path $caminhos.ArquivoNome -Raw -Encoding UTF8).Trim() } else { $null }
+        } else {
+            Add-Log "Baixando pacote '$($Pacote.Pacote)' do Google Drive (pode demorar bastante em arquivos grandes)..." "Cyan"
+            $cronometroDownload = [System.Diagnostics.Stopwatch]::StartNew()
+            try {
+                $nomeArquivoOriginal = Invoke-DownloadGoogleDrivePublico -FileId $Pacote.IdArquivo -DestinoLocal $caminhos.ArquivoLocal -NomePacote $Pacote.Pacote -AoAtualizarProgresso $AoAtualizarProgresso
+            } catch {
+                if (Test-Path $caminhos.ArquivoLocal) { Remove-Item $caminhos.ArquivoLocal -Force -ErrorAction SilentlyContinue }
+                throw
+            }
+            if ($nomeArquivoOriginal) {
+                Set-Content -Path $caminhos.ArquivoNome -Value $nomeArquivoOriginal -Encoding UTF8
+            } else {
+                Add-Log "[AVISO] Nao veio o nome original do arquivo no cabecalho do Drive - vou usar o nome do pacote da planilha como nome de arquivo no destino." "Yellow"
+            }
+            $tamanhoMb = [Math]::Round((Get-Item $caminhos.ArquivoLocal).Length / 1MB, 1)
+            Add-Log "Download concluido: $tamanhoMb MB em $([Math]::Round($cronometroDownload.Elapsed.TotalSeconds, 1))s." "Cyan"
+        }
+
+        # Hash MD5 do cache local - calculado so uma vez (fica no sidecar
+        # .md5) e comparado contra a coluna Hash da planilha, SE tiver
+        # (MD5 oficial que o proprio Drive ja calculou no upload). Isso e
+        # leitura LOCAL (disco, nao rede), entao e barato mesmo em arquivo
+        # grande - e pega logo de cara se o DOWNLOAD do Drive veio
+        # corrompido, sem precisar esperar chegar na parte de copiar.
+        $hashLocal = if (Test-Path $caminhos.ArquivoHash) {
+            (Get-Content -Path $caminhos.ArquivoHash -Raw -Encoding UTF8).Trim()
+        } else {
+            Add-Log "Calculando hash MD5 do pacote (cache local)..." "Gray"
+            $h = (Get-FileHash -Path $caminhos.ArquivoLocal -Algorithm MD5).Hash
+            Set-Content -Path $caminhos.ArquivoHash -Value $h -Encoding UTF8
+            $h
+        }
+        if ($Pacote.Hash) {
+            if ($hashLocal -eq $Pacote.Hash) {
+                Add-Log "Hash MD5 do download confere com o oficial do Drive (planilha)." "Gray"
+            } else {
+                Add-Log "[ERRO] Hash MD5 do pacote baixado NAO confere com o oficial da planilha (baixado=$hashLocal planilha=$($Pacote.Hash)) - o DOWNLOAD do Drive pode ter vindo corrompido. Apague o cache local ($($caminhos.ArquivoLocal)) e baixe de novo." "OrangeRed"
+                [System.Windows.Forms.MessageBox]::Show("ATENCAO: o hash MD5 do arquivo baixado nao confere com o oficial da planilha - o download pode ter vindo corrompido do Drive.`r`n`r`nApague o arquivo em cache e tente baixar de novo:`r`n$($caminhos.ArquivoLocal)", "Hash do download nao confere", "OK", "Warning") | Out-Null
+            }
+        }
+
+        if (-not (Test-Path $pastaDestinoUnc)) {
+            New-Item -ItemType Directory -Path $pastaDestinoUnc -Force | Out-Null
+        }
+        $nomeArquivoDestino = if ($Pacote.NomeArquivo) { $Pacote.NomeArquivo } elseif ($nomeArquivoOriginal) { $nomeArquivoOriginal } else { $Pacote.Pacote -replace '[\\/:*?"<>|]', '_' }
+        $arquivoDestinoUnc = Join-Path $pastaDestinoUnc $nomeArquivoDestino
+
+        Add-Log "Copiando pacote para '$arquivoDestinoUnc'..." "Cyan"
+        $cronometroCopia = [System.Diagnostics.Stopwatch]::StartNew()
+        Copy-ArquivoComProgresso -Origem $caminhos.ArquivoLocal -Destino $arquivoDestinoUnc -NomePacote $Pacote.Pacote -AoAtualizarProgresso $AoAtualizarProgresso
+
+        # O ultimo Write() do loop de copia pode ainda nao ter sido
+        # confirmado pelo servidor (fechar o FileStream e o que forca o
+        # flush final pela rede) - avisa que ainda esta trabalhando nessa
+        # janela, senao a interface fica "parada" sem explicacao entre o
+        # ultimo % logado e a mensagem final.
+        if ($AoAtualizarProgresso) { & $AoAtualizarProgresso 100 "Finalizando copia de '$($Pacote.Pacote)' e conferindo tamanho no destino..." }
+
+        # Conferencia automatica pos-copia e SO DE TAMANHO (metadado,
+        # instantaneo) - reler o arquivo inteiro pela rede da zona a cada
+        # copia pra hash levaria tanto tempo quanto a copia em si em
+        # pacotes de 500MB. O botao "Verificar Hash" na janela de Pacotes
+        # faz a conferencia forte (hash completo), sob demanda.
+        $tamanhoLocal = (Get-Item $caminhos.ArquivoLocal).Length
+        $tamanhoRemoto = (Get-Item $arquivoDestinoUnc).Length
+        $bateTamanho = $tamanhoLocal -eq $tamanhoRemoto
+
+        if ($bateTamanho) {
+            Add-Log "Pacote '$($Pacote.Pacote)' copiado com sucesso para '$($Resultado.Hostname)' ($arquivoDestinoUnc) em $([Math]::Round($cronometroCopia.Elapsed.TotalSeconds, 1))s - tamanho confere ($([Math]::Round($tamanhoRemoto / 1MB, 1)) MB)." "Green"
+            [System.Windows.Forms.MessageBox]::Show("Pacote '$($Pacote.Pacote)' copiado com sucesso para:`r`n$arquivoDestinoUnc`r`n`r`nTamanho conferido ($([Math]::Round($tamanhoRemoto / 1MB, 1)) MB). Use 'Verificar Hash' na janela de Pacotes pra uma conferencia mais forte (mais lenta) quando quiser.", "Concluido", "OK", "Information") | Out-Null
+        } else {
+            Add-Log "[ERRO] Pacote '$($Pacote.Pacote)' copiado, mas o TAMANHO nao confere (local=$tamanhoLocal remoto=$tamanhoRemoto) - a copia pode ter sido truncada no link da zona. Copie de novo." "OrangeRed"
+            [System.Windows.Forms.MessageBox]::Show("ATENCAO: o pacote foi copiado, mas o tamanho nao confere com o original - a copia pode ter sido truncada (comum em links de zona instaveis). Recomendado copiar de novo.`r`n`r`nDestino: $arquivoDestinoUnc", "Tamanho nao confere", "OK", "Warning") | Out-Null
+        }
+        return $bateTamanho
+    } catch {
+        Add-Log "[ERRO] Falha ao baixar/copiar o pacote '$($Pacote.Pacote)': $($_.Exception.Message)" "OrangeRed"
+        [System.Windows.Forms.MessageBox]::Show("Falha ao baixar/copiar o pacote:`r`n$($_.Exception.Message)`r`n`r`nSe a conexao via $pastaDestinoUnc falhar mesmo com a rede aparentemente ok, pode ser o mesmo tipo de bloqueio de firewall/antivirus ja visto com VNC/RC (testar a porta 445 com o mesmo metodo do vnc_diagnostico.ps1 ajuda a confirmar).", "Erro", "OK", "Error") | Out-Null
+        return $false
+    } finally {
+        $grid.Cursor = [System.Windows.Forms.Cursors]::Default
+    }
+}
+
+function Invoke-AcaoVerificarHashPacote {
+    <#
+        Reconfere o hash MD5 do arquivo JA copiado no destino - util pra
+        checar a integridade de uma copia feita anteriormente, sob demanda,
+        sem gastar banda de novo com download/copia. Ainda assim precisa
+        ler o arquivo inteiro de volta pelo link da zona pra calcular o
+        hash, o que pode demorar em arquivos grandes/links lentos (por
+        isso NAO roda automatico depois de cada copia - so quando pedido).
+
+        Compara contra, em ordem de preferencia: (1) coluna Hash da
+        planilha (MD5 OFICIAL que o proprio Google Drive calculou no
+        upload - a referencia mais forte, independente do que a ferramenta
+        baixou); (2) hash do cache local (calculado por esta ferramenta no
+        momento do download) - usado so se a planilha nao tiver Hash pra
+        esse pacote.
+
+        $StatusInfo (opcional) reaproveita o status JA calculado pela
+        grade (Get-StatusPacoteNoDestino) em vez de refazer a varredura
+        recursiva do InstSeg inteiro de novo - so recalcula do zero se nao
+        vier nada (fallback de seguranca).
+    #>
+    param($Resultado, $Pacote, $StatusInfo = $null)
+
+    $statusInfo = $StatusInfo
+    if (-not $statusInfo) {
+        $statusInfo = Get-StatusPacoteNoDestino -Resultado $Resultado -Pacote $Pacote -ArquivosInstSeg (Get-ArquivosInstSeg -Resultado $Resultado)
+    }
+    if (-not $statusInfo.Existe) {
+        [System.Windows.Forms.MessageBox]::Show("Esse pacote ainda nao foi copiado pra essa maquina.", "Aviso", "OK", "Warning") | Out-Null
+        return
+    }
+
+    $origemHash = "planilha (oficial do Drive)"
+    $hashReferencia = $Pacote.Hash
+    if (-not $hashReferencia) {
+        $caminhos = Get-CaminhosCachePacote -Pacote $Pacote
+        if (Test-Path $caminhos.ArquivoHash) {
+            $hashReferencia = (Get-Content -Path $caminhos.ArquivoHash -Raw -Encoding UTF8).Trim()
+            $origemHash = "cache local (baixado por esta ferramenta)"
+        }
+    }
+    if (-not $hashReferencia) {
+        [System.Windows.Forms.MessageBox]::Show("Sem hash de referencia pra comparar (nem a coluna Hash da planilha, nem cache local desta ferramenta pra esse pacote).", "Aviso", "OK", "Warning") | Out-Null
+        return
+    }
+
+    Add-Log "Verificando hash MD5 de '$($Pacote.Pacote)' em '$($statusInfo.ArquivoDestino)' contra referencia da $origemHash (pode demorar em arquivos grandes/links lentos)..." "Cyan"
+    $cronometro = [System.Diagnostics.Stopwatch]::StartNew()
+    try {
+        $hashRemoto = (Get-FileHash -Path $statusInfo.ArquivoDestino -Algorithm MD5).Hash
+    } catch {
+        Add-Log "[ERRO] Falha ao ler o arquivo no destino pra calcular o hash: $($_.Exception.Message)" "OrangeRed"
+        [System.Windows.Forms.MessageBox]::Show("Falha ao ler o arquivo no destino:`r`n$($_.Exception.Message)", "Erro", "OK", "Error") | Out-Null
+        return
+    }
+
+    if ($hashRemoto -eq $hashReferencia) {
+        Add-Log "Hash MD5 confere para '$($Pacote.Pacote)' em '$($Resultado.Hostname)' ($([Math]::Round($cronometro.Elapsed.TotalSeconds, 1))s, referencia: $origemHash)." "Green"
+        [System.Windows.Forms.MessageBox]::Show("Hash MD5 confere (referencia: $origemHash) - arquivo integro.", "Integridade OK", "OK", "Information") | Out-Null
+    } else {
+        Add-Log "[ERRO] Hash MD5 NAO confere para '$($Pacote.Pacote)' em '$($Resultado.Hostname)' (destino=$hashRemoto referencia=$hashReferencia, $origemHash)." "OrangeRed"
+        [System.Windows.Forms.MessageBox]::Show("ATENCAO: o hash MD5 NAO confere (referencia: $origemHash) - o arquivo no destino pode estar corrompido. Recomendado copiar de novo.", "Hash NAO confere", "OK", "Warning") | Out-Null
+    }
+}
+
+function Invoke-AcaoAbrirPastaPacote {
+    <#
+        Abre o Explorer na pasta onde o pacote REALMENTE esta - se foi
+        achado fora do padrao (usuario final baixou manualmente numa pasta
+        a criterio proprio), abre ESSA pasta em vez da esperada, senao o
+        tecnico veria uma pasta vazia/errada. So cai pra pasta esperada
+        (\\IP\InstSeg\PastaDestino) se nada foi encontrado em lugar nenhum.
+        Nao-elevado, mesmo padrao usado no resto do script pra lancar
+        programas externos.
+
+        $StatusInfo (opcional) reaproveita o status JA calculado pela
+        grade (Get-StatusPacoteNoDestino) em vez de refazer a varredura
+        recursiva do InstSeg inteiro de novo so pra abrir uma pasta - era
+        isso que deixava o clique lento/travando a janela. So recalcula do
+        zero se nao vier nada (fallback de seguranca).
+    #>
+    param($Resultado, $Pacote, $StatusInfo = $null)
+
+    $statusInfo = $StatusInfo
+    if (-not $statusInfo) {
+        $statusInfo = Get-StatusPacoteNoDestino -Resultado $Resultado -Pacote $Pacote -ArquivosInstSeg (Get-ArquivosInstSeg -Resultado $Resultado)
+    }
+
+    $pastaParaAbrir = if ($statusInfo.Existe -and $statusInfo.ArquivoDestino) {
+        Split-Path $statusInfo.ArquivoDestino -Parent
+    } else {
+        $statusInfo.PastaDestinoUnc
+    }
+
+    if (-not (Test-Path $pastaParaAbrir)) {
+        [System.Windows.Forms.MessageBox]::Show("A pasta ainda nao existe no destino:`r`n$pastaParaAbrir`r`n`r`n(normal se nenhum pacote foi copiado pra la ainda)", "Pasta nao encontrada", "OK", "Warning") | Out-Null
+        return
+    }
+    Start-ProcessoNaoElevado -Caminho $pastaParaAbrir
+}
+
+function Show-JanelaPacotes {
+    <#
+        Janela "Pacotes de Instalacao" pra uma maquina especifica - mostra,
+        pra cada pacote da planilha, se ele ja foi copiado pra essa maquina
+        (olhando so o compartilhamento \\IP\InstSeg, sem baixar nada) e
+        permite copiar (ou copiar de novo) e verificar a integridade (hash
+        SHA256) sob demanda, sem re-baixar/copiar so pra saber o status.
+    #>
+    param($Resultado)
+
+    $dlg = New-Object System.Windows.Forms.Form
+    $dlg.Text = "Pacotes de Instalacao - $($Resultado.Hostname) ($($Resultado.IP))"
+    $dlg.Size = New-Object System.Drawing.Size(1020, 490)
+    $dlg.MinimumSize = New-Object System.Drawing.Size(650, 320)
+    $dlg.StartPosition = "CenterParent"
+    $dlg.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+
+    <#
+        Layout inteiro por Dock (Top/Bottom/Fill), NAO por Location+Size+
+        Anchor manual - testado na pratica: com posicionamento fixo em
+        pixel, redimensionar/maximizar a janela fazia a grade (Anchor
+        Top+Bottom, cresce) SOBREPOR a barra de progresso e os botoes
+        (Anchor so Bottom, tamanho fixo, so reposicionava) - a barra ficava
+        enterrada atras da grade, parecia que "nao aparecia". Dock resolve
+        isso de vez: cada faixa (legenda, aviso de carregamento, rodape
+        com progresso+botoes) reserva sua propria altura fixa, e a grade
+        (Dock=Fill) preenche exatamente o que sobra, sem matematica manual
+        e sem sobreposicao em nenhum tamanho de janela.
+    #>
+    $painelLegenda = New-Object System.Windows.Forms.FlowLayoutPanel
+    $painelLegenda.Dock = [System.Windows.Forms.DockStyle]::Top
+    $painelLegenda.Height = 30
+    $painelLegenda.Padding = New-Object System.Windows.Forms.Padding(12, 8, 12, 0)
+    $painelLegenda.FlowDirection = [System.Windows.Forms.FlowDirection]::LeftToRight
+    $painelLegenda.WrapContents = $false
+    $dlg.Controls.Add($painelLegenda)
+
+    function Add-ItemLegenda {
+        param($Painel, $Texto, $Cor)
+        $lblItem = New-Object System.Windows.Forms.Label
+        $lblItem.Text = "● $Texto"
+        $lblItem.ForeColor = $Cor
+        $lblItem.AutoSize = $true
+        $lblItem.Margin = New-Object System.Windows.Forms.Padding(0, 3, 20, 0)
+        [void]$Painel.Controls.Add($lblItem)
+    }
+    Add-ItemLegenda $painelLegenda "Copiado (pasta)" ([System.Drawing.Color]::FromArgb(0, 128, 0))
+    Add-ItemLegenda $painelLegenda "Copiado Fora do Padrao (pasta)" ([System.Drawing.Color]::FromArgb(200, 100, 0))
+    Add-ItemLegenda $painelLegenda "Nao copiado ainda" ([System.Drawing.Color]::FromArgb(110, 110, 110))
+    Add-ItemLegenda $painelLegenda "Tamanho nao confere" ([System.Drawing.Color]::Firebrick)
+
+    $lblCarregandoPacotes = New-Object System.Windows.Forms.Label
+    $lblCarregandoPacotes.Text = ""
+    $lblCarregandoPacotes.Dock = [System.Windows.Forms.DockStyle]::Top
+    $lblCarregandoPacotes.Height = 22
+    $lblCarregandoPacotes.Padding = New-Object System.Windows.Forms.Padding(12, 0, 12, 0)
+    $lblCarregandoPacotes.ForeColor = [System.Drawing.Color]::Gray
+    $lblCarregandoPacotes.Visible = $false
+    $dlg.Controls.Add($lblCarregandoPacotes)
+
+    # --- Rodape (Dock=Bottom, altura fixa) com barra de progresso + botoes ---
+    $painelRodape = New-Object System.Windows.Forms.Panel
+    $painelRodape.Dock = [System.Windows.Forms.DockStyle]::Bottom
+    $painelRodape.Height = 104
+    $dlg.Controls.Add($painelRodape)
+
+    # Barra de progresso visual - some parada/vazia por padrao, so aparece
+    # (com texto e percentual) durante um "Baixar e Copiar", pra dar
+    # feedback claro que a ferramenta esta trabalhando e nao travada,
+    # principalmente em pacotes grandes/links de zona lentos.
+    # Escopo $script: de proposito (nao variavel local) - o callback de
+    # progresso e passado por varias camadas de funcao/scriptblock ate
+    # chegar em Copy-ArquivoComProgresso/Invoke-DownloadArquivoComProgresso,
+    # e closures aninhadas (.GetNewClosure() dentro de um handler que ja e
+    # .GetNewClosure()) mostraram na pratica nao recapturar a variavel
+    # direito (erro "The property 'Value' cannot be found on this object" -
+    # ou seja, a referencia chegava $null). $script: elimina esse problema
+    # de vez, ja que nao depende de captura de closure nenhuma.
+    $script:lblProgressoPacoteAtual = New-Object System.Windows.Forms.Label
+    $script:lblProgressoPacoteAtual.Text = ""
+    $script:lblProgressoPacoteAtual.Location = New-Object System.Drawing.Point(12, 6)
+    $script:lblProgressoPacoteAtual.Size = New-Object System.Drawing.Size(400, 18)
+    $script:lblProgressoPacoteAtual.Anchor = "Top,Left,Right"
+    $script:lblProgressoPacoteAtual.ForeColor = [System.Drawing.Color]::FromArgb(0, 90, 158)
+    $painelRodape.Controls.Add($script:lblProgressoPacoteAtual)
+
+    $script:barraProgressoPacoteAtual = New-Object System.Windows.Forms.ProgressBar
+    $script:barraProgressoPacoteAtual.Location = New-Object System.Drawing.Point(12, 26)
+    $script:barraProgressoPacoteAtual.Size = New-Object System.Drawing.Size(400, 20)
+    $script:barraProgressoPacoteAtual.Anchor = "Top,Left,Right"
+    $script:barraProgressoPacoteAtual.Minimum = 0
+    $script:barraProgressoPacoteAtual.Maximum = 100
+    $script:barraProgressoPacoteAtual.Value = 0
+    $script:barraProgressoPacoteAtual.Visible = $false
+    $painelRodape.Controls.Add($script:barraProgressoPacoteAtual)
+
+    $gridPacotes = New-Object System.Windows.Forms.DataGridView
+    $gridPacotes.Dock = [System.Windows.Forms.DockStyle]::Fill
+    $gridPacotes.AllowUserToAddRows = $false
+    $gridPacotes.AllowUserToDeleteRows = $false
+    $gridPacotes.RowHeadersVisible = $false
+    $gridPacotes.SelectionMode = [System.Windows.Forms.DataGridViewSelectionMode]::FullRowSelect
+    $gridPacotes.MultiSelect = $false
+    $gridPacotes.AutoSizeColumnsMode = [System.Windows.Forms.DataGridViewAutoSizeColumnsMode]::None
+    # Altura de cabecalho/linha FIXA (nao automatica) - sem isso, a 1a linha
+    # as vezes rendeteriza "achatada"/cortada apos o grid virar Dock=Fill
+    # (glitch conhecido do DataGridView quando o tamanho inicial e calculado
+    # antes do layout Dock terminar de se aplicar).
+    $gridPacotes.ColumnHeadersHeightSizeMode = [System.Windows.Forms.DataGridViewColumnHeadersHeightSizeMode]::DisableResizing
+    $gridPacotes.ColumnHeadersHeight = 26
+    $gridPacotes.RowTemplate.Height = 24
+    $dlg.Controls.Add($gridPacotes)
+
+    function Add-ColunaGridPacotes {
+        param($Nome, $Titulo, $Largura, $SoLeitura = $true)
+        $c = New-Object System.Windows.Forms.DataGridViewTextBoxColumn
+        $c.Name = $Nome; $c.HeaderText = $Titulo; $c.Width = $Largura; $c.ReadOnly = $SoLeitura
+        [void]$gridPacotes.Columns.Add($c)
+    }
+    Add-ColunaGridPacotes "Pacote" "Pacote" 150
+    Add-ColunaGridPacotes "Versao" "Versao" 90
+    Add-ColunaGridPacotes "Status" "Status no Destino" 210
+    Add-ColunaGridPacotes "Tamanho" "Tamanho" 80
+    Add-ColunaGridPacotes "Data" "Copiado em" 120
+
+    $colCopiar = New-Object System.Windows.Forms.DataGridViewButtonColumn
+    $colCopiar.Name = "Copiar"
+    $colCopiar.HeaderText = ""
+    $colCopiar.UseColumnTextForButtonValue = $false
+    $colCopiar.Width = 120
+    [void]$gridPacotes.Columns.Add($colCopiar)
+
+    $colVerificar = New-Object System.Windows.Forms.DataGridViewButtonColumn
+    $colVerificar.Name = "Verificar"
+    $colVerificar.HeaderText = ""
+    $colVerificar.Text = "Verificar Hash"
+    $colVerificar.UseColumnTextForButtonValue = $true
+    $colVerificar.Width = 110
+    [void]$gridPacotes.Columns.Add($colVerificar)
+
+    $colAbrirPasta = New-Object System.Windows.Forms.DataGridViewButtonColumn
+    $colAbrirPasta.Name = "AbrirPasta"
+    $colAbrirPasta.HeaderText = ""
+    $colAbrirPasta.Text = "Abrir Pasta"
+    $colAbrirPasta.UseColumnTextForButtonValue = $true
+    $colAbrirPasta.Width = 100
+    [void]$gridPacotes.Columns.Add($colAbrirPasta)
+
+    $popularLinhaPacote = {
+        param([System.Windows.Forms.DataGridView]$Grid, [int]$Indice, $Pacote, $Resultado, $ArquivosInstSeg = $null)
+
+        $statusInfo = Get-StatusPacoteNoDestino -Resultado $Resultado -Pacote $Pacote -ArquivosInstSeg $ArquivosInstSeg
+        $row = $Grid.Rows[$Indice]
+        # Guarda o status JA calculado junto com o pacote - "Abrir Pasta" e
+        # "Verificar Hash" reaproveitam isso em vez de refazer a varredura
+        # recursiva do InstSeg inteiro a cada clique (era isso que travava
+        # a janela).
+        $row.Tag = [PSCustomObject]@{ Pacote = $Pacote; StatusInfo = $statusInfo }
+
+        $row.Cells["Pacote"].Value = $Pacote.Pacote
+        $row.Cells["Versao"].Value = if ($Pacote.Versao) { $Pacote.Versao } else { "-" }
+        $row.Cells["Status"].ToolTipText = ""
+        $row.Cells["Status"].Style.ForeColor = $Grid.DefaultCellStyle.ForeColor
+
+        if ($statusInfo.Existe) {
+            # Pasta que aparece no status e o caminho relativo ao
+            # compartilhamento, prefixado com "\\InstSeg\" (ex:
+            # \\IP\InstSeg\TDTOT 2026\arquivo.FULL -> "\\InstSeg\TDTOT 2026")
+            # - independente de ser a pasta esperada pela planilha ou uma
+            # pasta livre que o usuario final escolheu ao baixar manualmente.
+            $raizInstSeg = "\\$($Resultado.IP)\InstSeg\"
+            $pastaArquivo = Split-Path $statusInfo.ArquivoDestino -Parent
+            $pastaRelativa = if ($pastaArquivo -and $pastaArquivo.ToUpper().StartsWith($raizInstSeg.ToUpper())) {
+                $pastaArquivo.Substring($raizInstSeg.Length)
+            } else {
+                $pastaArquivo
+            }
+            $pastaExibida = "\\InstSeg\$pastaRelativa"
+
+            if ($statusInfo.ForaDoPadrao) {
+                # Achado em algum lugar do InstSeg, mas nao onde a planilha
+                # esperava - caso real: usuario final baixou manualmente e
+                # guardou numa pasta/nome a criterio proprio.
+                $row.Cells["Status"].Value = "Copiado Fora do Padrao ($pastaExibida)"
+                $row.Cells["Status"].Style.ForeColor = [System.Drawing.Color]::FromArgb(200, 100, 0)
+            } else {
+                $row.Cells["Status"].Value = "Copiado ($pastaExibida)"
+                $row.Cells["Status"].Style.ForeColor = [System.Drawing.Color]::FromArgb(0, 128, 0)
+            }
+            $row.Cells["Status"].ToolTipText = $statusInfo.ArquivoDestino
+            $row.Cells["Tamanho"].Value = "$([Math]::Round($statusInfo.Tamanho / 1MB, 1)) MB"
+            $row.Cells["Data"].Value = $statusInfo.Data.ToString("dd/MM/yy HH:mm")
+            $row.Cells["Copiar"].Value = "Copiar Novamente"
+
+            # Checagem leve (so metadado, sem reler o arquivo) contra o
+            # Tamanho oficial da planilha - roda pra QUALQUER pacote ja
+            # copiado, mesmo os copiados ha tempo (nao so na hora da
+            # copia). Se nao bater, sobrescreve o status com um aviso bem
+            # visivel em vermelho.
+            if ($statusInfo.TamanhoConfere -eq $false) {
+                $row.Cells["Status"].Value = "TAMANHO NAO CONFERE! " + $row.Cells["Status"].Value
+                $row.Cells["Status"].Style.ForeColor = [System.Drawing.Color]::Firebrick
+                $row.Cells["Status"].Style.Font = New-Object System.Drawing.Font($Grid.Font, [System.Drawing.FontStyle]::Bold)
+                $row.Cells["Status"].ToolTipText = "Tamanho no destino ($($statusInfo.Tamanho) bytes) diferente do oficial da planilha ($($Pacote.TamanhoEsperado) bytes) - copia pode estar corrompida/incompleta. Copie de novo.`r`n$($statusInfo.ArquivoDestino)"
+                $row.Cells["Tamanho"].Style.ForeColor = [System.Drawing.Color]::Firebrick
+            }
+        } else {
+            $row.Cells["Status"].Value = "Nao copiado ainda"
+            $row.Cells["Status"].Style.ForeColor = [System.Drawing.Color]::FromArgb(110, 110, 110)
+            $row.Cells["Tamanho"].Value = "-"
+            $row.Cells["Data"].Value = "-"
+            $row.Cells["Copiar"].Value = "Baixar e Copiar"
+        }
+
+        # O botao "Verificar Hash" so faz sentido se ja tiver algo copiado
+        # no destino pra conferir - senao, mesma tecnica ja usada na grade
+        # principal (trocar a celula de botao por uma de texto vazio).
+        if ($statusInfo.Existe) {
+            if ($row.Cells["Verificar"] -isnot [System.Windows.Forms.DataGridViewButtonCell]) {
+                $celulaBotao = New-Object System.Windows.Forms.DataGridViewButtonCell
+                $celulaBotao.Value = "Verificar Hash"
+                $row.Cells["Verificar"] = $celulaBotao
+            }
+        } else {
+            $celulaSemBotao = New-Object System.Windows.Forms.DataGridViewTextBoxCell
+            $celulaSemBotao.Value = ""
+            $row.Cells["Verificar"] = $celulaSemBotao
+        }
+    }
+
+    $recarregarGridPacotes = {
+        <#
+            Mostra as linhas com "Verificando..." IMEDIATAMENTE (sem rede
+            nenhuma), e SO DEPOIS levanta a lista de arquivos do
+            \\IP\InstSeg (que pode demorar bastante em link de zona lento)
+            - rodando isso num runspace separado e so bombeando eventos
+            (DoEvents) enquanto espera, pra janela continuar respondendo
+            (nao mais travando/parecendo pendurada). A lista e levantada
+            UMA VEZ SO (nao uma vez por pacote) e reaproveitada pra todos.
+        #>
+        param([System.Windows.Forms.DataGridView]$Grid, $Resultado, $LblCarregando)
+
+        $Grid.Rows.Clear()
+        foreach ($p in $script:TabelaPacotes) {
+            $idx = $Grid.Rows.Add()
+            $rowPlaceholder = $Grid.Rows[$idx]
+            $rowPlaceholder.Tag = [PSCustomObject]@{ Pacote = $p; StatusInfo = $null }
+            $rowPlaceholder.Cells["Pacote"].Value = $p.Pacote
+            $rowPlaceholder.Cells["Versao"].Value = if ($p.Versao) { $p.Versao } else { "-" }
+            $rowPlaceholder.Cells["Status"].Value = "Verificando..."
+            $rowPlaceholder.Cells["Status"].Style.ForeColor = [System.Drawing.Color]::Gray
+            $rowPlaceholder.Cells["Tamanho"].Value = "-"
+            $rowPlaceholder.Cells["Data"].Value = "-"
+        }
+
+        if ($LblCarregando) {
+            $LblCarregando.Text = "Verificando pacotes em \\$($Resultado.IP)\InstSeg (pode demorar em links de zona lentos)..."
+            $LblCarregando.Visible = $true
+        }
+        [System.Windows.Forms.Application]::DoEvents()
+
+        $scriptBlockListarInstSeg = {
+            param($Ip)
+            $raiz = "\\$Ip\InstSeg"
+            if (-not (Test-Path $raiz)) { return $null }
+            try { return @(Get-ChildItem -Path $raiz -File -Recurse -Depth 6 -ErrorAction SilentlyContinue) } catch { return $null }
+        }
+        $ps = [powershell]::Create()
+        try {
+            [void]$ps.AddScript($scriptBlockListarInstSeg).AddArgument($Resultado.IP)
+            $handle = $ps.BeginInvoke()
+            while (-not $handle.IsCompleted) {
+                [System.Windows.Forms.Application]::DoEvents()
+                Start-Sleep -Milliseconds 50
+            }
+            $arquivosInstSeg = $ps.EndInvoke($handle)
+        } finally {
+            $ps.Dispose()
+        }
+
+        if ($LblCarregando) { $LblCarregando.Visible = $false }
+
+        for ($i = 0; $i -lt $script:TabelaPacotes.Count; $i++) {
+            & $popularLinhaPacote -Grid $Grid -Indice $i -Pacote $script:TabelaPacotes[$i] -Resultado $Resultado -ArquivosInstSeg $arquivosInstSeg
+        }
+    }
+
+    # A busca so comeca DEPOIS da janela ja estar visivel (evento Shown) -
+    # se rodasse antes do ShowDialog(), a janela nao apareceria na tela ate
+    # a varredura toda terminar, que era exatamente o problema reportado.
+    $dlg.Add_Shown({ & $recarregarGridPacotes -Grid $gridPacotes -Resultado $Resultado -LblCarregando $lblCarregandoPacotes }.GetNewClosure())
+
+    # Aliases LOCAIS (sem prefixo $script:) das variaveis de progresso -
+    # necessario porque o handler abaixo usa .GetNewClosure(), e um
+    # .GetNewClosure() cria um escopo "$script:" PROPRIO/ISOLADO pro
+    # scriptblock resultante, desconectado do $script: real do arquivo
+    # (confirmado na pratica: $dlg e $painelRodape, que sao variaveis
+    # LOCAIS comuns, chegavam certas dentro do closure, mas
+    # $script:barraProgressoPacoteAtual/$script:lblProgressoPacoteAtual
+    # chegavam $null mesmo tendo sido criadas segundos antes). Variaveis
+    # locais SEM prefixo de escopo sao capturadas corretamente pelo
+    # GetNewClosure (por referencia ao objeto, entao mutar .Value/.Visible
+    # nelas continua afetando o MESMO controle WinForms).
+    $barraProgressoLocal = $script:barraProgressoPacoteAtual
+    $lblProgressoLocal = $script:lblProgressoPacoteAtual
+    $callbackProgressoLocal = $script:AoAtualizarProgressoPacoteCallback
+
+    $gridPacotes.Add_CellContentClick({
+        param($sender, $e)
+        if ($e.RowIndex -lt 0) { return }
+        $nomeColuna = $gridPacotes.Columns[$e.ColumnIndex].Name
+        $row = $gridPacotes.Rows[$e.RowIndex]
+        $tagLinha = $row.Tag
+        if (-not $tagLinha) { return }
+        $pacoteLinha = $tagLinha.Pacote
+
+        if ($nomeColuna -eq "Copiar") {
+            $dlg.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
+            if ($barraProgressoLocal -and $lblProgressoLocal) {
+                $barraProgressoLocal.Value = 0
+                $barraProgressoLocal.Visible = $true
+                $barraProgressoLocal.Refresh()
+                $lblProgressoLocal.Text = "Iniciando..."
+                $lblProgressoLocal.Refresh()
+                [System.Windows.Forms.Application]::DoEvents()
+            }
+            try {
+                Invoke-AcaoBaixarPacote -Resultado $Resultado -Pacote $pacoteLinha -AoAtualizarProgresso $callbackProgressoLocal | Out-Null
+            } finally {
+                if ($barraProgressoLocal) { $barraProgressoLocal.Visible = $false }
+                if ($lblProgressoLocal) { $lblProgressoLocal.Text = "" }
+                $dlg.Cursor = [System.Windows.Forms.Cursors]::Default
+            }
+            & $popularLinhaPacote -Grid $gridPacotes -Indice $e.RowIndex -Pacote $pacoteLinha -Resultado $Resultado
+        } elseif ($nomeColuna -eq "Verificar") {
+            $dlg.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
+            try {
+                Invoke-AcaoVerificarHashPacote -Resultado $Resultado -Pacote $pacoteLinha -StatusInfo $tagLinha.StatusInfo
+            } finally {
+                $dlg.Cursor = [System.Windows.Forms.Cursors]::Default
+            }
+        } elseif ($nomeColuna -eq "AbrirPasta") {
+            Invoke-AcaoAbrirPastaPacote -Resultado $Resultado -Pacote $pacoteLinha -StatusInfo $tagLinha.StatusInfo
+        }
+    }.GetNewClosure())
+
+    $btnAtualizarPacotes = New-Object System.Windows.Forms.Button
+    $btnAtualizarPacotes.Text = "Atualizar Status"
+    $btnAtualizarPacotes.Location = New-Object System.Drawing.Point(12, 60)
+    $btnAtualizarPacotes.Width = 140
+    $btnAtualizarPacotes.Height = 28
+    $btnAtualizarPacotes.Anchor = "Top,Left"
+    $painelRodape.Controls.Add($btnAtualizarPacotes)
+    $btnAtualizarPacotes.Add_Click({
+        & $recarregarGridPacotes -Grid $gridPacotes -Resultado $Resultado -LblCarregando $lblCarregandoPacotes
+    }.GetNewClosure())
+
+    $btnFecharPacotes = New-Object System.Windows.Forms.Button
+    $btnFecharPacotes.Text = "Fechar"
+    $btnFecharPacotes.Location = New-Object System.Drawing.Point(900, 60)
+    $btnFecharPacotes.Width = 90
+    $btnFecharPacotes.Height = 28
+    $btnFecharPacotes.Anchor = "Top,Right"
+    $painelRodape.Controls.Add($btnFecharPacotes)
+    $btnFecharPacotes.Add_Click({ $dlg.Close() }.GetNewClosure())
+
+    [void]$dlg.ShowDialog()
 }
 
 # ============================================================
@@ -2243,6 +3477,147 @@ function Invoke-AcaoAbrirExclusaoOcs {
     Start-ProcessoNaoElevado -Caminho $url
 }
 
+# ============================================================
+# WAKE-ON-LAN (ligar computador remotamente pra maquinas "Possivelmente
+# Desligado" do OCS Inventory)
+# ============================================================
+function Get-MacAddressOcs {
+    <#
+        Busca o endereco MAC de uma maquina no OCS Inventory (secao
+        "networks" do /computer/:id, ainda nao usada em nenhum outro lugar
+        do script ate agora - hardware/bios/registry ja eram usados, mas o
+        nome exato dos campos aqui (MACADDR, IPADDRESS etc.) nao foi
+        confirmado na pratica ainda). Se a maquina tiver mais de uma
+        interface de rede, prioriza a que bate com o ultimo IP conhecido
+        ($IpConhecido); senao usa a primeira interface com MAC preenchido.
+        Devolve $null (com aviso no log) se nao achar - quem chama decide o
+        que fazer.
+    #>
+    param([int]$HardwareId, [string]$IpConhecido = $null)
+    if (-not $HardwareId) { return $null }
+
+    try {
+        $url = "$($script:UrlOcsApiBase)/computer/$HardwareId/networks"
+        $resp = Invoke-RestMethod -Uri $url -TimeoutSec 8
+        $secaoRedes = $null
+        try { $secaoRedes = $resp."$HardwareId".networks } catch {}
+        $redes = @($secaoRedes)
+
+        if ($redes.Count -eq 0) {
+            Add-Log "[AVISO] OCS Inventory nao devolveu nenhuma interface de rede pro ID $HardwareId (secao 'networks' vazia, ou o servidor usa outro nome de secao)." "Yellow"
+            return $null
+        }
+
+        $candidatosMac = @("MACADDR", "MACADDRESS", "MAC")
+        $candidatosIp  = @("IPADDRESS", "IPADDR", "IP")
+
+        $redeEscolhida = $null
+        if ($IpConhecido) {
+            foreach ($campoIp in $candidatosIp) {
+                $redeEscolhida = $redes | Where-Object { $_.$campoIp -eq $IpConhecido } | Select-Object -First 1
+                if ($redeEscolhida) { break }
+            }
+        }
+        if (-not $redeEscolhida) { $redeEscolhida = $redes | Select-Object -First 1 }
+
+        foreach ($campoMac in $candidatosMac) {
+            if ($redeEscolhida.$campoMac) { return $redeEscolhida.$campoMac }
+        }
+
+        $propsDisponiveis = ($redeEscolhida.PSObject.Properties | ForEach-Object { $_.Name }) -join ", "
+        Add-Log "[AVISO] Nao achei um campo de MAC reconhecido na resposta do OCS pro ID ${HardwareId}. Campos disponiveis na interface: $propsDisponiveis" "Yellow"
+        return $null
+    } catch {
+        Add-Log "[AVISO] Falha ao buscar MAC no OCS Inventory (ID $HardwareId): $($_.Exception.Message)" "Yellow"
+        return $null
+    }
+}
+
+function Send-MagicPacketWol {
+    <#
+        Monta e manda o "magic packet" padrao de Wake-on-LAN (6 bytes 0xFF
+        seguidos do MAC repetido 16x) por UDP broadcast, nas portas 7 e 9
+        (as duas convencoes mais comuns - manda nas duas pra cobrir tanto
+        placas de rede/BIOS que escutam uma quanto a outra).
+    #>
+    param([string]$MacAddress, [string]$IpBroadcast)
+
+    $macLimpo = ($MacAddress -replace "[^0-9A-Fa-f]", "")
+    if ($macLimpo.Length -ne 12) { throw "Endereco MAC invalido: '$MacAddress'" }
+
+    $bytesMac = New-Object byte[] 6
+    for ($i = 0; $i -lt 6; $i++) {
+        $bytesMac[$i] = [Convert]::ToByte($macLimpo.Substring($i * 2, 2), 16)
+    }
+
+    $pacote = New-Object byte[] 102
+    for ($i = 0; $i -lt 6; $i++) { $pacote[$i] = 0xFF }
+    for ($rep = 0; $rep -lt 16; $rep++) {
+        [Array]::Copy($bytesMac, 0, $pacote, 6 + ($rep * 6), 6)
+    }
+
+    $udp = New-Object System.Net.Sockets.UdpClient
+    try {
+        $udp.EnableBroadcast = $true
+        foreach ($porta in @(9, 7)) {
+            [void]$udp.Send($pacote, $pacote.Length, $IpBroadcast, $porta)
+        }
+    } finally {
+        $udp.Close()
+    }
+}
+
+function Invoke-AcaoLigarWol {
+    <#
+        Wake-on-LAN pra maquinas "Possivelmente Desligado": busca o MAC no
+        OCS Inventory (Get-MacAddressOcs) e manda o magic packet pro
+        broadcast direcionado da rede da zona (assume /24, mesmo padrao
+        usado no resto da ferramenta - ex: IP 10.198.72.145 -> broadcast
+        10.198.72.255).
+
+        AVISO IMPORTANTE: isso SO funciona se os roteadores entre esta
+        maquina (onde a ferramenta esta rodando) e a rede da zona
+        permitirem encaminhar broadcast direcionado ate aquele segmento -
+        por padrao de seguranca (mitigar ataque smurf), a maioria dos
+        roteadores bloqueia isso, e nao ha como confirmar por aqui se vai
+        funcionar ou nao. O botao "WOL" do proprio console do OCS Inventory
+        aparentemente ja funciona - se o envio direto daqui nao acordar a
+        maquina, o OCS provavelmente usa algum mecanismo de rele local
+        (agente IPDiscover na propria rede da zona) que este script, rodando
+        de fora dessa rede, nao tem como reproduzir.
+    #>
+    param($Resultado)
+
+    if (-not $Resultado -or -not $Resultado.HardwareId) {
+        [System.Windows.Forms.MessageBox]::Show("Essa maquina nao tem ID do OCS Inventory associado.", "Aviso", "OK", "Warning") | Out-Null
+        return
+    }
+
+    Add-Log "Buscando endereco MAC de '$($Resultado.Hostname)' no OCS Inventory (ID $($Resultado.HardwareId))..." "Gray"
+    $mac = Get-MacAddressOcs -HardwareId $Resultado.HardwareId -IpConhecido $Resultado.IP
+    if (-not $mac) {
+        Add-Log "[ERRO] Nao foi possivel obter o MAC de '$($Resultado.Hostname)' no OCS Inventory - Wake-on-LAN cancelado." "OrangeRed"
+        [System.Windows.Forms.MessageBox]::Show("Nao foi possivel obter o endereco MAC dessa maquina no OCS Inventory.", "Erro", "OK", "Error") | Out-Null
+        return
+    }
+
+    if (-not $Resultado.IP -or $Resultado.IP -eq "-") {
+        Add-Log "[ERRO] Sem IP conhecido para '$($Resultado.Hostname)' - nao da pra calcular o broadcast da rede. Wake-on-LAN cancelado." "OrangeRed"
+        return
+    }
+    $partesIp = $Resultado.IP -split "\."
+    $ipBroadcast = "$($partesIp[0]).$($partesIp[1]).$($partesIp[2]).255"
+
+    try {
+        Send-MagicPacketWol -MacAddress $mac -IpBroadcast $ipBroadcast
+        Add-Log "Pacote Wake-on-LAN enviado para '$($Resultado.Hostname)' (MAC $mac) via broadcast $ipBroadcast, portas 7 e 9. So funciona se a rede permitir broadcast ate essa zona - sem garantia. Aguarde uns 30-60s e rode a varredura de novo pra conferir se respondeu." "Cyan"
+        [System.Windows.Forms.MessageBox]::Show("Pacote Wake-on-LAN enviado para MAC $mac.`r`n`r`nIsso so funciona se a rede permitir broadcast ate a zona - nao ha garantia de que a maquina vai ligar. Aguarde um pouco e rode a varredura novamente pra conferir.", "Wake-on-LAN enviado", "OK", "Information") | Out-Null
+    } catch {
+        Add-Log "[ERRO] Falha ao enviar o pacote Wake-on-LAN: $($_.Exception.Message)" "OrangeRed"
+        [System.Windows.Forms.MessageBox]::Show("Falha ao enviar o pacote Wake-on-LAN:`r`n$($_.Exception.Message)", "Erro", "OK", "Error") | Out-Null
+    }
+}
+
 # --- Botoes inferiores ---
 $btnExportar = New-Object System.Windows.Forms.Button
 $btnExportar.Text = "Exportar CSV"
@@ -2289,19 +3664,38 @@ function Add-LinhaGrid {
     $tempoTxt = if ($Resultado.TempoMs) { "$($Resultado.TempoMs)" } else { "-" }
     $vncTxt = if ($Resultado.VncAtivo) { "Ativo (5900)" } else { "-" }
     $rcTxt = if ($Resultado.RcIvantiAtivo) { "Ativo (9535)" } else { "-" }
-    $sisTxt = if ($Resultado.VersaoSis) { $Resultado.VersaoSis } else { "-" }
     $modeloTxt = if ($Resultado.Modelo) { $Resultado.Modelo } else { "-" }
+
+    # Se a planilha de Versoes de Sistemas estiver configurada e tiver
+    # mapeamento pra essa versao "crua", mostra "Nome Amigavel (versao)"
+    # (ex: "Praia de Genipabu (6.27)") no lugar do numero sozinho - senao
+    # mostra so a versao crua como sempre mostrou. So se aplica a colunas
+    # com ComNomeAmigavel = $true (GEDAI, HOLOCRON, PADA-UE, FBR) - SIS e
+    # BitLocker nao tem nome de praia, entao sempre mostram a versao crua.
+    # $colunasDesatualizadas guarda quais celulas precisam ser destacadas
+    # (versao instalada != versao marcada "Atual" na planilha).
+    $colunasDesatualizadas = @()
+    $sisTxt = if ($Resultado.VersaoSis) { $Resultado.VersaoSis } else { "-" }
 
     $valoresLinha = @($Resultado.IP, $tipo, $Resultado.Hostname, $modeloTxt, $tempoTxt, $Resultado.DetectadoPor, $vncTxt, $rcTxt, $sisTxt)
     foreach ($sis in $script:SistemasEleitoraisExtra) {
+        if (-not $sis.NaGradePrincipal) { continue }
         $valorExtra = $Resultado.($sis.Propriedade)
-        $valoresLinha += $(if ($valorExtra) { $valorExtra } else { "-" })
+        $infoExtra = if ($sis.ComNomeAmigavel) { Resolve-NomeAmigavelVersao -Sistema $sis.Chave -Versao $valorExtra } else { $null }
+        $valoresLinha += $(if ($infoExtra) { "$($infoExtra.NomeAmigavel) ($valorExtra)" } elseif ($valorExtra) { $valorExtra } else { "-" })
+        if ($infoExtra -and $infoExtra.EhAtual -eq $false) { $colunasDesatualizadas += $sis.Coluna }
     }
     $valoresLinha += @("", "", "")
 
     $rowIndex = $grid.Rows.Add($valoresLinha)
     $row = $grid.Rows[$rowIndex]
     $row.Tag = $Resultado
+
+    foreach ($nomeColuna in $colunasDesatualizadas) {
+        $row.Cells[$nomeColuna].Style.ForeColor = [System.Drawing.Color]::FromArgb(200, 100, 0)
+        $row.Cells[$nomeColuna].Style.Font = New-Object System.Drawing.Font($grid.Font, [System.Drawing.FontStyle]::Bold)
+        $row.Cells[$nomeColuna].ToolTipText = "Versao desatualizada"
+    }
 
     if ($Resultado.PossivelmenteDesligado -and $Resultado.CandidatoExclusaoOcs) {
         $row.DefaultCellStyle.BackColor = [System.Drawing.Color]::FromArgb(255, 220, 200)
@@ -2605,7 +3999,7 @@ $btnExportar.Add_Click({
 function Show-Configuracoes {
     $dlg = New-Object System.Windows.Forms.Form
     $dlg.Text = "Configuracoes da Ferramenta"
-    $dlg.Size = New-Object System.Drawing.Size(530, 440)
+    $dlg.Size = New-Object System.Drawing.Size(530, 520)
     $dlg.StartPosition = "CenterParent"
     $dlg.FormBorderStyle = "FixedDialog"
     $dlg.MaximizeBox = $false
@@ -2614,7 +4008,7 @@ function Show-Configuracoes {
 
     $tabs = New-Object System.Windows.Forms.TabControl
     $tabs.Location = New-Object System.Drawing.Point(12, 12)
-    $tabs.Size = New-Object System.Drawing.Size(495, 335)
+    $tabs.Size = New-Object System.Drawing.Size(495, 415)
     $dlg.Controls.Add($tabs)
 
     # --- Aba VNC Viewer ---
@@ -2731,10 +4125,29 @@ function Show-Configuracoes {
     $txtDriveToken.Text = if ($cfgDriveAtual) { $cfgDriveAtual.Token } else { "" }
     $tabDrive.Controls.Add($txtDriveToken)
 
+    # --- Aba Versoes de Sistemas ---
+    $tabVersoes = New-Object System.Windows.Forms.TabPage
+    $tabVersoes.Text = "Versoes de Sistemas"
+    $tabs.TabPages.Add($tabVersoes)
+
+    $cfgVersoesAtual = Get-ConfigVersoes
+
+    $lblVersoes = New-Object System.Windows.Forms.Label
+    $lblVersoes.Text = "URL da ABA (nao so da planilha) com os Sistemas Eleitorais - FONTE UNICA pro mapeamento Versao->Nome Amigavel na grade principal E pra lista de pacotes de instalacao (janela 'Pacotes de Instalacao...' nas linhas Host/PC). Pode ser uma aba dentro de qualquer planilha (inclusive a de Zonas), compartilhada como 'Qualquer pessoa com o link - Leitor'. Cole a URL com a aba certa ja aberta no navegador (a ferramenta pega o gid automaticamente). Colunas esperadas:`r`n   Sistema | Versao | NomeAmigavel | LinkDrive | PastaDestino | Atual | NomeArquivo | Hash | Tamanho`r`n`r`nSistema deve ser GEDAI, HOLOCRON, PADA-UE ou FBR pra participar do nome amigavel na grade (SIS e BitLocker nao entram, sempre mostram a versao crua) - outros nomes de Sistema (ex: CRIPTOSIS, EXECJAVA) sao aceitos normalmente, so nao aparecem la. LinkDrive = link de 'Compartilhar' do ARQUIVO no Drive (publico como Leitor). PastaDestino = caminho RELATIVO ao compartilhamento \\IP\InstSeg (ex: 'Eleicoes 2026'), nao um caminho tipo C:\... LinkDrive/PastaDestino sao opcionais por linha - sem os dois, a linha so participa do nome amigavel, sem virar pacote. Atual=SIM so na linha com a versao mais recente de cada sistema. NomeArquivo (opcional) = nome exato do arquivo que vai ficar no destino - se preenchido, a janela de Pacotes ja sabe o status sem precisar baixar nada antes. Hash e Tamanho (opcionais) = MD5 e tamanho oficiais do arquivo no Drive - preencha usando o menu 'Sistemas Eleitorais > Calcular Hashes e Tamanhos' na propria planilha (ver apps_script_calcular_hash.gs). Tamanho e conferido automaticamente (sem clique, sem reler o arquivo) toda vez que a tela de Pacotes carrega o status, mesmo em pacotes copiados ha tempo - se nao bater, aparece 'TAMANHO NAO CONFERE!' em vermelho. Hash so e conferido sob demanda, no botao 'Verificar Hash'. Toda a planilha e opcional - sem isso a grade so mostra a versao crua e o menu de pacotes nao aparece."
+    $lblVersoes.Location = New-Object System.Drawing.Point(15, 15)
+    $lblVersoes.Size = New-Object System.Drawing.Size(455, 350)
+    $tabVersoes.Controls.Add($lblVersoes)
+
+    $txtVersoes = New-Object System.Windows.Forms.TextBox
+    $txtVersoes.Location = New-Object System.Drawing.Point(15, 370)
+    $txtVersoes.Width = 455
+    $txtVersoes.Text = if ($cfgVersoesAtual) { $cfgVersoesAtual.SpreadsheetId } else { "" }
+    $tabVersoes.Controls.Add($txtVersoes)
+
     # --- Botoes ---
     $btnSalvarConfig = New-Object System.Windows.Forms.Button
     $btnSalvarConfig.Text = "Salvar"
-    $btnSalvarConfig.Location = New-Object System.Drawing.Point(320, 358)
+    $btnSalvarConfig.Location = New-Object System.Drawing.Point(320, 438)
     $btnSalvarConfig.Width = 90
     $btnSalvarConfig.Height = 30
     $btnSalvarConfig.BackColor = [System.Drawing.Color]::FromArgb(46, 125, 50)
@@ -2743,7 +4156,7 @@ function Show-Configuracoes {
 
     $btnFecharConfig = New-Object System.Windows.Forms.Button
     $btnFecharConfig.Text = "Fechar"
-    $btnFecharConfig.Location = New-Object System.Drawing.Point(415, 358)
+    $btnFecharConfig.Location = New-Object System.Drawing.Point(415, 438)
     $btnFecharConfig.Width = 90
     $btnFecharConfig.Height = 30
     $dlg.Controls.Add($btnFecharConfig)
@@ -2768,6 +4181,15 @@ function Show-Configuracoes {
         if ($txtDriveUrl.Text.Trim() -and $txtDriveToken.Text.Trim()) {
             Set-ConfigEnvioDrive -UrlWebApp $txtDriveUrl.Text.Trim() -Token $txtDriveToken.Text.Trim()
             $itensSalvos.Add("Envio ao Drive")
+        }
+        if ($txtVersoes.Text -and $txtVersoes.Text.Trim()) {
+            $refPlanilhaVersoes = Resolve-IdEGidPlanilha $txtVersoes.Text
+            Set-ConfigVersoes -SpreadsheetId $refPlanilhaVersoes.Id -Gid $refPlanilhaVersoes.Gid
+            if (Import-TabelaVersoes) {
+                Add-Log "Planilha de sistemas eleitorais carregada ($($script:TabelaVersoes.Count) mapeamento(s) de versao, $($script:TabelaPacotes.Count) pacote(s))." "Cyan"
+                Reconstruir-Grid
+            }
+            $itensSalvos.Add("Versoes de Sistemas")
         }
 
         Add-Log "Configuracoes salvas: $($itensSalvos -join ', ')." "Cyan"
@@ -3043,7 +4465,17 @@ $menuContextoGrid.Add_Opening({
             $itemCvc = $menuContextoGrid.Items.Add("Enviar CVC para o Google Drive...")
             $itemCvc.Add_Click({ Invoke-AcaoEnviarCvcDrive -Resultado $r }.GetNewClosure())
         }
+        # Abre a janela de Pacotes de Instalacao - so aparece se a planilha
+        # de Pacotes de Sistemas estiver configurada e tiver pelo menos 1
+        # linha valida (ver Configuracoes > Pacotes de Sistemas).
+        if ($script:TabelaPacotes.Count -gt 0) {
+            $itemPacotes = $menuContextoGrid.Items.Add("Pacotes de Instalacao...")
+            $itemPacotes.Add_Click({ Show-JanelaPacotes -Resultado $r }.GetNewClosure())
+        }
     } elseif ($r.PossivelmenteDesligado -and $r.HardwareId) {
+        $itemWol = $menuContextoGrid.Items.Add("Ligar Computador (Wake-on-LAN)")
+        $itemWol.Add_Click({ Invoke-AcaoLigarWol -Resultado $r }.GetNewClosure())
+
         $itemAbrirExclusao = $menuContextoGrid.Items.Add("Abrir para Excluir no OCS Inventory...")
         $itemAbrirExclusao.Add_Click({ Invoke-AcaoAbrirExclusaoOcs -Resultado $r }.GetNewClosure())
     }
@@ -3074,5 +4506,15 @@ if ($okZonasInicial) {
     Atualizar-MaximoZona
 }
 Update-LabelSedeInfo
+
+# Planilha de sistemas eleitorais (versoes + pacotes) e opcional - so tenta
+# carregar (e so loga) se ja tiver sido configurada alguma vez (ver
+# "Configuracoes > Versoes de Sistemas"); sem isso a ferramenta segue
+# mostrando a versao crua e sem menu de pacotes, normal.
+if (Get-ConfigVersoes) {
+    if (Import-TabelaVersoes) {
+        Add-Log "Planilha de sistemas eleitorais carregada ($($script:TabelaVersoes.Count) mapeamento(s) de versao, $($script:TabelaPacotes.Count) pacote(s))." "Gray"
+    }
+}
 
 [void]$form.ShowDialog()
