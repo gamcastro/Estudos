@@ -286,6 +286,23 @@ $scriptBlock = {
         }
     }
 
+    # 2a tentativa (ping com timeout bem maior) se nem o ping rapido nem
+    # nenhuma porta de fallback acharam nada - mitiga falso-negativo por
+    # rajada: varrer ate 60 IPs quase ao mesmo tempo pode sofrer
+    # throttling/perda pontual num firewall/appliance de seguranca mais
+    # restritivo (ex: rede compartilhada da capital), mesmo que um ping
+    # avulso, fora da rajada, responda sem problema nenhum.
+    if (-not $resultado.Online) {
+        try {
+            $reply2 = $ping.Send($ip, [Math]::Max($timeoutMs * 3, 1000))
+            if ($reply2.Status -eq 'Success') {
+                $resultado.Online = $true
+                $resultado.TempoMs = $reply2.RoundtripTime
+                $resultado.DetectadoPor = "ping (2a tentativa)"
+            }
+        } catch {}
+    }
+
     if ($resultado.Online) {
         $abertas = @()
         foreach ($porta in $portasImpressora) {
@@ -3928,7 +3945,10 @@ function Reconstruir-Grid {
     $grid.Rows.Clear()
     foreach ($r in $script:Resultados) {
         if (-not $r.Online) { continue }
-        if (-not $script:RedeCompartilhada -or -not $chkFiltrarZona.Checked -or $r.PertenceZonaAtual) {
+        # Impressora/gateway/nobreak central sao infraestrutura compartilhada
+        # do predio (nao "pertencem" a nenhuma zona especifica por hostname)
+        # - sempre aparecem, mesmo com o filtro "so hosts desta zona" marcado.
+        if (-not $script:RedeCompartilhada -or -not $chkFiltrarZona.Checked -or $r.PertenceZonaAtual -or $r.PossivelImpressora -or $r.EhGateway -or $r.EhNobreakCentral) {
             Add-LinhaGrid -Resultado $r
         }
     }
@@ -3959,15 +3979,20 @@ $timer.Add_Tick({
                 $script:Resultados.Add($resultado)
 
                 if ($resultado.Online) {
-                    # As convencoes ".70 = gateway", ".10/.11 = nobreak central" e
-                    # ".190-.195 = telefone VOIP" valem so para o padrao de rede do
-                    # interior (10.198.zona.X), onde cada zona segue um layout
-                    # padronizado. Na rede compartilhada de Sao Luis (10.11.81.X),
-                    # esses mesmos finais de IP podem ser qualquer coisa de
-                    # qualquer zona, entao essas regras nao se aplicam la.
+                    # A convencao ".70 = gateway" e ".10/.11 = nobreak central"
+                    # vale tanto no padrao do interior (10.198.zona.X, uma rede
+                    # por zona) quanto numa rede COMPARTILHADA (10.11.81.X de
+                    # Sao Luis, um predio inteiro): numa rede compartilhada so
+                    # existe 1 gateway e 1 nobreak central fisico pra TODAS as
+                    # zonas daquele predio, entao o mesmo IP fixo continua
+                    # valendo - por isso essas duas classificacoes NAO dependem
+                    # de RedeCompartilhada. Ja ".190-.195 = telefone VOIP" e um
+                    # padrao POR ZONA (cada zona tem seus proprios ramais) que
+                    # nao faz sentido numa rede compartilhada por varias zonas
+                    # ao mesmo tempo, entao esse continua desativado la.
                     $ultimoOcteto = [int]($resultado.IP -split '\.')[3]
-                    $ehGateway = (-not $script:RedeCompartilhada) -and $resultado.IP.EndsWith(".70")
-                    $ehNobreakCentral = (-not $script:RedeCompartilhada) -and ($ultimoOcteto -eq 10 -or $ultimoOcteto -eq 11)
+                    $ehGateway = $resultado.IP.EndsWith(".70")
+                    $ehNobreakCentral = ($ultimoOcteto -eq 10 -or $ultimoOcteto -eq 11)
                     $ehTelefoneVoip = (-not $script:RedeCompartilhada) -and ($ultimoOcteto -ge 190 -and $ultimoOcteto -le 195)
 
                     $resultado | Add-Member -NotePropertyName EhGateway -NotePropertyValue $ehGateway -Force
@@ -3999,7 +4024,13 @@ $timer.Add_Tick({
                         Add-Log "  -> RC Ivanti ativo em $($resultado.IP)" "SkyBlue"
                     }
 
-                    if (-not $script:RedeCompartilhada -or -not $chkFiltrarZona.Checked -or $resultado.PertenceZonaAtual) {
+                    # Impressora/gateway/nobreak central sao infraestrutura
+                    # compartilhada do predio (nao "pertencem" a nenhuma zona
+                    # especifica por hostname) - sempre aparecem, mesmo com o
+                    # filtro "so hosts desta zona" marcado numa rede
+                    # compartilhada, senao ficam escondidos pra sempre (nunca
+                    # teriam PertenceZonaAtual = true).
+                    if (-not $script:RedeCompartilhada -or -not $chkFiltrarZona.Checked -or $resultado.PertenceZonaAtual -or $resultado.PossivelImpressora -or $ehGateway -or $ehNobreakCentral) {
                         Add-LinhaGrid -Resultado $resultado
                     }
                 }
@@ -4369,10 +4400,19 @@ function Invoke-BuscarDesligadosOcs {
     $padroes = @("ZMA$zonaPad", "CMA$zonaPad", "ZE-$zonaPad", "ZE$zonaPad")
     $resolucaoAtual = Resolve-RedeDaZona -Zona $zona
 
+    # Em rede COMPARTILHADA (varias zonas no mesmo prefixo, ex: 10.11.81.0/24
+    # de Sao Luis), o prefixo de rede nao identifica uma zona especifica -
+    # bater IP contra esse prefixo acharia praticamente toda maquina do
+    # predio, de QUALQUER zona. So passa -PrefixoRede quando a rede NAO e
+    # compartilhada (ai sim o prefixo e exclusivo dessa zona); em rede
+    # compartilhada, a UNICA forma confiavel de identificar a zona e o
+    # padrao do hostname ($padroes).
+    $prefixoParaOcs = if ($script:RedeCompartilhada) { $null } else { $resolucaoAtual.Prefixo }
+
     Add-Log "=== Buscando no OCS Inventory maquinas da Zona $zonaPad que nao apareceram na varredura (paginando o inventario completo) ===" "Yellow"
     $grid.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
 
-    $comps = Get-OcsComputadoresDaZona -Padroes $padroes -PrefixoRede $resolucaoAtual.Prefixo
+    $comps = Get-OcsComputadoresDaZona -Padroes $padroes -PrefixoRede $prefixoParaOcs
     Add-Log "$($comps.Count) maquina(s) da zona encontrada(s) no cadastro do OCS Inventory (por nome ou IP)." "Gray"
 
     # Preenche o Hostname de quem respondeu a varredura mas ficou "(sem
@@ -4505,7 +4545,7 @@ function Invoke-BuscarDesligadosOcs {
             EhGateway              = $false
             EhNobreakCentral       = $false
             EhTelefoneVoip         = $false
-            PertenceZonaAtual      = $true
+            PertenceZonaAtual      = if ($script:RedeCompartilhada) { Test-HostnamePertenceZona -Hostname $nomeOcs -Zona $zona } else { $true }
             PossivelmenteDesligado = $true
             HardwareId             = $hw.ID
             CandidatoExclusaoOcs   = $candidatoExclusaoOcs
