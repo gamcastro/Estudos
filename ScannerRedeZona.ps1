@@ -3564,15 +3564,24 @@ function Show-JanelaSistemasEleitorais {
     $btnFecharSis.Add_Click({ $dlg.Close() }.GetNewClosure())
 
     $gridSis = New-Object System.Windows.Forms.DataGridView
-    $gridSis.Dock = [System.Windows.Forms.DockStyle]::Fill
+    # Location/Size/Anchor (NAO Dock=Fill) de proposito - confirmado na
+    # pratica, com varias tentativas (incluindo redimensionar a janela na
+    # mao), que o cabecalho de coluna simplesmente NAO renderiza nesta
+    # janela com Dock=Fill (linhas de dado aparecem normal, cabecalho
+    # fica em branco/achatado, mesmo testando com e sem
+    # ColumnHeadersHeightSizeMode/EnableHeadersVisualStyles). A grade
+    # principal ($grid, no formulario de fora) usa exatamente esse
+    # padrao (Location+Size+Anchor "Top,Bottom,Left,Right") e sempre
+    # mostrou cabecalho normal - reaproveitado aqui.
+    $gridSis.Location = New-Object System.Drawing.Point(0, 52)
+    $gridSis.Size = New-Object System.Drawing.Size(1264, 300)
+    $gridSis.Anchor = "Top,Bottom,Left,Right"
     $gridSis.AllowUserToAddRows = $false
     $gridSis.AllowUserToDeleteRows = $false
     $gridSis.RowHeadersVisible = $false
     $gridSis.SelectionMode = [System.Windows.Forms.DataGridViewSelectionMode]::FullRowSelect
     $gridSis.MultiSelect = $false
     $gridSis.AutoSizeColumnsMode = [System.Windows.Forms.DataGridViewAutoSizeColumnsMode]::None
-    $gridSis.ColumnHeadersHeightSizeMode = [System.Windows.Forms.DataGridViewColumnHeadersHeightSizeMode]::DisableResizing
-    $gridSis.ColumnHeadersHeight = 26
     $gridSis.RowTemplate.Height = 24
     $dlg.Controls.Add($gridSis)
 
@@ -3583,10 +3592,10 @@ function Show-JanelaSistemasEleitorais {
         [void]$gridSis.Columns.Add($c)
     }
     Add-ColunaGridSis "Sistema" "Sistema" 170
-    Add-ColunaGridSis "VersaoInstalada" "Versao Instalada" 190
-    Add-ColunaGridSis "VersaoAtual" "Versao Atual (planilha)" 190
-    Add-ColunaGridSis "StatusAtualizacao" "Atualizado?" 140
-    Add-ColunaGridSis "StatusPacote" "Pacote de Instalacao no Destino" 260
+    Add-ColunaGridSis "VersaoInstalada" "Versão Instalada" 190
+    Add-ColunaGridSis "VersaoAtual" "Versão mais atual" 190
+    Add-ColunaGridSis "StatusAtualizacao" "Status" 140
+    Add-ColunaGridSis "StatusPacote" "Pacote de Instalação" 260
 
     $colCopiarSis = New-Object System.Windows.Forms.DataGridViewButtonColumn
     $colCopiarSis.Name = "Copiar"; $colCopiarSis.HeaderText = ""; $colCopiarSis.UseColumnTextForButtonValue = $false; $colCopiarSis.Width = 120
@@ -3599,6 +3608,16 @@ function Show-JanelaSistemasEleitorais {
     $colAbrirPastaSis = New-Object System.Windows.Forms.DataGridViewButtonColumn
     $colAbrirPastaSis.Name = "AbrirPasta"; $colAbrirPastaSis.HeaderText = ""; $colAbrirPastaSis.Text = "Abrir Pasta"; $colAbrirPastaSis.UseColumnTextForButtonValue = $true; $colAbrirPastaSis.Width = 100
     [void]$gridSis.Columns.Add($colAbrirPastaSis)
+
+    # NAO mexe em ColumnHeadersHeightSizeMode/ColumnHeadersHeight/
+    # EnableHeadersVisualStyles aqui - varias tentativas confirmaram na
+    # pratica que essas propriedades fazem o cabecalho inteiro SUMIR
+    # nesta janela especifica (so as linhas de dado apareciam, sem texto
+    # de coluna nenhum), reordenar/reaplicar no evento Shown tambem nao
+    # resolveu. A grade principal ($grid, no formulario de fora) nunca
+    # mexeu nessas propriedades e sempre mostrou cabecalho normal -
+    # entao aqui deixa tudo no padrao tambem. RowTemplate.Height (acima)
+    # ja resolve sozinho o achatamento da 1a linha.
 
     # Preenche Sistema/Versao Instalada/Versao Atual/Atualizado? NA HORA
     # (nao depende de rede - so dados ja lidos na varredura + a planilha
