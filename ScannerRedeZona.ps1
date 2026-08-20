@@ -555,30 +555,6 @@ foreach ($sis in $script:SistemasEleitoraisExtra) {
     Add-ColunaGrid $sis.Coluna $sis.Titulo $sis.Largura
 }
 
-$colBotao = New-Object System.Windows.Forms.DataGridViewButtonColumn
-$colBotao.Name = "AbrirVnc"
-$colBotao.HeaderText = ""
-$colBotao.Text = "Abrir VNC"
-$colBotao.UseColumnTextForButtonValue = $true
-$colBotao.Width = 95
-[void]$grid.Columns.Add($colBotao)
-
-$colBotaoRc = New-Object System.Windows.Forms.DataGridViewButtonColumn
-$colBotaoRc.Name = "AbrirRc"
-$colBotaoRc.HeaderText = ""
-$colBotaoRc.Text = "Abrir RCViewer"
-$colBotaoRc.UseColumnTextForButtonValue = $true
-$colBotaoRc.Width = 110
-[void]$grid.Columns.Add($colBotaoRc)
-
-$colBotaoInfo = New-Object System.Windows.Forms.DataGridViewButtonColumn
-$colBotaoInfo.Name = "InfoImpressora"
-$colBotaoInfo.HeaderText = ""
-$colBotaoInfo.Text = "Info Impressora"
-$colBotaoInfo.UseColumnTextForButtonValue = $true
-$colBotaoInfo.Width = 110
-[void]$grid.Columns.Add($colBotaoInfo)
-
 $form.Controls.Add($grid)
 
 # --- Log colorido ---
@@ -4089,7 +4065,8 @@ function Add-LinhaGrid {
 
     $temNomeResolvido = $Resultado.Hostname -and $Resultado.Hostname -ne "(sem resolucao de nome)"
     $tipo =
-        if ($Resultado.PossivelmenteDesligado -and $Resultado.CandidatoExclusaoOcs) { "Desligado - candidata a exclusao" }
+        if ($Resultado.SemLinkComunicacao) { "Sem Link de Comunicacao" }
+        elseif ($Resultado.PossivelmenteDesligado -and $Resultado.CandidatoExclusaoOcs) { "Desligado - candidata a exclusao" }
         elseif ($Resultado.PossivelmenteDesligado) { "Possivelmente Desligado" }
         elseif ($Resultado.EhGateway) { "Gateway / Roteador" }
         elseif ($Resultado.PossivelImpressora) { "Impressora Pantum?" }
@@ -4133,7 +4110,15 @@ function Add-LinhaGrid {
         $row.Cells[$nomeColuna].ToolTipText = "Versao desatualizada"
     }
 
-    if ($Resultado.PossivelmenteDesligado -and $Resultado.CandidatoExclusaoOcs) {
+    if ($Resultado.SemLinkComunicacao) {
+        # Gateway da zona nao respondeu - sinal forte de que a ZONA
+        # INTEIRA esta sem link de comunicacao (nao que cada maquina
+        # individual esta desligada) - vermelho bem visivel, prioridade
+        # maxima de destaque, ate acima do "candidata a exclusao".
+        $row.DefaultCellStyle.BackColor = [System.Drawing.Color]::FromArgb(220, 53, 69)
+        $row.DefaultCellStyle.ForeColor = [System.Drawing.Color]::White
+        $row.DefaultCellStyle.Font = New-Object System.Drawing.Font($grid.Font, [System.Drawing.FontStyle]::Bold)
+    } elseif ($Resultado.PossivelmenteDesligado -and $Resultado.CandidatoExclusaoOcs) {
         $row.DefaultCellStyle.BackColor = [System.Drawing.Color]::FromArgb(255, 220, 200)
         $row.DefaultCellStyle.ForeColor = [System.Drawing.Color]::FromArgb(150, 60, 0)
         $row.DefaultCellStyle.Font = New-Object System.Drawing.Font($grid.Font, [System.Drawing.FontStyle]::Bold)
@@ -4152,39 +4137,19 @@ function Add-LinhaGrid {
         $row.DefaultCellStyle.BackColor = [System.Drawing.Color]::FromArgb(240, 240, 240)
     }
 
-    # Os botoes "Abrir VNC" / "Abrir RCViewer" / "Info Impressora" so fazem
-    # sentido nas linhas correspondentes. Nos demais casos, trocamos a
-    # celula (que por padrao e um botao, pois a coluna inteira e
-    # DataGridViewButtonColumn) por uma celula de texto vazia, entao a
-    # linha nao mostra botao nenhum ali.
+    # VNC/RC Ivanti ativos ficam em negrito/verde na propria coluna de
+    # status - as acoes (Abrir VNC/RCViewer/Info Impressora) nao tem mais
+    # botao na grade, so no menu de contexto (botao direito) e duplo-clique.
     $vncDisponivel = $Resultado.VncAtivo -and -not $Resultado.PossivelImpressora
     if ($vncDisponivel) {
-        $row.Cells["AbrirVnc"].Value = "Abrir VNC"
         $row.Cells["Vnc"].Style.ForeColor = [System.Drawing.Color]::FromArgb(0, 128, 0)
         $row.Cells["Vnc"].Style.Font = New-Object System.Drawing.Font($grid.Font, [System.Drawing.FontStyle]::Bold)
-    } else {
-        $celulaSemBotao = New-Object System.Windows.Forms.DataGridViewTextBoxCell
-        $celulaSemBotao.Value = ""
-        $row.Cells["AbrirVnc"] = $celulaSemBotao
     }
 
     $rcDisponivel = $Resultado.RcIvantiAtivo -and -not $Resultado.PossivelImpressora
     if ($rcDisponivel) {
-        $row.Cells["AbrirRc"].Value = "Abrir RCViewer"
         $row.Cells["Rc"].Style.ForeColor = [System.Drawing.Color]::FromArgb(0, 128, 0)
         $row.Cells["Rc"].Style.Font = New-Object System.Drawing.Font($grid.Font, [System.Drawing.FontStyle]::Bold)
-    } else {
-        $celulaSemBotaoRc = New-Object System.Windows.Forms.DataGridViewTextBoxCell
-        $celulaSemBotaoRc.Value = ""
-        $row.Cells["AbrirRc"] = $celulaSemBotaoRc
-    }
-
-    if ($Resultado.PossivelImpressora) {
-        $row.Cells["InfoImpressora"].Value = "Info Impressora"
-    } else {
-        $celulaSemBotaoInfo = New-Object System.Windows.Forms.DataGridViewTextBoxCell
-        $celulaSemBotaoInfo.Value = ""
-        $row.Cells["InfoImpressora"] = $celulaSemBotaoInfo
     }
 }
 
@@ -4331,6 +4296,56 @@ $timer.Add_Tick({
         Add-Log "=== Varredura concluida: $($ativos.Count) ativo(s) / $($impressoras.Count) impressora(s) / $($vncs.Count) com VNC ===" "Cyan"
 
         Invoke-BuscarDesligadosOcs
+
+        # Se o GATEWAY da zona (convencao ".70") nao respondeu na
+        # varredura, e sinal forte de falta de LINK DE COMUNICACAO com a
+        # zona inteira - nao que cada maquina individual esta desligada
+        # (o que costuma ser a explicacao errada quando TODAS aparecem
+        # como "Possivelmente Desligado" de uma vez). Roda depois de
+        # Invoke-BuscarDesligadosOcs (que limpa $script:MaquinasDesligadasOcs)
+        # e insere na frente pra ficar bem visivel.
+        $resolucaoZonaAtual = Resolve-RedeDaZona -Zona $script:ZonaAtual
+        $ipGateway = "$($resolucaoZonaAtual.Prefixo)70"
+        $gatewayRespondeu = $script:Resultados | Where-Object { $_.IP -eq $ipGateway -and $_.Online } | Select-Object -First 1
+        if (-not $gatewayRespondeu) {
+            Add-Log "[AVISO] Gateway ($ipGateway) nao respondeu na varredura - possivel falta de link de comunicacao com a zona inteira (as maquinas podem aparecer como desligadas so por causa disso, nao por estarem realmente desligadas)." "OrangeRed"
+            $pseudoSemLink = [PSCustomObject]@{
+                IP                     = $ipGateway
+                Online                 = $false
+                Hostname               = "(sem resolucao de nome)"
+                TempoMs                = $null
+                PossivelImpressora     = $false
+                PortasAbertas          = ""
+                DetectadoPor           = "Gateway nao respondeu - possivel falta de link de comunicacao"
+                VncAtivo               = $false
+                RcIvantiAtivo          = $false
+                VersaoSis              = "-"
+                Modelo                 = "-"
+                EhGateway              = $true
+                EhNobreakCentral       = $false
+                EhTelefoneVoip         = $false
+                PertenceZonaAtual      = $true
+                PossivelmenteDesligado = $false
+                CandidatoExclusaoOcs   = $false
+                SemLinkComunicacao     = $true
+            }
+            foreach ($sis in $script:SistemasEleitoraisExtra) {
+                $pseudoSemLink | Add-Member -NotePropertyName $sis.Propriedade -NotePropertyValue "-"
+            }
+
+            # Reclassifica TODAS as maquinas "Possivelmente Desligado" ja
+            # levantadas (via OCS) como "Sem Link de Comunicacao" tambem -
+            # sem o gateway responder, nao da pra afirmar que cada uma
+            # individualmente esta desligada, o mais provavel e que a
+            # zona inteira esta sem link com o predio/servidor.
+            foreach ($maquina in $script:MaquinasDesligadasOcs) {
+                $maquina.SemLinkComunicacao = $true
+                $maquina.DetectadoPor = "$($maquina.DetectadoPor) (gateway da zona tambem nao respondeu)"
+            }
+
+            $script:MaquinasDesligadasOcs.Insert(0, $pseudoSemLink)
+            Reconstruir-Grid
+        }
 
         $btnIniciar.Enabled = $true
         $btnCancelar.Enabled = $false
@@ -4839,6 +4854,7 @@ function Invoke-BuscarDesligadosOcs {
             PossivelmenteDesligado = $true
             HardwareId             = $hw.ID
             CandidatoExclusaoOcs   = $candidatoExclusaoOcs
+            SemLinkComunicacao     = $false
         }
         foreach ($sis in $script:SistemasEleitoraisExtra) {
             $entradaExtra = @($registry) | Where-Object { $_.NAME -eq $sis.Chave } | Select-Object -First 1
@@ -4856,25 +4872,10 @@ function Invoke-BuscarDesligadosOcs {
 }
 
 # ============================================================
-# EVENTOS: acoes de linha - VNC e Info Impressora
-# (clique no botao da coluna correspondente, ou duplo-clique na linha)
+# EVENTOS: acoes de linha - VNC, RCViewer e Info Impressora por
+# duplo-clique na linha (o botao dedicado na grade foi removido - essas
+# acoes ficam so no menu de contexto e no duplo-clique).
 # ============================================================
-$grid.Add_CellContentClick({
-    param($sender, $e)
-    if ($e.RowIndex -lt 0) { return }
-    $nomeColuna = $grid.Columns[$e.ColumnIndex].Name
-    $linhaAtual = $grid.Rows[$e.RowIndex]
-    $r = $linhaAtual.Tag
-
-    if ($nomeColuna -eq "AbrirVnc") {
-        Invoke-AcaoAbrirVnc -Resultado $r
-    } elseif ($nomeColuna -eq "AbrirRc") {
-        Invoke-AcaoAbrirRc -Resultado $r
-    } elseif ($nomeColuna -eq "InfoImpressora") {
-        Invoke-AcaoInfoImpressora -Resultado $r -Row $linhaAtual
-    }
-})
-
 $grid.Add_CellDoubleClick({
     param($sender, $e)
     if ($e.RowIndex -lt 0) { return }
