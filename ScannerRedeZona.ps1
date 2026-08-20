@@ -1527,20 +1527,41 @@ function Invoke-AcaoVerificarHashPacote {
 
     Add-Log "Verificando hash MD5 de '$($Pacote.Pacote)' em '$($statusInfo.ArquivoDestino)' contra referencia da $origemHash (pode demorar em arquivos grandes/links lentos)..." "Cyan"
     $cronometro = [System.Diagnostics.Stopwatch]::StartNew()
+
+    # Get-FileHash le o arquivo INTEIRO pela rede da zona pra calcular o
+    # hash - sincrono e sem DoEvents no meio, entao em arquivo grande/link
+    # lento a janela ficava "Not Responding" durante toda essa leitura.
+    # Roda num runspace em segundo plano (mesmo padrao ja usado pra listar
+    # o InstSeg e pra conferir tamanho pos-copia), com a thread da UI so
+    # bombeando DoEvents enquanto espera.
+    $scriptBlockHashRemoto = {
+        param($Caminho)
+        (Get-FileHash -Path $Caminho -Algorithm MD5).Hash
+    }
+    $psHash = [powershell]::Create()
     try {
-        $hashRemoto = (Get-FileHash -Path $statusInfo.ArquivoDestino -Algorithm MD5).Hash
+        [void]$psHash.AddScript($scriptBlockHashRemoto).AddArgument($statusInfo.ArquivoDestino)
+        $handleHash = $psHash.BeginInvoke()
+        while (-not $handleHash.IsCompleted) {
+            [System.Windows.Forms.Application]::DoEvents()
+            Start-Sleep -Milliseconds 50
+        }
+        $hashRemoto = $psHash.EndInvoke($handleHash)
+        if ($psHash.Streams.Error.Count -gt 0) { throw $psHash.Streams.Error[0].Exception }
     } catch {
         Add-Log "[ERRO] Falha ao ler o arquivo no destino pra calcular o hash: $($_.Exception.Message)" "OrangeRed"
         [System.Windows.Forms.MessageBox]::Show("Falha ao ler o arquivo no destino:`r`n$($_.Exception.Message)", "Erro", "OK", "Error") | Out-Null
         return
+    } finally {
+        $psHash.Dispose()
     }
 
     if ($hashRemoto -eq $hashReferencia) {
         Add-Log "Hash MD5 confere para '$($Pacote.Pacote)' em '$($Resultado.Hostname)' ($([Math]::Round($cronometro.Elapsed.TotalSeconds, 1))s, referencia: $origemHash)." "Green"
-        [System.Windows.Forms.MessageBox]::Show("Hash MD5 confere (referencia: $origemHash) - arquivo integro.", "Integridade OK", "OK", "Information") | Out-Null
+        [System.Windows.Forms.MessageBox]::Show("O sistema '$($Pacote.Pacote)' esta INTEGRO em '$($Resultado.Hostname)' ($($Resultado.IP)).`r`n`r`nHash MD5 origem ($origemHash):`r`n$hashReferencia`r`n`r`nHash MD5 destino ($($statusInfo.ArquivoDestino)):`r`n$hashRemoto`r`n`r`nOs dois hashes conferem.", "Integridade OK", "OK", "Information") | Out-Null
     } else {
         Add-Log "[ERRO] Hash MD5 NAO confere para '$($Pacote.Pacote)' em '$($Resultado.Hostname)' (destino=$hashRemoto referencia=$hashReferencia, $origemHash)." "OrangeRed"
-        [System.Windows.Forms.MessageBox]::Show("ATENCAO: o hash MD5 NAO confere (referencia: $origemHash) - o arquivo no destino pode estar corrompido. Recomendado copiar de novo.", "Hash NAO confere", "OK", "Warning") | Out-Null
+        [System.Windows.Forms.MessageBox]::Show("ATENCAO: o sistema '$($Pacote.Pacote)' em '$($Resultado.Hostname)' ($($Resultado.IP)) NAO esta integro - o arquivo no destino pode estar corrompido.`r`n`r`nHash MD5 origem ($origemHash):`r`n$hashReferencia`r`n`r`nHash MD5 destino ($($statusInfo.ArquivoDestino)):`r`n$hashRemoto`r`n`r`nRecomendado copiar de novo.", "Hash NAO confere", "OK", "Warning") | Out-Null
     }
 }
 
@@ -3183,6 +3204,76 @@ function Invoke-AcaoAbrirRc {
     }
 }
 
+function Invoke-AcaoPingContinuo {
+    <#
+        Abre um "ping -t" continuo pro IP numa janela de cmd separada -
+        util pra acompanhar em tempo real quando uma maquina volta a
+        responder (ex: religada via Wake-on-LAN, ou apos destravar algum
+        problema de rede), sem precisar rodar a varredura da zona inteira
+        de novo. Disponivel pra QUALQUER linha, inclusive as
+        "Possivelmente Desligado" vindas do OCS.
+
+        O titulo da janela usa so o IP (gerado internamente por este
+        script a partir do prefixo da zona - sempre um IPv4 valido), NAO
+        o Hostname - que pode vir de DNS reverso/NetBIOS/OCS Inventory,
+        fora do nosso controle, e por isso nao deve ser interpolado cru
+        numa linha de comando de cmd.exe.
+    #>
+    param($Resultado)
+    if (-not $Resultado -or -not $Resultado.IP) { return }
+    $ip = $Resultado.IP
+    Start-ProcessoNaoElevado -Caminho "cmd.exe" -Argumentos "/k title Ping continuo - $ip & ping $ip -t"
+}
+
+function Invoke-AcaoAtualizarHost {
+    <#
+        Reconsulta so este 1 IP (mesmo probe da varredura completa -
+        ping/porta de fallback, VNC, RC Ivanti, OCS Inventory) e atualiza
+        a linha da grade no lugar, sem precisar rodar a varredura da zona
+        inteira de novo. Util pra conferir na hora um status que acabou de
+        mudar na maquina (ex: usuario habilitou o VNC agora ha pouco).
+
+        So copia pro $Resultado existente as propriedades que o probe
+        realmente calcula (Online, Hostname, VncAtivo, RcIvantiAtivo,
+        VersaoSis, Modelo, etc.) - propriedades computadas so 1x na
+        varredura original (EhGateway, EhNobreakCentral, PertenceZonaAtual
+        etc.) ficam intocadas, ja que sao estruturais e nao mudam.
+
+        Roda num unico runspace em segundo plano (sem pool, e so 1 IP),
+        com a UI so bombeando DoEvents enquanto espera - mesmo padrao ja
+        usado nas outras chamadas de rede desta ferramenta.
+    #>
+    param($Resultado)
+    if (-not $Resultado -or -not $Resultado.IP) { return }
+
+    Add-Log "Atualizando status de '$($Resultado.Hostname)' ($($Resultado.IP))..." "Cyan"
+    $grid.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
+    $ps = [powershell]::Create()
+    try {
+        [void]$ps.AddScript($scriptBlock).AddArgument($Resultado.IP).AddArgument(400).AddArgument($script:PortasFallback).AddArgument($script:PortasImpressora).AddArgument($script:PortaVnc).AddArgument($script:PortaRcIvanti).AddArgument($script:UrlOcsApiBase).AddArgument($script:ZonaAtual).AddArgument($script:RedeCompartilhada).AddArgument($script:MapaModelos).AddArgument($script:SistemasEleitoraisExtra)
+        $handle = $ps.BeginInvoke()
+        while (-not $handle.IsCompleted) {
+            [System.Windows.Forms.Application]::DoEvents()
+            Start-Sleep -Milliseconds 50
+        }
+        $novoResultado = @($ps.EndInvoke($handle))[0]
+    } finally {
+        $ps.Dispose()
+        $grid.Cursor = [System.Windows.Forms.Cursors]::Default
+    }
+
+    if (-not $novoResultado) {
+        Add-Log "[ERRO] Falha ao atualizar '$($Resultado.IP)'." "OrangeRed"
+        return
+    }
+
+    foreach ($prop in $novoResultado.PSObject.Properties) {
+        $Resultado.($prop.Name) = $prop.Value
+    }
+    Reconstruir-Grid
+    Add-Log "Status de '$($Resultado.Hostname)' ($($Resultado.IP)) atualizado." "Green"
+}
+
 function Test-EhImpressoraPantum {
     <#
         A deteccao usada durante a varredura em massa (porta 9100/515/631
@@ -4496,6 +4587,14 @@ $menuContextoGrid.Add_Opening({
     $temNomeResolvido = $r.Hostname -and $r.Hostname -ne "(sem resolucao de nome)"
     $ehHostPc = $temNomeResolvido -and -not $r.PossivelImpressora -and -not $r.EhGateway -and -not $r.EhNobreakCentral -and -not $r.EhTelefoneVoip -and -not $r.PossivelmenteDesligado
 
+    # Disponivel pra QUALQUER linha (inclusive "Possivelmente Desligado"
+    # vindas do OCS) - util pra acompanhar em tempo real se um dispositivo
+    # volta a responder, sem depender do tipo detectado.
+    $itemPing = $menuContextoGrid.Items.Add("Ping")
+    $itemPing.Add_Click({ Invoke-AcaoPingContinuo -Resultado $r }.GetNewClosure())
+    $temOutrosItens = $r.PossivelImpressora -or $ehHostPc -or ($r.PossivelmenteDesligado -and $r.HardwareId)
+    if ($temOutrosItens) { [void]$menuContextoGrid.Items.Add("-") }
+
     if ($r.PossivelImpressora) {
         $itemInfo = $menuContextoGrid.Items.Add("Info Impressora")
         $itemInfo.Add_Click({ Invoke-AcaoInfoImpressora -Resultado $r -Row $linha }.GetNewClosure())
@@ -4522,6 +4621,13 @@ $menuContextoGrid.Add_Opening({
             $itemPacotes = $menuContextoGrid.Items.Add("Pacotes de Instalacao...")
             $itemPacotes.Add_Click({ Show-JanelaPacotes -Resultado $r }.GetNewClosure())
         }
+        [void]$menuContextoGrid.Items.Add("-")
+        # Reconsulta so esta maquina (VNC/RC/SIS/etc.) e atualiza a linha
+        # no lugar - util quando algo mudou no computador (ex: usuario
+        # acabou de habilitar o VNC) e nao vale a pena rodar a varredura
+        # da zona inteira de novo so pra ver isso refletido.
+        $itemAtualizarHost = $menuContextoGrid.Items.Add("Atualizar Status desta Maquina")
+        $itemAtualizarHost.Add_Click({ Invoke-AcaoAtualizarHost -Resultado $r }.GetNewClosure())
     } elseif ($r.PossivelmenteDesligado -and $r.HardwareId) {
         $itemWol = $menuContextoGrid.Items.Add("Ligar Computador (Wake-on-LAN)")
         $itemWol.Add_Click({ Invoke-AcaoLigarWol -Resultado $r }.GetNewClosure())
