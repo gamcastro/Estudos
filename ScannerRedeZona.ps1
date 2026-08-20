@@ -1053,6 +1053,10 @@ function Invoke-DownloadArquivoComProgresso {
         $streamResposta = $resp.GetResponseStream()
         $streamArquivo = [System.IO.File]::Create($DestinoLocal)
         try {
+            # Bloco de 256KB - ver nota em Copy-ArquivoComProgresso: testado
+            # na pratica que blocos maiores (4MB) NAO mudam a taxa media
+            # (gargalo e banda do link, nao latencia/numero de idas-e-voltas)
+            # - so pioram a granularidade do progresso, sem ganho nenhum.
             $buffer = New-Object byte[] 262144
             $totalLido = 0
             $ultimoPercentLogado = -5
@@ -1064,7 +1068,10 @@ function Invoke-DownloadArquivoComProgresso {
 
                 if ($totalBytes -gt 0) {
                     $percent = [Math]::Floor(($totalLido / $totalBytes) * 100)
-                    if ($percent -ge ($ultimoPercentLogado + 5)) {
+                    # Ver nota em Copy-ArquivoComProgresso: garante que o
+                    # 100% sempre aparece, mesmo que o ultimo bloco pule
+                    # direto por cima do proximo multiplo de 5%.
+                    if ($percent -ge ($ultimoPercentLogado + 5) -or $percent -ge 100) {
                         $mbLido = [Math]::Round($totalLido / 1MB, 1)
                         $mbTotal = [Math]::Round($totalBytes / 1MB, 1)
                         $velocidade = if ($cronometro.Elapsed.TotalSeconds -gt 0) { [Math]::Round(($totalLido / 1MB) / $cronometro.Elapsed.TotalSeconds, 1) } else { 0 }
@@ -1398,6 +1405,15 @@ function Copy-ArquivoComProgresso {
         $streamDestino = [System.IO.File]::Create($Destino)
         try {
             $totalBytes = $streamOrigem.Length
+            # Bloco de 256KB - TESTADO na pratica (v1 desta funcao usava
+            # 4MB, apostando que o gargalo fosse latencia/numero de
+            # idas-e-voltas pela rede): a taxa media ficou IDENTICA
+            # (~0.55 MB/s) com blocos de 256KB e de 4MB, em arquivos de
+            # tamanhos bem diferentes (33 a 127 MB) - isso descarta
+            # latencia como gargalo; o link so tem banda limitada mesmo
+            # (~4.4 Mbit/s), que nenhum tamanho de bloco muda. Voltou pro
+            # bloco pequeno porque da granularidade de progresso mais
+            # suave no log/barra, sem ganho nenhum em trocar.
             $buffer = New-Object byte[] 262144
             $totalCopiado = 0
             $ultimoPercentLogado = -5
@@ -1409,7 +1425,13 @@ function Copy-ArquivoComProgresso {
 
                 if ($totalBytes -gt 0) {
                     $percent = [Math]::Floor(($totalCopiado / $totalBytes) * 100)
-                    if ($percent -ge ($ultimoPercentLogado + 5)) {
+                    # -ge ($ultimoPercentLogado + 5) OU 100% (ultimo bloco)
+                    # - sem o "ou 100%", um bloco grande o suficiente podia
+                    # pular direto de, por exemplo, 97% pro fim sem nunca
+                    # bater um multiplo de 5% de novo (102% nunca chega),
+                    # entao o log/barra ficava "parado" no ultimo % batido
+                    # ate a mensagem final aparecer.
+                    if ($percent -ge ($ultimoPercentLogado + 5) -or $percent -ge 100) {
                         $mbCopiado = [Math]::Round($totalCopiado / 1MB, 1)
                         $mbTotal = [Math]::Round($totalBytes / 1MB, 1)
                         $velocidade = if ($cronometro.Elapsed.TotalSeconds -gt 0) { [Math]::Round(($totalCopiado / 1MB) / $cronometro.Elapsed.TotalSeconds, 1) } else { 0 }
@@ -1644,15 +1666,33 @@ function Invoke-AcaoVerificarHashPacote {
     Add-Log "Verificando hash MD5 de '$($Pacote.Pacote)' em '$($statusInfo.ArquivoDestino)' contra referencia da $origemHash (pode demorar em arquivos grandes/links lentos)..." "Cyan"
     $cronometro = [System.Diagnostics.Stopwatch]::StartNew()
 
-    # Get-FileHash le o arquivo INTEIRO pela rede da zona pra calcular o
-    # hash - sincrono e sem DoEvents no meio, entao em arquivo grande/link
-    # lento a janela ficava "Not Responding" durante toda essa leitura.
-    # Roda num runspace em segundo plano (mesmo padrao ja usado pra listar
-    # o InstSeg e pra conferir tamanho pos-copia), com a thread da UI so
-    # bombeando DoEvents enquanto espera.
+    # Le o arquivo INTEIRO pela rede da zona pra calcular o hash - roda num
+    # runspace em segundo plano (mesmo padrao ja usado pra listar o
+    # InstSeg e pra conferir tamanho pos-copia), com a thread da UI so
+    # bombeando DoEvents enquanto espera. Nao usa Get-FileHash (usa
+    # System.Security.Cryptography.MD5 direto, lendo em blocos de 4MB) -
+    # o buffer interno do Get-FileHash e pequeno demais pra um link com
+    # latencia alta (mesmo motivo do buffer de 256KB->4MB na copia: em
+    # link de zona ruim, o gargalo costuma ser NUMERO de idas-e-voltas
+    # pela rede, nao banda - blocos maiores reduzem drasticamente isso).
     $scriptBlockHashRemoto = {
         param($Caminho)
-        (Get-FileHash -Path $Caminho -Algorithm MD5).Hash
+        $md5 = [System.Security.Cryptography.MD5]::Create()
+        try {
+            $stream = [System.IO.File]::OpenRead($Caminho)
+            try {
+                $buffer = New-Object byte[] 4194304
+                while (($lidos = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                    [void]$md5.TransformBlock($buffer, 0, $lidos, $null, 0)
+                }
+                [void]$md5.TransformFinalBlock((New-Object byte[] 0), 0, 0)
+                return ([System.BitConverter]::ToString($md5.Hash) -replace '-', '')
+            } finally {
+                $stream.Close()
+            }
+        } finally {
+            $md5.Dispose()
+        }
     }
     $psHash = [powershell]::Create()
     try {
