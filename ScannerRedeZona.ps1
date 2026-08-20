@@ -67,6 +67,15 @@ $script:Total        = 0
 $script:Escaneando   = $false
 $script:VncViewerPath = $null
 
+# Usuario de AD "instalador" - liberado por maquina (atributo userWorkstations)
+# pra poder logar so nas estacoes especificas onde foi autorizado. A lista e
+# consultada UMA VEZ por varredura (e a mesma pra zona inteira, nao muda por
+# maquina) e guardada aqui pra cada linha da grade so precisar comparar o
+# hostname contra ela. $null = ainda nao consultado ou a consulta falhou
+# (nesse caso a coluna fica "-" pra todo mundo, ja que nao da pra saber).
+$script:NomeUsuarioInstalador = "instalador"
+$script:MaquinasLiberadasInstalador = $null
+
 # Controles da barra de progresso da janela "Sistemas Eleitorais" (ver
 # Show-JanelaSistemasEleitorais) - ficam em $script: pra esse callback
 # poder ser definido UMA VEZ SO, em nivel de script (sem closure
@@ -550,6 +559,7 @@ Add-ColunaGrid "Detectado" "Detectado Por" 270
 Add-ColunaGrid "Vnc" "VNC" 85
 Add-ColunaGrid "Rc" "RC Ivanti" 90
 Add-ColunaGrid "Sis" "SIS" 70
+Add-ColunaGrid "Instalador" "Instalador" 130
 foreach ($sis in $script:SistemasEleitoraisExtra) {
     if (-not $sis.NaGradePrincipal) { continue }
     Add-ColunaGrid $sis.Coluna $sis.Titulo $sis.Largura
@@ -4090,7 +4100,22 @@ function Add-LinhaGrid {
     $colunasDesatualizadas = @()
     $sisTxt = if ($Resultado.VersaoSis) { $Resultado.VersaoSis } else { "-" }
 
-    $valoresLinha = @($Resultado.IP, $tipo, $Resultado.Hostname, $modeloTxt, $tempoTxt, $Resultado.DetectadoPor, $vncTxt, $rcTxt, $sisTxt)
+    # Status Instalador: compara o hostname (sem sufixo de dominio, ex.
+    # "ZMA053WKS71099.tre-ma.gov.br" -> "ZMA053WKS71099") contra a lista de
+    # maquinas liberadas pro usuario "instalador" no AD (consultada uma vez
+    # por varredura). "-" quando nao ha hostname resolvido ou a consulta ao
+    # AD falhou (sem como saber o status real nesses casos).
+    $instaladorTxt = "-"
+    if ($temNomeResolvido -and $null -ne $script:MaquinasLiberadasInstalador) {
+        $hostnameCurto = ($Resultado.Hostname -split '\.')[0]
+        if ($script:MaquinasLiberadasInstalador.Count -eq 0 -or $script:MaquinasLiberadasInstalador -contains $hostnameCurto) {
+            $instaladorTxt = "Liberado"
+        } else {
+            $instaladorTxt = "Bloqueado"
+        }
+    }
+
+    $valoresLinha = @($Resultado.IP, $tipo, $Resultado.Hostname, $modeloTxt, $tempoTxt, $Resultado.DetectadoPor, $vncTxt, $rcTxt, $sisTxt, $instaladorTxt)
     foreach ($sis in $script:SistemasEleitoraisExtra) {
         if (-not $sis.NaGradePrincipal) { continue }
         $valorExtra = $Resultado.($sis.Propriedade)
@@ -4150,6 +4175,14 @@ function Add-LinhaGrid {
     if ($rcDisponivel) {
         $row.Cells["Rc"].Style.ForeColor = [System.Drawing.Color]::FromArgb(0, 128, 0)
         $row.Cells["Rc"].Style.Font = New-Object System.Drawing.Font($grid.Font, [System.Drawing.FontStyle]::Bold)
+    }
+
+    if ($instaladorTxt -eq "Liberado") {
+        $row.Cells["Instalador"].Style.ForeColor = [System.Drawing.Color]::FromArgb(0, 128, 0)
+        $row.Cells["Instalador"].Style.Font = New-Object System.Drawing.Font($grid.Font, [System.Drawing.FontStyle]::Bold)
+    } elseif ($instaladorTxt -eq "Bloqueado") {
+        $row.Cells["Instalador"].Style.ForeColor = [System.Drawing.Color]::FromArgb(220, 53, 69)
+        $row.Cells["Instalador"].Style.Font = New-Object System.Drawing.Font($grid.Font, [System.Drawing.FontStyle]::Bold)
     }
 }
 
@@ -4354,6 +4387,41 @@ $timer.Add_Tick({
 })
 
 # ============================================================
+# CONSULTA AD: maquinas liberadas para o usuario "instalador"
+# ============================================================
+function Get-MaquinasLiberadasInstalador {
+    <#
+        Consulta o atributo LDAP userWorkstations do usuario
+        $script:NomeUsuarioInstalador (lista de hostnames NetBIOS separados
+        por virgula onde ele esta liberado pra logar agora) via ADSI puro,
+        sem depender do modulo ActiveDirectory/RSAT. Retorna um array de
+        hostnames (vazio = sem restricao, liberado em qualquer maquina) ou
+        $null se a consulta falhou (dominio inacessivel, usuario nao
+        encontrado etc) - nesse caso a coluna "Status Instalador" fica "-"
+        pra todo mundo, ja que nao da pra saber o status real.
+    #>
+    try {
+        $raizBusca = New-Object System.DirectoryServices.DirectoryEntry
+        $busca = New-Object System.DirectoryServices.DirectorySearcher($raizBusca)
+        $busca.Filter = "(&(objectClass=user)(objectCategory=person)(samAccountName=$script:NomeUsuarioInstalador))"
+        [void]$busca.PropertiesToLoad.Add("userWorkstations")
+        $resultado = $busca.FindOne()
+        if (-not $resultado) {
+            Add-Log "[AVISO] Usuario '$script:NomeUsuarioInstalador' nao encontrado no AD - coluna Status Instalador ficara em branco." "OrangeRed"
+            return $null
+        }
+        if ($resultado.Properties["userworkstations"].Count -eq 0) {
+            return @()
+        }
+        $valorCru = $resultado.Properties["userworkstations"][0]
+        return @($valorCru -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    } catch {
+        Add-Log "[AVISO] Falha ao consultar AD para status do instalador: $_" "OrangeRed"
+        return $null
+    }
+}
+
+# ============================================================
 # EVENTO: Iniciar Varredura
 # ============================================================
 $btnIniciar.Add_Click({
@@ -4362,6 +4430,14 @@ $btnIniciar.Add_Click({
     $baseIP = $resolucao.Prefixo
 
     $script:ZonaAtual = $zona
+    $script:MaquinasLiberadasInstalador = Get-MaquinasLiberadasInstalador
+    if ($null -eq $script:MaquinasLiberadasInstalador) {
+        Add-Log "Nao foi possivel consultar o AD para o status do instalador nesta varredura." "Gray"
+    } elseif ($script:MaquinasLiberadasInstalador.Count -eq 0) {
+        Add-Log "Usuario '$script:NomeUsuarioInstalador' sem restricao de maquina no AD (liberado em qualquer uma)." "Gray"
+    } else {
+        Add-Log "Usuario '$script:NomeUsuarioInstalador' liberado em $($script:MaquinasLiberadasInstalador.Count) maquina(s) no AD." "Gray"
+    }
     # "Rede compartilhada" = a mesma rede /24 atende mais de uma zona ao
     # mesmo tempo (varias zonas no mesmo predio, ex: 004/005/006 ou as
     # zonas de Sao Luis) - detectado dinamicamente a partir da planilha,
