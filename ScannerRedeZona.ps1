@@ -139,32 +139,54 @@ $script:MapaModelos = @{
 # amigavel da planilha de Versoes de Sistemas (ver Resolve-NomeAmigavelVersao)
 # - BitLocker nao tem "nome de praia" como os sistemas eleitorais, entao fica
 # de fora; SIS (tratado a parte, nao faz parte desta lista) tambem fica fora.
-# NaGradePrincipal controla se vira coluna na tela principal - PADA-UE e FBR
-# ficam de fora por enquanto (dado ainda e coletado normalmente, so nao
-# aparece na grade - a ideia e mostrar via menu de contexto mais pra frente).
+# NaGradePrincipal controla se vira coluna na tela principal - PADA-UE, FBR e
+# os sistemas adicionados pra janela "Verificar Sistemas Eleitorais" (ver
+# Show-JanelaSistemasEleitorais) ficam de fora da grade principal por
+# enquanto (dado e coletado normalmente, so nao vira coluna ali).
+# NomeVersaoAtual e a chave usada pra procurar a "versao mais atual" na
+# planilha de Versoes de Sistemas (coluna "Sistema" dela) - normalmente e
+# IGUAL a Chave (o nome que o OCS reporta), MAS BitLocker/CriptoSIS e uma
+# excecao confirmada: o OCS reporta a chave de registro como "BITLOCKER",
+# só que a planilha de Versoes/Pacotes cadastra essa mesma linha como
+# "CRIPTOSIS" (nome comercial) - por isso os dois campos divergem so nesse
+# caso.
 $script:SistemasEleitoraisExtra = @(
-    [PSCustomObject]@{ Chave = "BITLOCKER"; Propriedade = "VersaoBitlocker"; Coluna = "Bitlocker"; Titulo = "BitLocker"; Largura = 90; ComNomeAmigavel = $false; NaGradePrincipal = $true }
+    [PSCustomObject]@{ Chave = "BITLOCKER"; NomeVersaoAtual = "CRIPTOSIS"; Propriedade = "VersaoBitlocker"; Coluna = "Bitlocker"; Titulo = "Criptosis"; Largura = 90; ComNomeAmigavel = $false; NaGradePrincipal = $true }
     # Chave interna continua "GEDAI" (e o que o OCS Inventory reporta no
     # registro, confirmado na pratica) - o produto so passou a se chamar
     # "GEDAI-UE" comercialmente, entao o Titulo (nome de EXIBICAO) foi
-    # atualizado, mas a Chave (usada pra bater com o registro do OCS e com
-    # a coluna "Sistema" da planilha) fica igual.
-    [PSCustomObject]@{ Chave = "GEDAI";     Propriedade = "VersaoGedai";     Coluna = "Gedai";     Titulo = "GEDAI-UE";  Largura = 150; ComNomeAmigavel = $true; NaGradePrincipal = $true }
-    [PSCustomObject]@{ Chave = "HOLOCRON";  Propriedade = "VersaoHolocron";  Coluna = "Holocron";  Titulo = "Holocron";  Largura = 150; ComNomeAmigavel = $true; NaGradePrincipal = $true }
+    # atualizado. NomeVersaoAtual TAMBEM precisa ser "GEDAI-UE" (nao
+    # "GEDAI") - confirmado que a coluna "Sistema" da planilha de Versoes
+    # usa o nome comercial com "-UE", diferente da chave de registro do OCS.
+    [PSCustomObject]@{ Chave = "GEDAI";     NomeVersaoAtual = "GEDAI-UE";  Propriedade = "VersaoGedai";     Coluna = "Gedai";     Titulo = "GEDAI-UE";  Largura = 150; ComNomeAmigavel = $true; NaGradePrincipal = $true }
+    [PSCustomObject]@{ Chave = "HOLOCRON";  NomeVersaoAtual = "HOLOCRON";  Propriedade = "VersaoHolocron";  Coluna = "Holocron";  Titulo = "Holocron";  Largura = 150; ComNomeAmigavel = $true; NaGradePrincipal = $true }
     # ATENCAO: "PADA-UE" e "FBR" abaixo sao um PALPITE de qual e o campo NAME
     # exato que o OCS Inventory usa pra esses dois sistemas na secao
     # "registry" (seguindo o mesmo padrao curto do GEDAI/HOLOCRON) - ainda
     # NAO confirmado. Se ao mostrar em algum lugar o valor aparecer sempre
     # "-", confira no OCS Inventory (Inventario > Software/Registro da
     # maquina) qual e o NAME exato dessas chaves e ajuste aqui.
-    [PSCustomObject]@{ Chave = "PADA-UE";   Propriedade = "VersaoPadaUe";     Coluna = "PadaUe";    Titulo = "PADA-UE";   Largura = 150; ComNomeAmigavel = $true; NaGradePrincipal = $false }
-    [PSCustomObject]@{ Chave = "FBR";       Propriedade = "VersaoFbr";        Coluna = "Fbr";       Titulo = "FBR";       Largura = 150; ComNomeAmigavel = $true; NaGradePrincipal = $false }
-    # Chave "TRANSPORTADORTDTOT" confirmada no cadastro de registro do OCS
-    # Inventory (HKLM\SOFTWARE\Sistemas Eleitorais\TransportadorTDTOT,
-    # campo NAME = valor da coluna "Versao"). Sem nome amigavel (nao tem
-    # "nome de praia" na planilha de Versoes, igual BitLocker/SIS) - mostra
-    # a versao crua mesmo.
-    [PSCustomObject]@{ Chave = "TRANSPORTADORTDTOT"; Propriedade = "VersaoTransportadorTdtot"; Coluna = "TransportadorTdtot"; Titulo = "Transportador TDTOT"; Largura = 150; ComNomeAmigavel = $false; NaGradePrincipal = $true }
+    [PSCustomObject]@{ Chave = "PADA-UE";   NomeVersaoAtual = "PADA-UE";   Propriedade = "VersaoPadaUe";     Coluna = "PadaUe";    Titulo = "PADA-UE";   Largura = 150; ComNomeAmigavel = $true; NaGradePrincipal = $false }
+    [PSCustomObject]@{ Chave = "FBR";       NomeVersaoAtual = "FBR";       Propriedade = "VersaoFbr";        Coluna = "Fbr";       Titulo = "FBR";       Largura = 150; ComNomeAmigavel = $true; NaGradePrincipal = $false }
+    # Chave "TRANSPORTADORTDTOT" (sem espaco) confirmada no cadastro de
+    # registro do OCS Inventory (HKLM\SOFTWARE\Sistemas Eleitorais\
+    # TransportadorTDTOT, campo NAME = valor da coluna "Versao"). Ja a
+    # coluna "Sistema" da planilha de Versoes usa "TRANSPORTADOR TDTOT"
+    # COM ESPACO pra essa mesma linha - por isso NomeVersaoAtual diverge
+    # da Chave aqui tambem. Sem nome amigavel (nao tem "nome de praia" na
+    # planilha, igual BitLocker/SIS) - mostra a versao crua mesmo.
+    [PSCustomObject]@{ Chave = "TRANSPORTADORTDTOT"; NomeVersaoAtual = "TRANSPORTADOR TDTOT"; Propriedade = "VersaoTransportadorTdtot"; Coluna = "TransportadorTdtot"; Titulo = "Transportador TDTOT"; Largura = 150; ComNomeAmigavel = $false; NaGradePrincipal = $true }
+    # Confirmados no cadastro de registro do OCS Inventory (mesma tela do
+    # TRANSPORTADORTDTOT). NaGradePrincipal = $false pra nao lotar a grade
+    # principal de colunas - aparecem na janela "Verificar Sistemas
+    # Eleitorais" (menu de contexto, maquinas com SIS instalado).
+    [PSCustomObject]@{ Chave = "EXECJAVA";          NomeVersaoAtual = "EXECJAVA";                    Propriedade = "VersaoExecJava";          Coluna = "ExecJava";          Titulo = "ExecJava";                  Largura = 150; ComNomeAmigavel = $false; NaGradePrincipal = $false }
+    # Chave de registro "TRANSPORTADOR-HMG" (abreviada), mas a coluna
+    # "Sistema" da planilha de Versoes usa o nome por extenso
+    # "TRANSPORTADOR HOMOLOGACAO" pra essa linha - mais uma divergencia
+    # entre Chave (OCS) e NomeVersaoAtual (planilha).
+    [PSCustomObject]@{ Chave = "TRANSPORTADOR-HMG"; NomeVersaoAtual = "TRANSPORTADOR HOMOLOGAÇÃO"; Propriedade = "VersaoTransportadorHmg";  Coluna = "TransportadorHmg";  Titulo = "Transportador Homologacao"; Largura = 150; ComNomeAmigavel = $false; NaGradePrincipal = $false }
+    [PSCustomObject]@{ Chave = "CERTIFICADO P12";   NomeVersaoAtual = "CERTIFICADO P12";   Propriedade = "VersaoCertificadoP12";    Coluna = "CertificadoP12";    Titulo = "Certificado P12";           Largura = 150; ComNomeAmigavel = $false; NaGradePrincipal = $false }
 )
 
 $script:ArquivoConfigVnc = Join-Path $PSScriptRoot "vnc_config.txt"
@@ -3548,6 +3570,220 @@ function Get-ArquivoCvcMaisRecente {
     return (@($candidatos) | Sort-Object LastWriteTime -Descending | Select-Object -First 1)
 }
 
+function Show-JanelaSistemasEleitorais {
+    <#
+        Janela "Verificar Sistemas Eleitorais" - lista SIS + todos os
+        sistemas de $script:SistemasEleitoraisExtra (independente de
+        NaGradePrincipal, ja que aqui a ideia e mostrar TUDO, nao so o que
+        cabe como coluna na grade principal), com a versao instalada JA
+        LIDA durante a propria varredura (sem nenhuma consulta nova ao
+        OCS) comparada contra a versao marcada "Atual" na planilha de
+        Versoes de Sistemas, quando disponivel.
+
+        Comparacao de versao e uma igualdade de STRING direta contra
+        $script:VersaoAtualPorSistema (nao usa Resolve-NomeAmigavelVersao
+        pra decidir "desatualizado" porque aquela funcao devolve $null se
+        a versao instalada nem estiver catalogada na planilha - o que
+        esconderia justamente o caso mais claro de desatualizado, uma
+        versao tao antiga que nem consta mais la). Resolve-NomeAmigavelVersao
+        ainda e usada, a parte, so pra exibir o nome de praia quando
+        disponivel.
+    #>
+    param($Resultado)
+
+    # "Versao (Nome Amigavel)" - reaproveita $script:TabelaVersoes direto
+    # (em vez de Resolve-NomeAmigavelVersao) porque aqui precisamos do
+    # nome amigavel tanto da versao INSTALADA quanto da versao ATUAL (a
+    # planilha pode ter nome amigavel cadastrado pra qualquer uma das
+    # duas, nao so a instalada).
+    function Format-VersaoComNomeAmigavel {
+        param($Sistema, $Versao)
+        if (-not $Versao -or $Versao -eq "-") { return "-" }
+        $chave = "$($Sistema.ToUpper())|$($Versao.Trim())"
+        if ($script:TabelaVersoes.ContainsKey($chave) -and $script:TabelaVersoes[$chave].NomeAmigavel) {
+            return "$Versao ($($script:TabelaVersoes[$chave].NomeAmigavel))"
+        }
+        return $Versao
+    }
+
+    $itens = New-Object System.Collections.Generic.List[object]
+    $itens.Add([PSCustomObject]@{ Titulo = "SIS"; Versao = $Resultado.VersaoSis; NomeVersaoAtual = "SIS" })
+    foreach ($sis in $script:SistemasEleitoraisExtra) {
+        $itens.Add([PSCustomObject]@{ Titulo = $sis.Titulo; Versao = $Resultado.($sis.Propriedade); NomeVersaoAtual = $sis.NomeVersaoAtual })
+    }
+
+    $dlg = New-Object System.Windows.Forms.Form
+    $dlg.Text = "Sistemas Eleitorais - $($Resultado.Hostname) ($($Resultado.IP))"
+    $dlg.Size = New-Object System.Drawing.Size(940, 460)
+    $dlg.MinimumSize = New-Object System.Drawing.Size(700, 300)
+    $dlg.StartPosition = "CenterParent"
+
+    $painelLegenda = New-Object System.Windows.Forms.FlowLayoutPanel
+    $painelLegenda.Dock = [System.Windows.Forms.DockStyle]::Top
+    $painelLegenda.Height = 30
+    $painelLegenda.Padding = New-Object System.Windows.Forms.Padding(10, 6, 10, 0)
+    $dlg.Controls.Add($painelLegenda)
+    function Add-ItemLegendaSis {
+        param($Painel, $Texto, $Cor)
+        $lblItem = New-Object System.Windows.Forms.Label
+        $lblItem.Text = "● $Texto"
+        $lblItem.ForeColor = $Cor
+        $lblItem.AutoSize = $true
+        $lblItem.Margin = New-Object System.Windows.Forms.Padding(0, 3, 20, 0)
+        [void]$Painel.Controls.Add($lblItem)
+    }
+    Add-ItemLegendaSis $painelLegenda "Atualizado" ([System.Drawing.Color]::FromArgb(0, 128, 0))
+    Add-ItemLegendaSis $painelLegenda "Desatualizado" ([System.Drawing.Color]::FromArgb(200, 100, 0))
+    Add-ItemLegendaSis $painelLegenda "Nao instalado" ([System.Drawing.Color]::FromArgb(110, 110, 110))
+    Add-ItemLegendaSis $painelLegenda "Pacote fora do padrao" ([System.Drawing.Color]::FromArgb(200, 100, 0))
+
+    $lblCarregandoSis = New-Object System.Windows.Forms.Label
+    $lblCarregandoSis.Text = ""
+    $lblCarregandoSis.Dock = [System.Windows.Forms.DockStyle]::Top
+    $lblCarregandoSis.Height = 22
+    $lblCarregandoSis.Padding = New-Object System.Windows.Forms.Padding(12, 0, 12, 0)
+    $lblCarregandoSis.ForeColor = [System.Drawing.Color]::Gray
+    $lblCarregandoSis.Visible = $false
+    $dlg.Controls.Add($lblCarregandoSis)
+
+    $painelRodape = New-Object System.Windows.Forms.Panel
+    $painelRodape.Dock = [System.Windows.Forms.DockStyle]::Bottom
+    $painelRodape.Height = 46
+    $dlg.Controls.Add($painelRodape)
+
+    $btnFecharSis = New-Object System.Windows.Forms.Button
+    $btnFecharSis.Text = "Fechar"
+    $btnFecharSis.Location = New-Object System.Drawing.Point(830, 9)
+    $btnFecharSis.Width = 90
+    $btnFecharSis.Height = 28
+    $btnFecharSis.Anchor = "Top,Right"
+    $painelRodape.Controls.Add($btnFecharSis)
+    $btnFecharSis.Add_Click({ $dlg.Close() }.GetNewClosure())
+
+    $gridSis = New-Object System.Windows.Forms.DataGridView
+    $gridSis.Dock = [System.Windows.Forms.DockStyle]::Fill
+    $gridSis.AllowUserToAddRows = $false
+    $gridSis.AllowUserToDeleteRows = $false
+    $gridSis.ReadOnly = $true
+    $gridSis.RowHeadersVisible = $false
+    $gridSis.SelectionMode = [System.Windows.Forms.DataGridViewSelectionMode]::FullRowSelect
+    $gridSis.MultiSelect = $false
+    $gridSis.AutoSizeColumnsMode = [System.Windows.Forms.DataGridViewAutoSizeColumnsMode]::None
+    $gridSis.ColumnHeadersHeightSizeMode = [System.Windows.Forms.DataGridViewColumnHeadersHeightSizeMode]::DisableResizing
+    $gridSis.ColumnHeadersHeight = 26
+    $gridSis.RowTemplate.Height = 24
+    $dlg.Controls.Add($gridSis)
+
+    function Add-ColunaGridSis {
+        param($Nome, $Titulo, $Largura)
+        $c = New-Object System.Windows.Forms.DataGridViewTextBoxColumn
+        $c.Name = $Nome; $c.HeaderText = $Titulo; $c.Width = $Largura; $c.ReadOnly = $true
+        [void]$gridSis.Columns.Add($c)
+    }
+    Add-ColunaGridSis "Sistema" "Sistema" 190
+    Add-ColunaGridSis "VersaoInstalada" "Versao Instalada" 190
+    Add-ColunaGridSis "VersaoAtual" "Versao Atual (planilha)" 190
+    Add-ColunaGridSis "Status" "Status" 150
+    Add-ColunaGridSis "Pacote" "Pacote de Instalacao" 200
+
+    # Preenche Sistema/Versao Instalada/Versao Atual/Status NA HORA (nao
+    # depende de rede nenhuma - so dados ja lidos na varredura + a
+    # planilha ja carregada em memoria). So a coluna Pacote depende do
+    # InstSeg (rede) - fica "Verificando..." ate a janela aparecer e o
+    # levantamento (no evento Shown) terminar, igual Show-JanelaPacotes.
+    foreach ($item in $itens) {
+        $instalado = $item.Versao -and $item.Versao -ne "-"
+        $versaoAtual = if ($item.NomeVersaoAtual) { $script:VersaoAtualPorSistema[$item.NomeVersaoAtual] } else { $null }
+
+        $versaoInstaladaExibida = if ($instalado) { Format-VersaoComNomeAmigavel -Sistema $item.NomeVersaoAtual -Versao $item.Versao } else { "-" }
+        $versaoAtualExibida = if ($versaoAtual) { Format-VersaoComNomeAmigavel -Sistema $item.NomeVersaoAtual -Versao $versaoAtual } else { "-" }
+        $pacote = $script:TabelaPacotes | Where-Object { $_.Sistema -eq $item.NomeVersaoAtual } | Select-Object -First 1
+
+        $idx = $gridSis.Rows.Add($item.Titulo, $versaoInstaladaExibida, $versaoAtualExibida, "", $(if ($pacote) { "Verificando..." } else { "-" }))
+        $row = $gridSis.Rows[$idx]
+        $row.Tag = $pacote
+        if ($pacote) { $row.Cells["Pacote"].Style.ForeColor = [System.Drawing.Color]::Gray }
+
+        if (-not $instalado) {
+            $row.Cells["Status"].Value = "Nao instalado"
+            $row.Cells["Status"].Style.ForeColor = [System.Drawing.Color]::FromArgb(110, 110, 110)
+        } elseif ($versaoAtual) {
+            if ($item.Versao.Trim() -eq $versaoAtual.Trim()) {
+                $row.Cells["Status"].Value = "Atualizado"
+                $row.Cells["Status"].Style.ForeColor = [System.Drawing.Color]::FromArgb(0, 128, 0)
+            } else {
+                $row.Cells["Status"].Value = "Desatualizado"
+                $row.Cells["Status"].Style.ForeColor = [System.Drawing.Color]::FromArgb(200, 100, 0)
+                $row.Cells["Status"].Style.Font = New-Object System.Drawing.Font($gridSis.Font, [System.Drawing.FontStyle]::Bold)
+            }
+        } else {
+            $row.Cells["Status"].Value = "Instalado (versao atual desconhecida)"
+        }
+    }
+
+    # So comeca a buscar o InstSeg DEPOIS da janela ja estar visivel -
+    # mesmo motivo de Show-JanelaPacotes: senao a janela nao aparece na
+    # tela ate a busca de rede terminar.
+    $dlg.Add_Shown({
+        $lblCarregandoSis.Text = "Verificando pacotes em \\$($Resultado.IP)\InstSeg (pode demorar em links de zona lentos)..."
+        $lblCarregandoSis.Visible = $true
+        [System.Windows.Forms.Application]::DoEvents()
+
+        $scriptBlockListarInstSeg = {
+            param($Ip)
+            $raiz = "\\$Ip\InstSeg"
+            if (-not (Test-Path $raiz)) { return $null }
+            try { return @(Get-ChildItem -Path $raiz -File -Recurse -Depth 6 -ErrorAction SilentlyContinue) } catch { return $null }
+        }
+        $psInstSeg = [powershell]::Create()
+        $arquivosInstSeg = $null
+        try {
+            [void]$psInstSeg.AddScript($scriptBlockListarInstSeg).AddArgument($Resultado.IP)
+            $handleInstSeg = $psInstSeg.BeginInvoke()
+            while (-not $handleInstSeg.IsCompleted) {
+                [System.Windows.Forms.Application]::DoEvents()
+                Start-Sleep -Milliseconds 50
+            }
+            $arquivosInstSeg = $psInstSeg.EndInvoke($handleInstSeg)
+        } finally {
+            $psInstSeg.Dispose()
+        }
+
+        $lblCarregandoSis.Visible = $false
+
+        foreach ($row in $gridSis.Rows) {
+            $pacote = $row.Tag
+            if (-not $pacote) { continue }
+
+            $statusInfoPacote = Get-StatusPacoteNoDestino -Resultado $Resultado -Pacote $pacote -ArquivosInstSeg $arquivosInstSeg
+            if ($statusInfoPacote.Existe) {
+                $raizInstSeg = "\\$($Resultado.IP)\InstSeg\"
+                $pastaArquivo = Split-Path $statusInfoPacote.ArquivoDestino -Parent
+                $pastaRelativa = if ($pastaArquivo -and $pastaArquivo.ToUpper().StartsWith($raizInstSeg.ToUpper())) { $pastaArquivo.Substring($raizInstSeg.Length) } else { $pastaArquivo }
+                $pastaExibida = "\\InstSeg\$pastaRelativa"
+                if ($statusInfoPacote.ForaDoPadrao) {
+                    $textoPacote = "Copiado Fora do Padrao ($pastaExibida)"
+                    $corPacote = [System.Drawing.Color]::FromArgb(200, 100, 0)
+                } else {
+                    $textoPacote = "Copiado ($pastaExibida)"
+                    $corPacote = [System.Drawing.Color]::FromArgb(0, 128, 0)
+                }
+                if ($statusInfoPacote.TamanhoConfere -eq $false) {
+                    $textoPacote = "TAMANHO NAO CONFERE! $textoPacote"
+                    $corPacote = [System.Drawing.Color]::Firebrick
+                }
+            } else {
+                $textoPacote = "Nao copiado ainda"
+                $corPacote = [System.Drawing.Color]::FromArgb(110, 110, 110)
+            }
+            $row.Cells["Pacote"].Value = $textoPacote
+            $row.Cells["Pacote"].Style.ForeColor = $corPacote
+        }
+    }.GetNewClosure())
+
+    [void]$dlg.ShowDialog()
+}
+
 function Invoke-AcaoEnviarCvcDrive {
     <#
         Localiza o CVC da maquina e tenta enviar automaticamente ao Google
@@ -3841,7 +4077,7 @@ function Add-LinhaGrid {
     foreach ($sis in $script:SistemasEleitoraisExtra) {
         if (-not $sis.NaGradePrincipal) { continue }
         $valorExtra = $Resultado.($sis.Propriedade)
-        $infoExtra = if ($sis.ComNomeAmigavel) { Resolve-NomeAmigavelVersao -Sistema $sis.Chave -Versao $valorExtra } else { $null }
+        $infoExtra = if ($sis.ComNomeAmigavel) { Resolve-NomeAmigavelVersao -Sistema $sis.NomeVersaoAtual -Versao $valorExtra } else { $null }
         $valoresLinha += $(if ($infoExtra) { "$($infoExtra.NomeAmigavel) ($valorExtra)" } elseif ($valorExtra) { $valorExtra } else { "-" })
         if ($infoExtra -and $infoExtra.EhAtual -eq $false) { $colunasDesatualizadas += $sis.Coluna }
     }
@@ -4671,6 +4907,9 @@ $menuContextoGrid.Add_Opening({
         # instalado - sem SIS, nao ha CVC gerado no InstSeg\CVC pra achar.
         $temSis = $r.VersaoSis -and $r.VersaoSis -ne "-"
         if ($temSis) {
+            $itemSistemas = $menuContextoGrid.Items.Add("Verificar Sistemas Eleitorais...")
+            $itemSistemas.Add_Click({ Show-JanelaSistemasEleitorais -Resultado $r }.GetNewClosure())
+
             $itemCvc = $menuContextoGrid.Items.Add("Enviar CVC para o Google Drive...")
             $itemCvc.Add_Click({ Invoke-AcaoEnviarCvcDrive -Resultado $r }.GetNewClosure())
         }
