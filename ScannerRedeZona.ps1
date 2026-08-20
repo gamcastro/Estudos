@@ -1241,6 +1241,40 @@ function Find-PacoteEmArquivosInstSeg {
     return ($ArquivosInstSeg | Where-Object { $_.Name -eq $Pacote.NomeArquivo } | Select-Object -First 1)
 }
 
+function Get-InfoArquivoComDoEvents {
+    <#
+        Test-Path + Get-Item num arquivo especifico (caminho UNC), rodando
+        num runspace em segundo plano com a UI so bombeando DoEvents
+        enquanto espera - mesmo padrao ja usado noutras chamadas de rede
+        desta ferramenta. Um Test-Path/Get-Item direto na thread da UI
+        pode levar varios segundos sem devolver o controle nenhuma vez
+        quando o link da zona esta lento/instavel (confirmado na pratica:
+        travava a janela justo depois de terminar uma copia grande).
+        Devolve $null se o arquivo nao existir (ou a chamada falhar).
+    #>
+    param([string]$Caminho, [int]$TimeoutSec = 10)
+
+    $scriptBlockInfoArquivo = {
+        param($Caminho)
+        if (-not (Test-Path -LiteralPath $Caminho)) { return $null }
+        try { return Get-Item -LiteralPath $Caminho -ErrorAction Stop } catch { return $null }
+    }
+    $ps = [powershell]::Create()
+    try {
+        [void]$ps.AddScript($scriptBlockInfoArquivo).AddArgument($Caminho)
+        $handle = $ps.BeginInvoke()
+        $cronometro = [System.Diagnostics.Stopwatch]::StartNew()
+        while (-not $handle.IsCompleted -and $cronometro.Elapsed.TotalSeconds -lt $TimeoutSec) {
+            [System.Windows.Forms.Application]::DoEvents()
+            Start-Sleep -Milliseconds 30
+        }
+        if (-not $handle.IsCompleted) { $ps.Stop(); return $null }
+        return $ps.EndInvoke($handle) | Select-Object -First 1
+    } finally {
+        $ps.Dispose()
+    }
+}
+
 function Get-StatusPacoteNoDestino {
     <#
         Confere se o pacote ja esta na maquina de destino, SEM baixar nem
@@ -1269,8 +1303,8 @@ function Get-StatusPacoteNoDestino {
 
     if ($nomeConhecido) {
         $arquivoDestino = Join-Path $pastaDestinoUnc $nomeConhecido
-        if (Test-Path $arquivoDestino) {
-            $info = Get-Item $arquivoDestino
+        $info = Get-InfoArquivoComDoEvents -Caminho $arquivoDestino
+        if ($info) {
             $tamanhoConfere = if ($Pacote.TamanhoEsperado) { $info.Length -eq $Pacote.TamanhoEsperado } else { $null }
             return [PSCustomObject]@{ Existe = $true; NomeConhecido = $true; Tamanho = $info.Length; TamanhoConfere = $tamanhoConfere; Data = $info.LastWriteTime; ArquivoDestino = $arquivoDestino; PastaDestinoUnc = $pastaDestinoUnc; ForaDoPadrao = $false }
         }
@@ -1305,6 +1339,43 @@ function Write-BlocoStreamComDoEvents {
         [System.Windows.Forms.Application]::DoEvents()
     }
     $Stream.EndWrite($resultadoAsync)
+}
+
+function Invoke-FecharStreamComDoEvents {
+    <#
+        Fecha um stream (ex: FileStream pro InstSeg via UNC) rodando o
+        Close() num runspace em segundo plano, com a UI so bombeando
+        DoEvents enquanto espera. Fechar um FileStream de destino REMOTO
+        forca o flush final da escrita pela rede (SMB) - e exatamente
+        esse Close() que confirma os ultimos bytes junto ao servidor, e
+        pode demorar varios segundos num link de zona ruim. Chamado
+        direto (sincrono) na thread da UI, isso travava a janela bem no
+        intervalo entre o ultimo "100%" logado e a mensagem final -
+        confirmado na pratica, mesmo depois de ja ter corrigido os
+        Write() em bloco e a checagem de tamanho pos-copia com esse mesmo
+        padrao. FileStream nao e "preso" a thread que criou (diferente de
+        controles WinForms) - chamar Close() de outra thread e seguro
+        desde que nada mais esteja usando o stream ao mesmo tempo, que e
+        exatamente o caso aqui (a thread principal so espera).
+    #>
+    param([System.IO.Stream]$Stream)
+    if (-not $Stream) { return }
+    $scriptBlockFechar = {
+        param($StreamParaFechar)
+        try { $StreamParaFechar.Close() } catch {}
+    }
+    $ps = [powershell]::Create()
+    try {
+        [void]$ps.AddScript($scriptBlockFechar).AddArgument($Stream)
+        $handle = $ps.BeginInvoke()
+        while (-not $handle.IsCompleted) {
+            [System.Windows.Forms.Application]::DoEvents()
+            Start-Sleep -Milliseconds 30
+        }
+        [void]$ps.EndInvoke($handle)
+    } finally {
+        $ps.Dispose()
+    }
 }
 
 function Copy-ArquivoComProgresso {
@@ -1351,7 +1422,7 @@ function Copy-ArquivoComProgresso {
                 [System.Windows.Forms.Application]::DoEvents()
             }
         } finally {
-            $streamDestino.Close()
+            Invoke-FecharStreamComDoEvents -Stream $streamDestino
         }
     } finally {
         $streamOrigem.Close()
@@ -1644,375 +1715,6 @@ function Invoke-AcaoAbrirPastaPacote {
         return
     }
     Start-ProcessoNaoElevado -Caminho $pastaParaAbrir
-}
-
-function Show-JanelaPacotes {
-    <#
-        Janela "Pacotes de Instalacao" pra uma maquina especifica - mostra,
-        pra cada pacote da planilha, se ele ja foi copiado pra essa maquina
-        (olhando so o compartilhamento \\IP\InstSeg, sem baixar nada) e
-        permite copiar (ou copiar de novo) e verificar a integridade (hash
-        SHA256) sob demanda, sem re-baixar/copiar so pra saber o status.
-    #>
-    param($Resultado)
-
-    $dlg = New-Object System.Windows.Forms.Form
-    $dlg.Text = "Pacotes de Instalacao - $($Resultado.Hostname) ($($Resultado.IP))"
-    $dlg.Size = New-Object System.Drawing.Size(1020, 490)
-    $dlg.MinimumSize = New-Object System.Drawing.Size(650, 320)
-    $dlg.StartPosition = "CenterParent"
-    $dlg.Font = New-Object System.Drawing.Font("Segoe UI", 9)
-
-    <#
-        Layout inteiro por Dock (Top/Bottom/Fill), NAO por Location+Size+
-        Anchor manual - testado na pratica: com posicionamento fixo em
-        pixel, redimensionar/maximizar a janela fazia a grade (Anchor
-        Top+Bottom, cresce) SOBREPOR a barra de progresso e os botoes
-        (Anchor so Bottom, tamanho fixo, so reposicionava) - a barra ficava
-        enterrada atras da grade, parecia que "nao aparecia". Dock resolve
-        isso de vez: cada faixa (legenda, aviso de carregamento, rodape
-        com progresso+botoes) reserva sua propria altura fixa, e a grade
-        (Dock=Fill) preenche exatamente o que sobra, sem matematica manual
-        e sem sobreposicao em nenhum tamanho de janela.
-    #>
-    $painelLegenda = New-Object System.Windows.Forms.FlowLayoutPanel
-    $painelLegenda.Dock = [System.Windows.Forms.DockStyle]::Top
-    $painelLegenda.Height = 30
-    $painelLegenda.Padding = New-Object System.Windows.Forms.Padding(12, 8, 12, 0)
-    $painelLegenda.FlowDirection = [System.Windows.Forms.FlowDirection]::LeftToRight
-    $painelLegenda.WrapContents = $false
-    $dlg.Controls.Add($painelLegenda)
-
-    function Add-ItemLegenda {
-        param($Painel, $Texto, $Cor)
-        $lblItem = New-Object System.Windows.Forms.Label
-        $lblItem.Text = "● $Texto"
-        $lblItem.ForeColor = $Cor
-        $lblItem.AutoSize = $true
-        $lblItem.Margin = New-Object System.Windows.Forms.Padding(0, 3, 20, 0)
-        [void]$Painel.Controls.Add($lblItem)
-    }
-    Add-ItemLegenda $painelLegenda "Copiado (pasta)" ([System.Drawing.Color]::FromArgb(0, 128, 0))
-    Add-ItemLegenda $painelLegenda "Copiado Fora do Padrao (pasta)" ([System.Drawing.Color]::FromArgb(200, 100, 0))
-    Add-ItemLegenda $painelLegenda "Nao copiado ainda" ([System.Drawing.Color]::FromArgb(110, 110, 110))
-    Add-ItemLegenda $painelLegenda "Tamanho nao confere" ([System.Drawing.Color]::Firebrick)
-
-    $lblCarregandoPacotes = New-Object System.Windows.Forms.Label
-    $lblCarregandoPacotes.Text = ""
-    $lblCarregandoPacotes.Dock = [System.Windows.Forms.DockStyle]::Top
-    $lblCarregandoPacotes.Height = 22
-    $lblCarregandoPacotes.Padding = New-Object System.Windows.Forms.Padding(12, 0, 12, 0)
-    $lblCarregandoPacotes.ForeColor = [System.Drawing.Color]::Gray
-    $lblCarregandoPacotes.Visible = $false
-    $dlg.Controls.Add($lblCarregandoPacotes)
-
-    # --- Rodape (Dock=Bottom, altura fixa) com barra de progresso + botoes ---
-    $painelRodape = New-Object System.Windows.Forms.Panel
-    $painelRodape.Dock = [System.Windows.Forms.DockStyle]::Bottom
-    $painelRodape.Height = 104
-    $dlg.Controls.Add($painelRodape)
-
-    # Barra de progresso visual - some parada/vazia por padrao, so aparece
-    # (com texto e percentual) durante um "Baixar e Copiar", pra dar
-    # feedback claro que a ferramenta esta trabalhando e nao travada,
-    # principalmente em pacotes grandes/links de zona lentos.
-    # Escopo $script: de proposito (nao variavel local) - o callback de
-    # progresso e passado por varias camadas de funcao/scriptblock ate
-    # chegar em Copy-ArquivoComProgresso/Invoke-DownloadArquivoComProgresso,
-    # e closures aninhadas (.GetNewClosure() dentro de um handler que ja e
-    # .GetNewClosure()) mostraram na pratica nao recapturar a variavel
-    # direito (erro "The property 'Value' cannot be found on this object" -
-    # ou seja, a referencia chegava $null). $script: elimina esse problema
-    # de vez, ja que nao depende de captura de closure nenhuma.
-    $script:lblProgressoPacoteAtual = New-Object System.Windows.Forms.Label
-    $script:lblProgressoPacoteAtual.Text = ""
-    $script:lblProgressoPacoteAtual.Location = New-Object System.Drawing.Point(12, 6)
-    $script:lblProgressoPacoteAtual.Size = New-Object System.Drawing.Size(400, 18)
-    $script:lblProgressoPacoteAtual.Anchor = "Top,Left,Right"
-    $script:lblProgressoPacoteAtual.ForeColor = [System.Drawing.Color]::FromArgb(0, 90, 158)
-    $painelRodape.Controls.Add($script:lblProgressoPacoteAtual)
-
-    $script:barraProgressoPacoteAtual = New-Object System.Windows.Forms.ProgressBar
-    $script:barraProgressoPacoteAtual.Location = New-Object System.Drawing.Point(12, 26)
-    $script:barraProgressoPacoteAtual.Size = New-Object System.Drawing.Size(400, 20)
-    $script:barraProgressoPacoteAtual.Anchor = "Top,Left,Right"
-    $script:barraProgressoPacoteAtual.Minimum = 0
-    $script:barraProgressoPacoteAtual.Maximum = 100
-    $script:barraProgressoPacoteAtual.Value = 0
-    $script:barraProgressoPacoteAtual.Visible = $false
-    $painelRodape.Controls.Add($script:barraProgressoPacoteAtual)
-
-    $gridPacotes = New-Object System.Windows.Forms.DataGridView
-    $gridPacotes.Dock = [System.Windows.Forms.DockStyle]::Fill
-    $gridPacotes.AllowUserToAddRows = $false
-    $gridPacotes.AllowUserToDeleteRows = $false
-    $gridPacotes.RowHeadersVisible = $false
-    $gridPacotes.SelectionMode = [System.Windows.Forms.DataGridViewSelectionMode]::FullRowSelect
-    $gridPacotes.MultiSelect = $false
-    $gridPacotes.AutoSizeColumnsMode = [System.Windows.Forms.DataGridViewAutoSizeColumnsMode]::None
-    # Altura de cabecalho/linha FIXA (nao automatica) - sem isso, a 1a linha
-    # as vezes rendeteriza "achatada"/cortada apos o grid virar Dock=Fill
-    # (glitch conhecido do DataGridView quando o tamanho inicial e calculado
-    # antes do layout Dock terminar de se aplicar).
-    $gridPacotes.ColumnHeadersHeightSizeMode = [System.Windows.Forms.DataGridViewColumnHeadersHeightSizeMode]::DisableResizing
-    $gridPacotes.ColumnHeadersHeight = 26
-    $gridPacotes.RowTemplate.Height = 24
-    $dlg.Controls.Add($gridPacotes)
-
-    function Add-ColunaGridPacotes {
-        param($Nome, $Titulo, $Largura, $SoLeitura = $true)
-        $c = New-Object System.Windows.Forms.DataGridViewTextBoxColumn
-        $c.Name = $Nome; $c.HeaderText = $Titulo; $c.Width = $Largura; $c.ReadOnly = $SoLeitura
-        [void]$gridPacotes.Columns.Add($c)
-    }
-    Add-ColunaGridPacotes "Pacote" "Pacote" 150
-    Add-ColunaGridPacotes "Versao" "Versao" 90
-    Add-ColunaGridPacotes "Status" "Status no Destino" 210
-    Add-ColunaGridPacotes "Tamanho" "Tamanho" 80
-    Add-ColunaGridPacotes "Data" "Copiado em" 120
-
-    $colCopiar = New-Object System.Windows.Forms.DataGridViewButtonColumn
-    $colCopiar.Name = "Copiar"
-    $colCopiar.HeaderText = ""
-    $colCopiar.UseColumnTextForButtonValue = $false
-    $colCopiar.Width = 120
-    [void]$gridPacotes.Columns.Add($colCopiar)
-
-    $colVerificar = New-Object System.Windows.Forms.DataGridViewButtonColumn
-    $colVerificar.Name = "Verificar"
-    $colVerificar.HeaderText = ""
-    $colVerificar.Text = "Verificar Hash"
-    $colVerificar.UseColumnTextForButtonValue = $true
-    $colVerificar.Width = 110
-    [void]$gridPacotes.Columns.Add($colVerificar)
-
-    $colAbrirPasta = New-Object System.Windows.Forms.DataGridViewButtonColumn
-    $colAbrirPasta.Name = "AbrirPasta"
-    $colAbrirPasta.HeaderText = ""
-    $colAbrirPasta.Text = "Abrir Pasta"
-    $colAbrirPasta.UseColumnTextForButtonValue = $true
-    $colAbrirPasta.Width = 100
-    [void]$gridPacotes.Columns.Add($colAbrirPasta)
-
-    $popularLinhaPacote = {
-        param([System.Windows.Forms.DataGridView]$Grid, [int]$Indice, $Pacote, $Resultado, $ArquivosInstSeg = $null)
-
-        $statusInfo = Get-StatusPacoteNoDestino -Resultado $Resultado -Pacote $Pacote -ArquivosInstSeg $ArquivosInstSeg
-        $row = $Grid.Rows[$Indice]
-        # Guarda o status JA calculado junto com o pacote - "Abrir Pasta" e
-        # "Verificar Hash" reaproveitam isso em vez de refazer a varredura
-        # recursiva do InstSeg inteiro a cada clique (era isso que travava
-        # a janela).
-        $row.Tag = [PSCustomObject]@{ Pacote = $Pacote; StatusInfo = $statusInfo }
-
-        $row.Cells["Pacote"].Value = $Pacote.Pacote
-        $row.Cells["Versao"].Value = if ($Pacote.Versao) { $Pacote.Versao } else { "-" }
-        $row.Cells["Status"].ToolTipText = ""
-        $row.Cells["Status"].Style.ForeColor = $Grid.DefaultCellStyle.ForeColor
-
-        if ($statusInfo.Existe) {
-            # Pasta que aparece no status e o caminho relativo ao
-            # compartilhamento, prefixado com "\\InstSeg\" (ex:
-            # \\IP\InstSeg\TDTOT 2026\arquivo.FULL -> "\\InstSeg\TDTOT 2026")
-            # - independente de ser a pasta esperada pela planilha ou uma
-            # pasta livre que o usuario final escolheu ao baixar manualmente.
-            $raizInstSeg = "\\$($Resultado.IP)\InstSeg\"
-            $pastaArquivo = Split-Path $statusInfo.ArquivoDestino -Parent
-            $pastaRelativa = if ($pastaArquivo -and $pastaArquivo.ToUpper().StartsWith($raizInstSeg.ToUpper())) {
-                $pastaArquivo.Substring($raizInstSeg.Length)
-            } else {
-                $pastaArquivo
-            }
-            $pastaExibida = "\\InstSeg\$pastaRelativa"
-
-            if ($statusInfo.ForaDoPadrao) {
-                # Achado em algum lugar do InstSeg, mas nao onde a planilha
-                # esperava - caso real: usuario final baixou manualmente e
-                # guardou numa pasta/nome a criterio proprio.
-                $row.Cells["Status"].Value = "Copiado Fora do Padrao ($pastaExibida)"
-                $row.Cells["Status"].Style.ForeColor = [System.Drawing.Color]::FromArgb(200, 100, 0)
-            } else {
-                $row.Cells["Status"].Value = "Copiado ($pastaExibida)"
-                $row.Cells["Status"].Style.ForeColor = [System.Drawing.Color]::FromArgb(0, 128, 0)
-            }
-            $row.Cells["Status"].ToolTipText = $statusInfo.ArquivoDestino
-            $row.Cells["Tamanho"].Value = "$([Math]::Round($statusInfo.Tamanho / 1MB, 1)) MB"
-            $row.Cells["Data"].Value = $statusInfo.Data.ToString("dd/MM/yy HH:mm")
-            $row.Cells["Copiar"].Value = "Copiar Novamente"
-
-            # Checagem leve (so metadado, sem reler o arquivo) contra o
-            # Tamanho oficial da planilha - roda pra QUALQUER pacote ja
-            # copiado, mesmo os copiados ha tempo (nao so na hora da
-            # copia). Se nao bater, sobrescreve o status com um aviso bem
-            # visivel em vermelho.
-            if ($statusInfo.TamanhoConfere -eq $false) {
-                $row.Cells["Status"].Value = "TAMANHO NAO CONFERE! " + $row.Cells["Status"].Value
-                $row.Cells["Status"].Style.ForeColor = [System.Drawing.Color]::Firebrick
-                $row.Cells["Status"].Style.Font = New-Object System.Drawing.Font($Grid.Font, [System.Drawing.FontStyle]::Bold)
-                $row.Cells["Status"].ToolTipText = "Tamanho no destino ($($statusInfo.Tamanho) bytes) diferente do oficial da planilha ($($Pacote.TamanhoEsperado) bytes) - copia pode estar corrompida/incompleta. Copie de novo.`r`n$($statusInfo.ArquivoDestino)"
-                $row.Cells["Tamanho"].Style.ForeColor = [System.Drawing.Color]::Firebrick
-            }
-        } else {
-            $row.Cells["Status"].Value = "Nao copiado ainda"
-            $row.Cells["Status"].Style.ForeColor = [System.Drawing.Color]::FromArgb(110, 110, 110)
-            $row.Cells["Tamanho"].Value = "-"
-            $row.Cells["Data"].Value = "-"
-            $row.Cells["Copiar"].Value = "Baixar e Copiar"
-        }
-
-        # O botao "Verificar Hash" so faz sentido se ja tiver algo copiado
-        # no destino pra conferir - senao, mesma tecnica ja usada na grade
-        # principal (trocar a celula de botao por uma de texto vazio).
-        if ($statusInfo.Existe) {
-            if ($row.Cells["Verificar"] -isnot [System.Windows.Forms.DataGridViewButtonCell]) {
-                $celulaBotao = New-Object System.Windows.Forms.DataGridViewButtonCell
-                $celulaBotao.Value = "Verificar Hash"
-                $row.Cells["Verificar"] = $celulaBotao
-            }
-        } else {
-            $celulaSemBotao = New-Object System.Windows.Forms.DataGridViewTextBoxCell
-            $celulaSemBotao.Value = ""
-            $row.Cells["Verificar"] = $celulaSemBotao
-        }
-    }
-
-    $recarregarGridPacotes = {
-        <#
-            Mostra as linhas com "Verificando..." IMEDIATAMENTE (sem rede
-            nenhuma), e SO DEPOIS levanta a lista de arquivos do
-            \\IP\InstSeg (que pode demorar bastante em link de zona lento)
-            - rodando isso num runspace separado e so bombeando eventos
-            (DoEvents) enquanto espera, pra janela continuar respondendo
-            (nao mais travando/parecendo pendurada). A lista e levantada
-            UMA VEZ SO (nao uma vez por pacote) e reaproveitada pra todos.
-        #>
-        param([System.Windows.Forms.DataGridView]$Grid, $Resultado, $LblCarregando)
-
-        $Grid.Rows.Clear()
-        foreach ($p in $script:TabelaPacotes) {
-            $idx = $Grid.Rows.Add()
-            $rowPlaceholder = $Grid.Rows[$idx]
-            $rowPlaceholder.Tag = [PSCustomObject]@{ Pacote = $p; StatusInfo = $null }
-            $rowPlaceholder.Cells["Pacote"].Value = $p.Pacote
-            $rowPlaceholder.Cells["Versao"].Value = if ($p.Versao) { $p.Versao } else { "-" }
-            $rowPlaceholder.Cells["Status"].Value = "Verificando..."
-            $rowPlaceholder.Cells["Status"].Style.ForeColor = [System.Drawing.Color]::Gray
-            $rowPlaceholder.Cells["Tamanho"].Value = "-"
-            $rowPlaceholder.Cells["Data"].Value = "-"
-        }
-
-        if ($LblCarregando) {
-            $LblCarregando.Text = "Verificando pacotes em \\$($Resultado.IP)\InstSeg (pode demorar em links de zona lentos)..."
-            $LblCarregando.Visible = $true
-        }
-        [System.Windows.Forms.Application]::DoEvents()
-
-        $scriptBlockListarInstSeg = {
-            param($Ip)
-            $raiz = "\\$Ip\InstSeg"
-            if (-not (Test-Path $raiz)) { return $null }
-            try { return @(Get-ChildItem -Path $raiz -File -Recurse -Depth 6 -ErrorAction SilentlyContinue) } catch { return $null }
-        }
-        $ps = [powershell]::Create()
-        try {
-            [void]$ps.AddScript($scriptBlockListarInstSeg).AddArgument($Resultado.IP)
-            $handle = $ps.BeginInvoke()
-            while (-not $handle.IsCompleted) {
-                [System.Windows.Forms.Application]::DoEvents()
-                Start-Sleep -Milliseconds 50
-            }
-            $arquivosInstSeg = $ps.EndInvoke($handle)
-        } finally {
-            $ps.Dispose()
-        }
-
-        if ($LblCarregando) { $LblCarregando.Visible = $false }
-
-        for ($i = 0; $i -lt $script:TabelaPacotes.Count; $i++) {
-            & $popularLinhaPacote -Grid $Grid -Indice $i -Pacote $script:TabelaPacotes[$i] -Resultado $Resultado -ArquivosInstSeg $arquivosInstSeg
-        }
-    }
-
-    # A busca so comeca DEPOIS da janela ja estar visivel (evento Shown) -
-    # se rodasse antes do ShowDialog(), a janela nao apareceria na tela ate
-    # a varredura toda terminar, que era exatamente o problema reportado.
-    $dlg.Add_Shown({ & $recarregarGridPacotes -Grid $gridPacotes -Resultado $Resultado -LblCarregando $lblCarregandoPacotes }.GetNewClosure())
-
-    # Aliases LOCAIS (sem prefixo $script:) das variaveis de progresso -
-    # necessario porque o handler abaixo usa .GetNewClosure(), e um
-    # .GetNewClosure() cria um escopo "$script:" PROPRIO/ISOLADO pro
-    # scriptblock resultante, desconectado do $script: real do arquivo
-    # (confirmado na pratica: $dlg e $painelRodape, que sao variaveis
-    # LOCAIS comuns, chegavam certas dentro do closure, mas
-    # $script:barraProgressoPacoteAtual/$script:lblProgressoPacoteAtual
-    # chegavam $null mesmo tendo sido criadas segundos antes). Variaveis
-    # locais SEM prefixo de escopo sao capturadas corretamente pelo
-    # GetNewClosure (por referencia ao objeto, entao mutar .Value/.Visible
-    # nelas continua afetando o MESMO controle WinForms).
-    $barraProgressoLocal = $script:barraProgressoPacoteAtual
-    $lblProgressoLocal = $script:lblProgressoPacoteAtual
-    $callbackProgressoLocal = $script:AoAtualizarProgressoPacoteCallback
-
-    $gridPacotes.Add_CellContentClick({
-        param($sender, $e)
-        if ($e.RowIndex -lt 0) { return }
-        $nomeColuna = $gridPacotes.Columns[$e.ColumnIndex].Name
-        $row = $gridPacotes.Rows[$e.RowIndex]
-        $tagLinha = $row.Tag
-        if (-not $tagLinha) { return }
-        $pacoteLinha = $tagLinha.Pacote
-
-        if ($nomeColuna -eq "Copiar") {
-            $dlg.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
-            if ($barraProgressoLocal -and $lblProgressoLocal) {
-                $barraProgressoLocal.Value = 0
-                $barraProgressoLocal.Visible = $true
-                $barraProgressoLocal.Refresh()
-                $lblProgressoLocal.Text = "Iniciando..."
-                $lblProgressoLocal.Refresh()
-                [System.Windows.Forms.Application]::DoEvents()
-            }
-            try {
-                Invoke-AcaoBaixarPacote -Resultado $Resultado -Pacote $pacoteLinha -AoAtualizarProgresso $callbackProgressoLocal | Out-Null
-            } finally {
-                if ($barraProgressoLocal) { $barraProgressoLocal.Visible = $false }
-                if ($lblProgressoLocal) { $lblProgressoLocal.Text = "" }
-                $dlg.Cursor = [System.Windows.Forms.Cursors]::Default
-            }
-            & $popularLinhaPacote -Grid $gridPacotes -Indice $e.RowIndex -Pacote $pacoteLinha -Resultado $Resultado
-        } elseif ($nomeColuna -eq "Verificar") {
-            $dlg.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
-            try {
-                Invoke-AcaoVerificarHashPacote -Resultado $Resultado -Pacote $pacoteLinha -StatusInfo $tagLinha.StatusInfo
-            } finally {
-                $dlg.Cursor = [System.Windows.Forms.Cursors]::Default
-            }
-        } elseif ($nomeColuna -eq "AbrirPasta") {
-            Invoke-AcaoAbrirPastaPacote -Resultado $Resultado -Pacote $pacoteLinha -StatusInfo $tagLinha.StatusInfo
-        }
-    }.GetNewClosure())
-
-    $btnAtualizarPacotes = New-Object System.Windows.Forms.Button
-    $btnAtualizarPacotes.Text = "Atualizar Status"
-    $btnAtualizarPacotes.Location = New-Object System.Drawing.Point(12, 60)
-    $btnAtualizarPacotes.Width = 140
-    $btnAtualizarPacotes.Height = 28
-    $btnAtualizarPacotes.Anchor = "Top,Left"
-    $painelRodape.Controls.Add($btnAtualizarPacotes)
-    $btnAtualizarPacotes.Add_Click({
-        & $recarregarGridPacotes -Grid $gridPacotes -Resultado $Resultado -LblCarregando $lblCarregandoPacotes
-    }.GetNewClosure())
-
-    $btnFecharPacotes = New-Object System.Windows.Forms.Button
-    $btnFecharPacotes.Text = "Fechar"
-    $btnFecharPacotes.Location = New-Object System.Drawing.Point(900, 60)
-    $btnFecharPacotes.Width = 90
-    $btnFecharPacotes.Height = 28
-    $btnFecharPacotes.Anchor = "Top,Right"
-    $painelRodape.Controls.Add($btnFecharPacotes)
-    $btnFecharPacotes.Add_Click({ $dlg.Close() }.GetNewClosure())
-
-    [void]$dlg.ShowDialog()
 }
 
 # ============================================================
@@ -3572,30 +3274,30 @@ function Get-ArquivoCvcMaisRecente {
 
 function Show-JanelaSistemasEleitorais {
     <#
-        Janela "Verificar Sistemas Eleitorais" - lista SIS + todos os
-        sistemas de $script:SistemasEleitoraisExtra (independente de
-        NaGradePrincipal, ja que aqui a ideia e mostrar TUDO, nao so o que
-        cabe como coluna na grade principal), com a versao instalada JA
-        LIDA durante a propria varredura (sem nenhuma consulta nova ao
-        OCS) comparada contra a versao marcada "Atual" na planilha de
-        Versoes de Sistemas, quando disponivel.
+        Janela "Sistemas Eleitorais" - consolida o que antes eram DUAS
+        janelas separadas (Show-JanelaPacotes + a antiga "Verificar
+        Sistemas Eleitorais") numa so: pra cada sistema conhecido (SIS +
+        $script:SistemasEleitoraisExtra), mostra a versao instalada JA
+        LIDA na varredura, a versao "Atual" da planilha, se esta
+        atualizado, o status de copia do pacote no InstSeg, E os botoes
+        de acao (Baixar e Copiar / Verificar Hash / Abrir Pasta) - tudo
+        numa unica grade, em vez do usuario ter que abrir duas janelas
+        diferentes pra ver o mesmo conjunto de sistemas.
 
-        Comparacao de versao e uma igualdade de STRING direta contra
-        $script:VersaoAtualPorSistema (nao usa Resolve-NomeAmigavelVersao
-        pra decidir "desatualizado" porque aquela funcao devolve $null se
-        a versao instalada nem estiver catalogada na planilha - o que
-        esconderia justamente o caso mais claro de desatualizado, uma
-        versao tao antiga que nem consta mais la). Resolve-NomeAmigavelVersao
-        ainda e usada, a parte, so pra exibir o nome de praia quando
-        disponivel.
+        Comparacao de versao instalada x atual e uma igualdade de STRING
+        direta contra $script:VersaoAtualPorSistema (nao usa
+        Resolve-NomeAmigavelVersao pra decidir "desatualizado" porque
+        aquela funcao devolve $null se a versao instalada nem estiver
+        catalogada na planilha - o que esconderia justamente o caso mais
+        claro de desatualizado, uma versao tao antiga que nem consta mais
+        la). Resolve-NomeAmigavelVersao/$script:TabelaVersoes ainda sao
+        usados, a parte, so pra exibir o nome de praia quando disponivel.
     #>
     param($Resultado)
 
-    # "Versao (Nome Amigavel)" - reaproveita $script:TabelaVersoes direto
-    # (em vez de Resolve-NomeAmigavelVersao) porque aqui precisamos do
-    # nome amigavel tanto da versao INSTALADA quanto da versao ATUAL (a
-    # planilha pode ter nome amigavel cadastrado pra qualquer uma das
-    # duas, nao so a instalada).
+    # "Versao (Nome Amigavel)" - direto em $script:TabelaVersoes (nao
+    # Resolve-NomeAmigavelVersao) porque precisamos do nome amigavel
+    # tanto da versao INSTALADA quanto da versao ATUAL.
     function Format-VersaoComNomeAmigavel {
         param($Sistema, $Versao)
         if (-not $Versao -or $Versao -eq "-") { return "-" }
@@ -3606,16 +3308,26 @@ function Show-JanelaSistemasEleitorais {
         return $Versao
     }
 
+    # Cada item junta os dados de "sistema eleitoral" (versao instalada,
+    # versao atual) com o pacote de instalacao correspondente (achado por
+    # NomeVersaoAtual, que e o texto exato da coluna "Sistema" da
+    # planilha) - se nao houver LinkDrive/PastaDestino configurado pra
+    # esse sistema, $Pacote fica $null e as acoes de copia/hash/pasta nao
+    # aparecem pra essa linha.
     $itens = New-Object System.Collections.Generic.List[object]
     $itens.Add([PSCustomObject]@{ Titulo = "SIS"; Versao = $Resultado.VersaoSis; NomeVersaoAtual = "SIS" })
     foreach ($sis in $script:SistemasEleitoraisExtra) {
         $itens.Add([PSCustomObject]@{ Titulo = $sis.Titulo; Versao = $Resultado.($sis.Propriedade); NomeVersaoAtual = $sis.NomeVersaoAtual })
     }
+    foreach ($item in $itens) {
+        $pacote = $script:TabelaPacotes | Where-Object { $_.Sistema -eq $item.NomeVersaoAtual } | Select-Object -First 1
+        $item | Add-Member -NotePropertyName Pacote -NotePropertyValue $pacote
+    }
 
     $dlg = New-Object System.Windows.Forms.Form
     $dlg.Text = "Sistemas Eleitorais - $($Resultado.Hostname) ($($Resultado.IP))"
-    $dlg.Size = New-Object System.Drawing.Size(940, 460)
-    $dlg.MinimumSize = New-Object System.Drawing.Size(700, 300)
+    $dlg.Size = New-Object System.Drawing.Size(1280, 490)
+    $dlg.MinimumSize = New-Object System.Drawing.Size(750, 320)
     $dlg.StartPosition = "CenterParent"
 
     $painelLegenda = New-Object System.Windows.Forms.FlowLayoutPanel
@@ -3635,7 +3347,9 @@ function Show-JanelaSistemasEleitorais {
     Add-ItemLegendaSis $painelLegenda "Atualizado" ([System.Drawing.Color]::FromArgb(0, 128, 0))
     Add-ItemLegendaSis $painelLegenda "Desatualizado" ([System.Drawing.Color]::FromArgb(200, 100, 0))
     Add-ItemLegendaSis $painelLegenda "Nao instalado" ([System.Drawing.Color]::FromArgb(110, 110, 110))
+    Add-ItemLegendaSis $painelLegenda "Pacote copiado" ([System.Drawing.Color]::FromArgb(0, 128, 0))
     Add-ItemLegendaSis $painelLegenda "Pacote fora do padrao" ([System.Drawing.Color]::FromArgb(200, 100, 0))
+    Add-ItemLegendaSis $painelLegenda "Tamanho nao confere" ([System.Drawing.Color]::Firebrick)
 
     $lblCarregandoSis = New-Object System.Windows.Forms.Label
     $lblCarregandoSis.Text = ""
@@ -3646,14 +3360,44 @@ function Show-JanelaSistemasEleitorais {
     $lblCarregandoSis.Visible = $false
     $dlg.Controls.Add($lblCarregandoSis)
 
+    # --- Rodape (Dock=Bottom) com barra de progresso + botoes ---
     $painelRodape = New-Object System.Windows.Forms.Panel
     $painelRodape.Dock = [System.Windows.Forms.DockStyle]::Bottom
-    $painelRodape.Height = 46
+    $painelRodape.Height = 104
     $dlg.Controls.Add($painelRodape)
+
+    # Escopo $script: de proposito na criacao (ver nota do alias local
+    # logo abaixo, antes do click handler) - mesmo padrao ja usado/testado
+    # em Show-JanelaPacotes.
+    $script:lblProgressoPacoteAtual = New-Object System.Windows.Forms.Label
+    $script:lblProgressoPacoteAtual.Text = ""
+    $script:lblProgressoPacoteAtual.Location = New-Object System.Drawing.Point(12, 6)
+    $script:lblProgressoPacoteAtual.Size = New-Object System.Drawing.Size(400, 18)
+    $script:lblProgressoPacoteAtual.Anchor = "Top,Left,Right"
+    $script:lblProgressoPacoteAtual.ForeColor = [System.Drawing.Color]::FromArgb(0, 90, 158)
+    $painelRodape.Controls.Add($script:lblProgressoPacoteAtual)
+
+    $script:barraProgressoPacoteAtual = New-Object System.Windows.Forms.ProgressBar
+    $script:barraProgressoPacoteAtual.Location = New-Object System.Drawing.Point(12, 26)
+    $script:barraProgressoPacoteAtual.Size = New-Object System.Drawing.Size(400, 20)
+    $script:barraProgressoPacoteAtual.Anchor = "Top,Left,Right"
+    $script:barraProgressoPacoteAtual.Minimum = 0
+    $script:barraProgressoPacoteAtual.Maximum = 100
+    $script:barraProgressoPacoteAtual.Value = 0
+    $script:barraProgressoPacoteAtual.Visible = $false
+    $painelRodape.Controls.Add($script:barraProgressoPacoteAtual)
+
+    $btnAtualizarSis = New-Object System.Windows.Forms.Button
+    $btnAtualizarSis.Text = "Atualizar Status"
+    $btnAtualizarSis.Location = New-Object System.Drawing.Point(12, 60)
+    $btnAtualizarSis.Width = 140
+    $btnAtualizarSis.Height = 28
+    $btnAtualizarSis.Anchor = "Top,Left"
+    $painelRodape.Controls.Add($btnAtualizarSis)
 
     $btnFecharSis = New-Object System.Windows.Forms.Button
     $btnFecharSis.Text = "Fechar"
-    $btnFecharSis.Location = New-Object System.Drawing.Point(830, 9)
+    $btnFecharSis.Location = New-Object System.Drawing.Point(1170, 60)
     $btnFecharSis.Width = 90
     $btnFecharSis.Height = 28
     $btnFecharSis.Anchor = "Top,Right"
@@ -3664,7 +3408,6 @@ function Show-JanelaSistemasEleitorais {
     $gridSis.Dock = [System.Windows.Forms.DockStyle]::Fill
     $gridSis.AllowUserToAddRows = $false
     $gridSis.AllowUserToDeleteRows = $false
-    $gridSis.ReadOnly = $true
     $gridSis.RowHeadersVisible = $false
     $gridSis.SelectionMode = [System.Windows.Forms.DataGridViewSelectionMode]::FullRowSelect
     $gridSis.MultiSelect = $false
@@ -3675,58 +3418,149 @@ function Show-JanelaSistemasEleitorais {
     $dlg.Controls.Add($gridSis)
 
     function Add-ColunaGridSis {
-        param($Nome, $Titulo, $Largura)
+        param($Nome, $Titulo, $Largura, $SoLeitura = $true)
         $c = New-Object System.Windows.Forms.DataGridViewTextBoxColumn
-        $c.Name = $Nome; $c.HeaderText = $Titulo; $c.Width = $Largura; $c.ReadOnly = $true
+        $c.Name = $Nome; $c.HeaderText = $Titulo; $c.Width = $Largura; $c.ReadOnly = $SoLeitura
         [void]$gridSis.Columns.Add($c)
     }
-    Add-ColunaGridSis "Sistema" "Sistema" 190
+    Add-ColunaGridSis "Sistema" "Sistema" 170
     Add-ColunaGridSis "VersaoInstalada" "Versao Instalada" 190
     Add-ColunaGridSis "VersaoAtual" "Versao Atual (planilha)" 190
-    Add-ColunaGridSis "Status" "Status" 150
-    Add-ColunaGridSis "Pacote" "Pacote de Instalacao" 200
+    Add-ColunaGridSis "StatusAtualizacao" "Atualizado?" 140
+    Add-ColunaGridSis "StatusPacote" "Pacote de Instalacao no Destino" 260
 
-    # Preenche Sistema/Versao Instalada/Versao Atual/Status NA HORA (nao
-    # depende de rede nenhuma - so dados ja lidos na varredura + a
-    # planilha ja carregada em memoria). So a coluna Pacote depende do
-    # InstSeg (rede) - fica "Verificando..." ate a janela aparecer e o
-    # levantamento (no evento Shown) terminar, igual Show-JanelaPacotes.
-    foreach ($item in $itens) {
-        $instalado = $item.Versao -and $item.Versao -ne "-"
-        $versaoAtual = if ($item.NomeVersaoAtual) { $script:VersaoAtualPorSistema[$item.NomeVersaoAtual] } else { $null }
+    $colCopiarSis = New-Object System.Windows.Forms.DataGridViewButtonColumn
+    $colCopiarSis.Name = "Copiar"; $colCopiarSis.HeaderText = ""; $colCopiarSis.UseColumnTextForButtonValue = $false; $colCopiarSis.Width = 120
+    [void]$gridSis.Columns.Add($colCopiarSis)
 
-        $versaoInstaladaExibida = if ($instalado) { Format-VersaoComNomeAmigavel -Sistema $item.NomeVersaoAtual -Versao $item.Versao } else { "-" }
-        $versaoAtualExibida = if ($versaoAtual) { Format-VersaoComNomeAmigavel -Sistema $item.NomeVersaoAtual -Versao $versaoAtual } else { "-" }
-        $pacote = $script:TabelaPacotes | Where-Object { $_.Sistema -eq $item.NomeVersaoAtual } | Select-Object -First 1
+    $colVerificarSis = New-Object System.Windows.Forms.DataGridViewButtonColumn
+    $colVerificarSis.Name = "Verificar"; $colVerificarSis.HeaderText = ""; $colVerificarSis.Text = "Verificar Hash"; $colVerificarSis.UseColumnTextForButtonValue = $true; $colVerificarSis.Width = 110
+    [void]$gridSis.Columns.Add($colVerificarSis)
 
-        $idx = $gridSis.Rows.Add($item.Titulo, $versaoInstaladaExibida, $versaoAtualExibida, "", $(if ($pacote) { "Verificando..." } else { "-" }))
-        $row = $gridSis.Rows[$idx]
-        $row.Tag = $pacote
-        if ($pacote) { $row.Cells["Pacote"].Style.ForeColor = [System.Drawing.Color]::Gray }
+    $colAbrirPastaSis = New-Object System.Windows.Forms.DataGridViewButtonColumn
+    $colAbrirPastaSis.Name = "AbrirPasta"; $colAbrirPastaSis.HeaderText = ""; $colAbrirPastaSis.Text = "Abrir Pasta"; $colAbrirPastaSis.UseColumnTextForButtonValue = $true; $colAbrirPastaSis.Width = 100
+    [void]$gridSis.Columns.Add($colAbrirPastaSis)
+
+    # Preenche Sistema/Versao Instalada/Versao Atual/Atualizado? NA HORA
+    # (nao depende de rede - so dados ja lidos na varredura + a planilha
+    # ja carregada em memoria). So a coluna de Pacote e os botoes de acao
+    # dependem do InstSeg (rede) - ficam "Verificando..."/desabilitados
+    # ate a janela aparecer e o levantamento (evento Shown) terminar,
+    # mesmo padrao ja usado em Show-JanelaPacotes.
+    $popularLinhaBaseSis = {
+        param([System.Windows.Forms.DataGridView]$Grid, [int]$Indice, $Item)
+        $row = $Grid.Rows[$Indice]
+        $instalado = $Item.Versao -and $Item.Versao -ne "-"
+        $versaoAtual = if ($Item.NomeVersaoAtual) { $script:VersaoAtualPorSistema[$Item.NomeVersaoAtual] } else { $null }
+
+        $row.Cells["Sistema"].Value = $Item.Titulo
+        $row.Cells["VersaoInstalada"].Value = if ($instalado) { Format-VersaoComNomeAmigavel -Sistema $Item.NomeVersaoAtual -Versao $Item.Versao } else { "-" }
+        $row.Cells["VersaoAtual"].Value = if ($versaoAtual) { Format-VersaoComNomeAmigavel -Sistema $Item.NomeVersaoAtual -Versao $versaoAtual } else { "-" }
+        $row.Cells["StatusAtualizacao"].Style.Font = $Grid.Font
 
         if (-not $instalado) {
-            $row.Cells["Status"].Value = "Nao instalado"
-            $row.Cells["Status"].Style.ForeColor = [System.Drawing.Color]::FromArgb(110, 110, 110)
+            $row.Cells["StatusAtualizacao"].Value = "Nao instalado"
+            $row.Cells["StatusAtualizacao"].Style.ForeColor = [System.Drawing.Color]::FromArgb(110, 110, 110)
         } elseif ($versaoAtual) {
-            if ($item.Versao.Trim() -eq $versaoAtual.Trim()) {
-                $row.Cells["Status"].Value = "Atualizado"
-                $row.Cells["Status"].Style.ForeColor = [System.Drawing.Color]::FromArgb(0, 128, 0)
+            if ($Item.Versao.Trim() -eq $versaoAtual.Trim()) {
+                $row.Cells["StatusAtualizacao"].Value = "Atualizado"
+                $row.Cells["StatusAtualizacao"].Style.ForeColor = [System.Drawing.Color]::FromArgb(0, 128, 0)
             } else {
-                $row.Cells["Status"].Value = "Desatualizado"
-                $row.Cells["Status"].Style.ForeColor = [System.Drawing.Color]::FromArgb(200, 100, 0)
-                $row.Cells["Status"].Style.Font = New-Object System.Drawing.Font($gridSis.Font, [System.Drawing.FontStyle]::Bold)
+                $row.Cells["StatusAtualizacao"].Value = "Desatualizado"
+                $row.Cells["StatusAtualizacao"].Style.ForeColor = [System.Drawing.Color]::FromArgb(200, 100, 0)
+                $row.Cells["StatusAtualizacao"].Style.Font = New-Object System.Drawing.Font($Grid.Font, [System.Drawing.FontStyle]::Bold)
             }
         } else {
-            $row.Cells["Status"].Value = "Instalado (versao atual desconhecida)"
+            $row.Cells["StatusAtualizacao"].Value = "Instalado (versao atual desconhecida)"
+            $row.Cells["StatusAtualizacao"].Style.ForeColor = $Grid.DefaultCellStyle.ForeColor
+        }
+
+        if (-not $Item.Pacote) {
+            $row.Cells["StatusPacote"].Value = "-"
+            foreach ($nomeColunaBotao in @("Copiar", "Verificar", "AbrirPasta")) {
+                $celulaSemBotao = New-Object System.Windows.Forms.DataGridViewTextBoxCell
+                $celulaSemBotao.Value = ""
+                $row.Cells[$nomeColunaBotao] = $celulaSemBotao
+            }
         }
     }
 
-    # So comeca a buscar o InstSeg DEPOIS da janela ja estar visivel -
-    # mesmo motivo de Show-JanelaPacotes: senao a janela nao aparece na
-    # tela ate a busca de rede terminar.
-    $dlg.Add_Shown({
-        $lblCarregandoSis.Text = "Verificando pacotes em \\$($Resultado.IP)\InstSeg (pode demorar em links de zona lentos)..."
-        $lblCarregandoSis.Visible = $true
+    # Preenche Pacote de Instalacao + botoes de acao - PRECISA do
+    # levantamento do InstSeg (rede), por isso roda so depois da janela
+    # ja estar visivel (ver Add_Shown mais abaixo) ou apos uma acao de
+    # copiar/verificar mudar o status de uma linha especifica.
+    $popularLinhaPacoteSis = {
+        param([System.Windows.Forms.DataGridView]$Grid, [int]$Indice, $Item, $Resultado, $ArquivosInstSeg = $null)
+        $row = $Grid.Rows[$Indice]
+        if (-not $Item.Pacote) { return }
+
+        $statusInfo = Get-StatusPacoteNoDestino -Resultado $Resultado -Pacote $Item.Pacote -ArquivosInstSeg $ArquivosInstSeg
+        $row.Tag = [PSCustomObject]@{ Pacote = $Item.Pacote; StatusInfo = $statusInfo }
+        $row.Cells["StatusPacote"].ToolTipText = ""
+        $row.Cells["StatusPacote"].Style.Font = $Grid.Font
+
+        if ($statusInfo.Existe) {
+            $raizInstSeg = "\\$($Resultado.IP)\InstSeg\"
+            $pastaArquivo = Split-Path $statusInfo.ArquivoDestino -Parent
+            $pastaRelativa = if ($pastaArquivo -and $pastaArquivo.ToUpper().StartsWith($raizInstSeg.ToUpper())) { $pastaArquivo.Substring($raizInstSeg.Length) } else { $pastaArquivo }
+            $pastaExibida = "\\InstSeg\$pastaRelativa"
+            $tamanhoTxt = "$([Math]::Round($statusInfo.Tamanho / 1MB, 1)) MB"
+            $dataTxt = $statusInfo.Data.ToString("dd/MM/yy HH:mm")
+
+            if ($statusInfo.ForaDoPadrao) {
+                $row.Cells["StatusPacote"].Value = "Copiado Fora do Padrao ($pastaExibida) - $tamanhoTxt - $dataTxt"
+                $row.Cells["StatusPacote"].Style.ForeColor = [System.Drawing.Color]::FromArgb(200, 100, 0)
+            } else {
+                $row.Cells["StatusPacote"].Value = "Copiado ($pastaExibida) - $tamanhoTxt - $dataTxt"
+                $row.Cells["StatusPacote"].Style.ForeColor = [System.Drawing.Color]::FromArgb(0, 128, 0)
+            }
+            $row.Cells["StatusPacote"].ToolTipText = $statusInfo.ArquivoDestino
+            if ($statusInfo.TamanhoConfere -eq $false) {
+                $row.Cells["StatusPacote"].Value = "TAMANHO NAO CONFERE! " + $row.Cells["StatusPacote"].Value
+                $row.Cells["StatusPacote"].Style.ForeColor = [System.Drawing.Color]::Firebrick
+                $row.Cells["StatusPacote"].Style.Font = New-Object System.Drawing.Font($Grid.Font, [System.Drawing.FontStyle]::Bold)
+                $row.Cells["StatusPacote"].ToolTipText = "Tamanho no destino ($($statusInfo.Tamanho) bytes) diferente do oficial da planilha ($($Item.Pacote.TamanhoEsperado) bytes) - copia pode estar corrompida/incompleta. Copie de novo.`r`n$($statusInfo.ArquivoDestino)"
+            }
+            $row.Cells["Copiar"].Value = "Copiar Novamente"
+        } else {
+            $row.Cells["StatusPacote"].Value = "Nao copiado ainda"
+            $row.Cells["StatusPacote"].Style.ForeColor = [System.Drawing.Color]::FromArgb(110, 110, 110)
+            $row.Cells["Copiar"].Value = "Baixar e Copiar"
+        }
+
+        if ($statusInfo.Existe) {
+            if ($row.Cells["Verificar"] -isnot [System.Windows.Forms.DataGridViewButtonCell]) {
+                $celulaBotao = New-Object System.Windows.Forms.DataGridViewButtonCell
+                $celulaBotao.Value = "Verificar Hash"
+                $row.Cells["Verificar"] = $celulaBotao
+            }
+        } else {
+            $celulaSemBotao = New-Object System.Windows.Forms.DataGridViewTextBoxCell
+            $celulaSemBotao.Value = ""
+            $row.Cells["Verificar"] = $celulaSemBotao
+        }
+    }
+
+    for ($i = 0; $i -lt $itens.Count; $i++) {
+        [void]$gridSis.Rows.Add()
+        & $popularLinhaBaseSis -Grid $gridSis -Indice $i -Item $itens[$i]
+        if ($itens[$i].Pacote) { $gridSis.Rows[$i].Cells["StatusPacote"].Value = "Verificando..." }
+    }
+
+    $recarregarPacotesSis = {
+        param([System.Windows.Forms.DataGridView]$Grid, $Itens, $Resultado, $LblCarregando)
+
+        foreach ($item2 in $Itens) {
+            if ($item2.Pacote) {
+                $idxLinha = $Itens.IndexOf($item2)
+                $Grid.Rows[$idxLinha].Cells["StatusPacote"].Value = "Verificando..."
+                $Grid.Rows[$idxLinha].Cells["StatusPacote"].Style.ForeColor = [System.Drawing.Color]::Gray
+            }
+        }
+        if ($LblCarregando) {
+            $LblCarregando.Text = "Verificando pacotes em \\$($Resultado.IP)\InstSeg (pode demorar em links de zona lentos)..."
+            $LblCarregando.Visible = $true
+        }
         [System.Windows.Forms.Application]::DoEvents()
 
         $scriptBlockListarInstSeg = {
@@ -3735,49 +3569,77 @@ function Show-JanelaSistemasEleitorais {
             if (-not (Test-Path $raiz)) { return $null }
             try { return @(Get-ChildItem -Path $raiz -File -Recurse -Depth 6 -ErrorAction SilentlyContinue) } catch { return $null }
         }
-        $psInstSeg = [powershell]::Create()
-        $arquivosInstSeg = $null
+        $ps = [powershell]::Create()
         try {
-            [void]$psInstSeg.AddScript($scriptBlockListarInstSeg).AddArgument($Resultado.IP)
-            $handleInstSeg = $psInstSeg.BeginInvoke()
-            while (-not $handleInstSeg.IsCompleted) {
+            [void]$ps.AddScript($scriptBlockListarInstSeg).AddArgument($Resultado.IP)
+            $handle = $ps.BeginInvoke()
+            while (-not $handle.IsCompleted) {
                 [System.Windows.Forms.Application]::DoEvents()
                 Start-Sleep -Milliseconds 50
             }
-            $arquivosInstSeg = $psInstSeg.EndInvoke($handleInstSeg)
+            $arquivosInstSeg = $ps.EndInvoke($handle)
         } finally {
-            $psInstSeg.Dispose()
+            $ps.Dispose()
         }
 
-        $lblCarregandoSis.Visible = $false
+        if ($LblCarregando) { $LblCarregando.Visible = $false }
 
-        foreach ($row in $gridSis.Rows) {
-            $pacote = $row.Tag
-            if (-not $pacote) { continue }
+        for ($i = 0; $i -lt $Itens.Count; $i++) {
+            & $popularLinhaPacoteSis -Grid $Grid -Indice $i -Item $Itens[$i] -Resultado $Resultado -ArquivosInstSeg $arquivosInstSeg
+        }
+    }
 
-            $statusInfoPacote = Get-StatusPacoteNoDestino -Resultado $Resultado -Pacote $pacote -ArquivosInstSeg $arquivosInstSeg
-            if ($statusInfoPacote.Existe) {
-                $raizInstSeg = "\\$($Resultado.IP)\InstSeg\"
-                $pastaArquivo = Split-Path $statusInfoPacote.ArquivoDestino -Parent
-                $pastaRelativa = if ($pastaArquivo -and $pastaArquivo.ToUpper().StartsWith($raizInstSeg.ToUpper())) { $pastaArquivo.Substring($raizInstSeg.Length) } else { $pastaArquivo }
-                $pastaExibida = "\\InstSeg\$pastaRelativa"
-                if ($statusInfoPacote.ForaDoPadrao) {
-                    $textoPacote = "Copiado Fora do Padrao ($pastaExibida)"
-                    $corPacote = [System.Drawing.Color]::FromArgb(200, 100, 0)
-                } else {
-                    $textoPacote = "Copiado ($pastaExibida)"
-                    $corPacote = [System.Drawing.Color]::FromArgb(0, 128, 0)
-                }
-                if ($statusInfoPacote.TamanhoConfere -eq $false) {
-                    $textoPacote = "TAMANHO NAO CONFERE! $textoPacote"
-                    $corPacote = [System.Drawing.Color]::Firebrick
-                }
-            } else {
-                $textoPacote = "Nao copiado ainda"
-                $corPacote = [System.Drawing.Color]::FromArgb(110, 110, 110)
+    # So comeca a buscar o InstSeg DEPOIS da janela ja estar visivel -
+    # senao a janela nao aparece na tela ate a busca de rede terminar.
+    $dlg.Add_Shown({ & $recarregarPacotesSis -Grid $gridSis -Itens $itens -Resultado $Resultado -LblCarregando $lblCarregandoSis }.GetNewClosure())
+    $btnAtualizarSis.Add_Click({ & $recarregarPacotesSis -Grid $gridSis -Itens $itens -Resultado $Resultado -LblCarregando $lblCarregandoSis }.GetNewClosure())
+
+    # Aliases LOCAIS (sem prefixo $script:) das variaveis de progresso -
+    # necessario porque o handler abaixo usa .GetNewClosure(), e um
+    # .GetNewClosure() cria um escopo "$script:" PROPRIO/ISOLADO pro
+    # scriptblock resultante, desconectado do $script: real do arquivo
+    # (confirmado na pratica em Show-JanelaPacotes). Variaveis locais SEM
+    # prefixo de escopo sao capturadas corretamente pelo GetNewClosure.
+    $barraProgressoLocal = $script:barraProgressoPacoteAtual
+    $lblProgressoLocal = $script:lblProgressoPacoteAtual
+    $callbackProgressoLocal = $script:AoAtualizarProgressoPacoteCallback
+
+    $gridSis.Add_CellContentClick({
+        param($sender, $e)
+        if ($e.RowIndex -lt 0) { return }
+        $nomeColuna = $gridSis.Columns[$e.ColumnIndex].Name
+        $row = $gridSis.Rows[$e.RowIndex]
+        $tagLinha = $row.Tag
+        if (-not $tagLinha) { return }
+        $item = $itens[$e.RowIndex]
+
+        if ($nomeColuna -eq "Copiar") {
+            $dlg.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
+            if ($barraProgressoLocal -and $lblProgressoLocal) {
+                $barraProgressoLocal.Value = 0
+                $barraProgressoLocal.Visible = $true
+                $barraProgressoLocal.Refresh()
+                $lblProgressoLocal.Text = "Iniciando..."
+                $lblProgressoLocal.Refresh()
+                [System.Windows.Forms.Application]::DoEvents()
             }
-            $row.Cells["Pacote"].Value = $textoPacote
-            $row.Cells["Pacote"].Style.ForeColor = $corPacote
+            try {
+                Invoke-AcaoBaixarPacote -Resultado $Resultado -Pacote $tagLinha.Pacote -AoAtualizarProgresso $callbackProgressoLocal | Out-Null
+            } finally {
+                if ($barraProgressoLocal) { $barraProgressoLocal.Visible = $false }
+                if ($lblProgressoLocal) { $lblProgressoLocal.Text = "" }
+                $dlg.Cursor = [System.Windows.Forms.Cursors]::Default
+            }
+            & $popularLinhaPacoteSis -Grid $gridSis -Indice $e.RowIndex -Item $item -Resultado $Resultado
+        } elseif ($nomeColuna -eq "Verificar") {
+            $dlg.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
+            try {
+                Invoke-AcaoVerificarHashPacote -Resultado $Resultado -Pacote $tagLinha.Pacote -StatusInfo $tagLinha.StatusInfo
+            } finally {
+                $dlg.Cursor = [System.Windows.Forms.Cursors]::Default
+            }
+        } elseif ($nomeColuna -eq "AbrirPasta") {
+            Invoke-AcaoAbrirPastaPacote -Resultado $Resultado -Pacote $tagLinha.Pacote -StatusInfo $tagLinha.StatusInfo
         }
     }.GetNewClosure())
 
@@ -4907,18 +4769,18 @@ $menuContextoGrid.Add_Opening({
         # instalado - sem SIS, nao ha CVC gerado no InstSeg\CVC pra achar.
         $temSis = $r.VersaoSis -and $r.VersaoSis -ne "-"
         if ($temSis) {
-            $itemSistemas = $menuContextoGrid.Items.Add("Verificar Sistemas Eleitorais...")
-            $itemSistemas.Add_Click({ Show-JanelaSistemasEleitorais -Resultado $r }.GetNewClosure())
-
             $itemCvc = $menuContextoGrid.Items.Add("Enviar CVC para o Google Drive...")
             $itemCvc.Add_Click({ Invoke-AcaoEnviarCvcDrive -Resultado $r }.GetNewClosure())
         }
-        # Abre a janela de Pacotes de Instalacao - so aparece se a planilha
-        # de Pacotes de Sistemas estiver configurada e tiver pelo menos 1
-        # linha valida (ver Configuracoes > Pacotes de Sistemas).
-        if ($script:TabelaPacotes.Count -gt 0) {
-            $itemPacotes = $menuContextoGrid.Items.Add("Pacotes de Instalacao...")
-            $itemPacotes.Add_Click({ Show-JanelaPacotes -Resultado $r }.GetNewClosure())
+        # Janela consolidada (status de versao + pacotes de instalacao) -
+        # so aparece se a planilha de Pacotes de Sistemas estiver
+        # configurada e tiver pelo menos 1 linha valida (ver
+        # Configuracoes > Pacotes de Sistemas) OU a maquina tiver SIS
+        # instalado (mesmo sem pacote configurado ainda, da pra ver o
+        # status de versao dos sistemas eleitorais).
+        if ($script:TabelaPacotes.Count -gt 0 -or $temSis) {
+            $itemSistemas = $menuContextoGrid.Items.Add("Sistemas Eleitorais...")
+            $itemSistemas.Add_Click({ Show-JanelaSistemasEleitorais -Resultado $r }.GetNewClosure())
         }
         [void]$menuContextoGrid.Items.Add("-")
         # Reconsulta so esta maquina (VNC/RC/SIS/etc.) e atualiza a linha
