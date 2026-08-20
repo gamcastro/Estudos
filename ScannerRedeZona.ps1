@@ -67,14 +67,14 @@ $script:Total        = 0
 $script:Escaneando   = $false
 $script:VncViewerPath = $null
 
-# Controles da barra de progresso da janela "Pacotes de Instalacao" (ver
-# Show-JanelaPacotes) - ficam em $script: pra esse callback poder ser
-# definido UMA VEZ SO, em nivel de script (sem closure nenhuma), e
-# continuar funcionando corretamente nao importa de qual funcao/scriptblock
-# aninhado seja invocado depois (Invoke-AcaoBaixarPacote ->
-# Invoke-DownloadArquivoComProgresso / Copy-ArquivoComProgresso) - dentro
-# de FUNCOES normais (nao-closure), $script: sempre resolve certo contra
-# este escopo aqui.
+# Controles da barra de progresso da janela "Sistemas Eleitorais" (ver
+# Show-JanelaSistemasEleitorais) - ficam em $script: pra esse callback
+# poder ser definido UMA VEZ SO, em nivel de script (sem closure
+# nenhuma), e continuar funcionando corretamente nao importa de qual
+# funcao/scriptblock aninhado seja invocado depois (Invoke-AcaoBaixarPacote
+# -> Invoke-DownloadArquivoComProgresso / Copy-ArquivoComRobocopy) -
+# dentro de FUNCOES normais (nao-closure), $script: sempre resolve certo
+# contra este escopo aqui.
 #
 # CUIDADO ao usar essas variaveis $script: DENTRO de um scriptblock que
 # foi criado com .GetNewClosure() (ex: os handlers de clique da propria
@@ -1039,7 +1039,7 @@ function Invoke-DownloadArquivoComProgresso {
         com ($Percent, $TextoStatus), pra quem chamou atualizar algo visual
         (barra de progresso, label) alem do log.
     #>
-    param([string]$Url, [System.Net.CookieContainer]$Cookies, [string]$DestinoLocal, [string]$NomePacote = "pacote", [scriptblock]$AoAtualizarProgresso = $null)
+    param([string]$Url, [System.Net.CookieContainer]$Cookies, [string]$DestinoLocal, [string]$NomePacote = "pacote", [scriptblock]$AoAtualizarProgresso = $null, [System.Windows.Forms.DataGridView]$GridStatus = $null, [int]$LinhaIndice = -1)
 
     $req = [System.Net.HttpWebRequest]::Create($Url)
     $req.CookieContainer = $Cookies
@@ -1053,10 +1053,15 @@ function Invoke-DownloadArquivoComProgresso {
         $streamResposta = $resp.GetResponseStream()
         $streamArquivo = [System.IO.File]::Create($DestinoLocal)
         try {
-            # Bloco de 256KB - ver nota em Copy-ArquivoComProgresso: testado
-            # na pratica que blocos maiores (4MB) NAO mudam a taxa media
-            # (gargalo e banda do link, nao latencia/numero de idas-e-voltas)
-            # - so pioram a granularidade do progresso, sem ganho nenhum.
+            # Bloco de 256KB - testado na pratica (numa versao anterior da
+            # copia pro InstSeg) que blocos maiores (4MB) NAO mudam a taxa
+            # media (gargalo e banda do link, nao latencia/numero de
+            # idas-e-voltas) - so pioram a granularidade do progresso, sem
+            # ganho nenhum. Esse download (Google Drive, HTTP) continua
+            # usando este loop manual - a copia pro InstSeg (SMB) e que
+            # passou a usar robocopy (ver Copy-ArquivoComRobocopy), que
+            # tem retry/resume nativos que fazem mais sentido num
+            # compartilhamento de rede instavel do que numa API HTTP.
             $buffer = New-Object byte[] 262144
             $totalLido = 0
             $ultimoPercentLogado = -5
@@ -1068,9 +1073,9 @@ function Invoke-DownloadArquivoComProgresso {
 
                 if ($totalBytes -gt 0) {
                     $percent = [Math]::Floor(($totalLido / $totalBytes) * 100)
-                    # Ver nota em Copy-ArquivoComProgresso: garante que o
-                    # 100% sempre aparece, mesmo que o ultimo bloco pule
-                    # direto por cima do proximo multiplo de 5%.
+                    # Garante que o 100% sempre aparece, mesmo que o
+                    # ultimo bloco pule direto por cima do proximo
+                    # multiplo de 5%.
                     if ($percent -ge ($ultimoPercentLogado + 5) -or $percent -ge 100) {
                         $mbLido = [Math]::Round($totalLido / 1MB, 1)
                         $mbTotal = [Math]::Round($totalBytes / 1MB, 1)
@@ -1078,6 +1083,7 @@ function Invoke-DownloadArquivoComProgresso {
                         $textoStatus = "Baixando '$NomePacote': $percent% ($mbLido / $mbTotal MB, $velocidade MB/s)"
                         Add-Log $textoStatus "Gray"
                         if ($AoAtualizarProgresso) { & $AoAtualizarProgresso $percent $textoStatus }
+                        Update-StatusPacoteAtivo -Texto $textoStatus -GridStatus $GridStatus -LinhaIndice $LinhaIndice
                         $ultimoPercentLogado = $percent
                     }
                 }
@@ -1112,7 +1118,7 @@ function Invoke-DownloadGoogleDrivePublico {
         de verdade (ex: "GEDAI-UE_v82000-Praia_de_Genipabu.000.627.W.000.FULL"),
         ja que o ID do Drive sozinho nao diz isso.
     #>
-    param([string]$FileId, [string]$DestinoLocal, [string]$NomePacote = "pacote", [scriptblock]$AoAtualizarProgresso = $null)
+    param([string]$FileId, [string]$DestinoLocal, [string]$NomePacote = "pacote", [scriptblock]$AoAtualizarProgresso = $null, [System.Windows.Forms.DataGridView]$GridStatus = $null, [int]$LinhaIndice = -1)
 
     $ProgressPreference = 'SilentlyContinue'   # a barra de progresso nativa do Invoke-WebRequest deixa downloads grandes bem mais lentos
     $urlInicial = "https://drive.google.com/uc?export=download&id=$FileId"
@@ -1163,7 +1169,7 @@ function Invoke-DownloadGoogleDrivePublico {
         throw "Nao consegui reconhecer a pagina de confirmacao de download grande do Google Drive (formato mudou) - ajustar o parser em Invoke-DownloadGoogleDrivePublico."
     }
 
-    return (Invoke-DownloadArquivoComProgresso -Url $urlFinal -Cookies $sessaoWeb.Cookies -DestinoLocal $DestinoLocal -NomePacote $NomePacote -AoAtualizarProgresso $AoAtualizarProgresso)
+    return (Invoke-DownloadArquivoComProgresso -Url $urlFinal -Cookies $sessaoWeb.Cookies -DestinoLocal $DestinoLocal -NomePacote $NomePacote -AoAtualizarProgresso $AoAtualizarProgresso -GridStatus $GridStatus -LinhaIndice $LinhaIndice)
 }
 
 function Get-CaminhosCachePacote {
@@ -1246,6 +1252,39 @@ function Find-PacoteEmArquivosInstSeg {
     param($Pacote, $ArquivosInstSeg)
     if (-not $ArquivosInstSeg -or -not $Pacote.NomeArquivo) { return $null }
     return ($ArquivosInstSeg | Where-Object { $_.Name -eq $Pacote.NomeArquivo } | Select-Object -First 1)
+}
+
+function Update-StatusPacoteAtivo {
+    <#
+        Atualiza o texto de status do pacote em 2 lugares ao mesmo tempo:
+        o rotulo do rodape ($script:lblProgressoPacoteAtual) e, se
+        informados, a celula "StatusPacote" de uma linha especifica de
+        uma grade (ex: a linha que o usuario acabou de clicar "Baixar e
+        Copiar" em Show-JanelaSistemasEleitorais) - da pra acompanhar o
+        estagio atual (baixando, copiando, conferindo tamanho...) direto
+        na grade, sem precisar so do rodape.
+
+        $GridStatus/$LinhaIndice chegam aqui como PARAMETROS normais (nao
+        via variavel de closure) de proposito: a funcao que dispara tudo
+        isso (Invoke-AcaoBaixarPacote) e chamada de dentro de um handler
+        de clique que ja usa .GetNewClosure() - `$script:` dentro de
+        closures aninhadas ja causou bug confirmado nesta ferramenta
+        (resolve pra um escopo isolado, sempre $null, mesmo com a
+        variavel real setada segundos antes). Passar como parametro de
+        funcao normal e o jeito comprovadamente seguro, independente de
+        quantos niveis de closure existirem no meio do caminho.
+    #>
+    param([string]$Texto, [System.Windows.Forms.DataGridView]$GridStatus = $null, [int]$LinhaIndice = -1)
+
+    if ($script:lblProgressoPacoteAtual) {
+        $script:lblProgressoPacoteAtual.Text = $Texto
+        $script:lblProgressoPacoteAtual.Refresh()
+    }
+    if ($GridStatus -and $LinhaIndice -ge 0 -and $LinhaIndice -lt $GridStatus.Rows.Count) {
+        $GridStatus.Rows[$LinhaIndice].Cells["StatusPacote"].Value = $Texto
+        $GridStatus.Refresh()
+    }
+    [System.Windows.Forms.Application]::DoEvents()
 }
 
 function Get-InfoArquivoComDoEvents {
@@ -1348,107 +1387,180 @@ function Write-BlocoStreamComDoEvents {
     $Stream.EndWrite($resultadoAsync)
 }
 
-function Invoke-FecharStreamComDoEvents {
+function Move-ArquivoRenomeandoComDoEvents {
     <#
-        Fecha um stream (ex: FileStream pro InstSeg via UNC) rodando o
-        Close() num runspace em segundo plano, com a UI so bombeando
-        DoEvents enquanto espera. Fechar um FileStream de destino REMOTO
-        forca o flush final da escrita pela rede (SMB) - e exatamente
-        esse Close() que confirma os ultimos bytes junto ao servidor, e
-        pode demorar varios segundos num link de zona ruim. Chamado
-        direto (sincrono) na thread da UI, isso travava a janela bem no
-        intervalo entre o ultimo "100%" logado e a mensagem final -
-        confirmado na pratica, mesmo depois de ja ter corrigido os
-        Write() em bloco e a checagem de tamanho pos-copia com esse mesmo
-        padrao. FileStream nao e "preso" a thread que criou (diferente de
-        controles WinForms) - chamar Close() de outra thread e seguro
-        desde que nada mais esteja usando o stream ao mesmo tempo, que e
-        exatamente o caso aqui (a thread principal so espera).
+        Renomeia um arquivo ja copiado no destino (UNC) - usado depois de
+        um robocopy, que sempre preserva o nome de ORIGEM no destino (nao
+        da pra pedir pra ele renomear durante a copia). O cache local de
+        pacotes usa um nome interno com hash do Drive (ex:
+        "1F3mEuF7CgwrZAxb4nSl5_..._PADA-UE"), quase sempre diferente do
+        nome final esperado (coluna NomeArquivo da planilha) - sem esse
+        passo, o arquivo ficava no InstSeg com o nome de cache errado (ja
+        visto na pratica), e a ferramenta nunca reconhecia como copiado.
+        Rename e so metadado (SMB), nao rele/reescreve os bytes - rapido
+        mesmo em link ruim, mas roda em runspace+DoEvents mesmo assim,
+        pelo mesmo motivo de qualquer chamada de rede nesta ferramenta.
+        Se ja existir um arquivo com o nome final (ex: copia anterior),
+        apaga antes de renomear. Devolve $true/$false.
     #>
-    param([System.IO.Stream]$Stream)
-    if (-not $Stream) { return }
-    $scriptBlockFechar = {
-        param($StreamParaFechar)
-        try { $StreamParaFechar.Close() } catch {}
+    param([string]$CaminhoAtual, [string]$NovoNome, [int]$TimeoutSec = 20)
+
+    $scriptBlockRenomear = {
+        param($CaminhoAtual, $NovoNome)
+        try {
+            $pastaDestino = Split-Path $CaminhoAtual -Parent
+            $caminhoFinal = Join-Path $pastaDestino $NovoNome
+            if ((Test-Path -LiteralPath $caminhoFinal) -and $caminhoFinal -ne $CaminhoAtual) {
+                Remove-Item -LiteralPath $caminhoFinal -Force -ErrorAction SilentlyContinue
+            }
+            Rename-Item -LiteralPath $CaminhoAtual -NewName $NovoNome -Force -ErrorAction Stop
+            return $true
+        } catch {
+            return $false
+        }
     }
     $ps = [powershell]::Create()
     try {
-        [void]$ps.AddScript($scriptBlockFechar).AddArgument($Stream)
+        [void]$ps.AddScript($scriptBlockRenomear).AddArgument($CaminhoAtual).AddArgument($NovoNome)
         $handle = $ps.BeginInvoke()
-        while (-not $handle.IsCompleted) {
+        $cronometro = [System.Diagnostics.Stopwatch]::StartNew()
+        while (-not $handle.IsCompleted -and $cronometro.Elapsed.TotalSeconds -lt $TimeoutSec) {
             [System.Windows.Forms.Application]::DoEvents()
             Start-Sleep -Milliseconds 30
         }
-        [void]$ps.EndInvoke($handle)
+        if (-not $handle.IsCompleted) { $ps.Stop(); return $false }
+        return ([bool](Get-InfoArquivoComDoEvents -Caminho (Join-Path (Split-Path $CaminhoAtual -Parent) $NovoNome)))
     } finally {
         $ps.Dispose()
     }
 }
 
-function Copy-ArquivoComProgresso {
+function Copy-ArquivoComRobocopy {
     <#
-        Copia um arquivo local pro destino (UNC do InstSeg) em blocos de
-        256KB, reportando progresso no log a cada 5% (com velocidade
-        media) e chamando DoEvents a cada bloco - substitui o Copy-Item
-        simples, que e uma "caixa preta" sem feedback nenhum enquanto
-        copia (podia parecer que a janela tinha travado em arquivos
-        grandes/links de zona lentos).
+        Copia um arquivo local pro destino (UNC do InstSeg) usando o
+        robocopy.exe (nativo do Windows, sem instalar nada) em vez do
+        FileStream manual - ganha retry automatico (/R) e retomada de
+        copia interrompida (/Z), uteis nos links de zona instaveis ja
+        vistos nesta ferramenta (quedas de velocidade no meio da
+        transferencia).
 
-        $AoAtualizarProgresso (opcional) - mesmo padrao de
-        Invoke-DownloadArquivoComProgresso: scriptblock chamado a cada 5%
-        com ($Percent, $TextoStatus).
+        IMPORTANTE: NAO usa /MT (multithread do robocopy) - /MT
+        paraleliza entre VARIOS arquivos de uma lista, nao pedacos de UM
+        arquivo so, e aqui sempre copiamos 1 arquivo por vez, entao nao
+        traria ganho de velocidade nenhum. Testado na pratica que o
+        gargalo destes links e BANDA do link (nao overhead de protocolo/
+        numero de operacoes), entao o ganho real de trocar pro robocopy
+        e confiabilidade (retry/resume), NAO velocidade.
+
+        Como ler o progresso do STDOUT do robocopy de forma confiavel
+        quando redirecionado e complicado (formato muda, risco de
+        deadlock de pipe cheio), o progresso aqui e ESTIMADO por polling
+        periodico (a cada ~2s) do tamanho atual do arquivo de destino,
+        comparado ao tamanho do arquivo de origem - mesma ideia de
+        "quanto ja chegou", so que medido de fora em vez de contado bloco
+        a bloco.
+
+        TESTADO NA PRATICA e ABANDONADO: medir progresso pelo TAMANHO do
+        arquivo de destino nao funciona com robocopy - com /Z (modo
+        restartable), o Windows/robocopy pre-aloca o tamanho final do
+        arquivo quase imediatamente (poucos segundos), entao o "tamanho
+        atual" chega em ~100% muito antes da copia de verdade terminar -
+        a barra pulava rapido pra quase 100% e ficava "parada" ali pelo
+        tempo real da transferencia (confirmado: 192s numa copia que "já
+        mostrava" 99% aos poucos segundos). Por isso o status agora e por
+        TEMPO DECORRIDO (sem fingir uma % que nao reflete a realidade),
+        atualizado tanto no rotulo quanto (se informado) na celula da
+        grade da linha ativa - ver Update-StatusPacoteAtivo.
+
+        IMPORTANTE: robocopy sempre preserva o NOME DE ORIGEM no destino
+        (o cache local usa um nome interno com hash, diferente do nome
+        final esperado da planilha) - ao terminar a copia com sucesso,
+        renomeia pro nome final via Move-ArquivoRenomeandoComDoEvents.
+
+        $AoAtualizarProgresso (opcional) - so chamado 1x no final (100%),
+        pra mover a barra numerica pro fim; durante a copia em si, o
+        status e so texto (via Update-StatusPacoteAtivo), sem % numerico.
     #>
-    param([string]$Origem, [string]$Destino, [string]$NomePacote = "pacote", [scriptblock]$AoAtualizarProgresso = $null)
+    param([string]$Origem, [string]$Destino, [string]$NomePacote = "pacote", [scriptblock]$AoAtualizarProgresso = $null, [System.Windows.Forms.DataGridView]$GridStatus = $null, [int]$LinhaIndice = -1)
 
-    $streamOrigem = [System.IO.File]::OpenRead($Origem)
+    $origemDir = Split-Path $Origem -Parent
+    $nomeArquivo = Split-Path $Origem -Leaf
+    $destinoDir = Split-Path $Destino -Parent
+    $nomeFinalDesejado = Split-Path $Destino -Leaf
+    $caminhoComNomeOrigem = Join-Path $destinoDir $nomeArquivo
+    $totalBytes = (Get-Item $Origem).Length
+
+    # /Z = restartable (retoma copia interrompida em vez de comecar do
+    # zero num link que caiu no meio); /J = I/O nao-bufferizado
+    # (recomendado p/ arquivos grandes); /R:5 /W:10 = tenta de novo ate
+    # 5x, esperando 10s entre tentativas (o padrao do robocopy e 1
+    # MILHAO de tentativas - sempre precisa limitar); /NP evita
+    # progresso por byte no console (nao da pra ler de forma confiavel
+    # via redirecionamento); /NJH /NJS /NDL /NFL /NC /NS reduzem o log a
+    # praticamente nada.
+    $argsRobocopy = @(
+        "`"$origemDir`""
+        "`"$destinoDir`""
+        "`"$nomeArquivo`""
+        "/Z", "/J", "/R:5", "/W:10", "/NP", "/NJH", "/NJS", "/NDL", "/NFL", "/NC", "/NS"
+    )
+
+    $pastaLogsTemp = Join-Path $env:TEMP "ScannerRedeZona_RobocopyLogs"
+    if (-not (Test-Path $pastaLogsTemp)) { New-Item -ItemType Directory -Path $pastaLogsTemp -Force | Out-Null }
+    $sufixoLog = [Guid]::NewGuid().ToString('N')
+    $logSaida = Join-Path $pastaLogsTemp "robocopy_$sufixoLog.log"
+    $logErro = Join-Path $pastaLogsTemp "robocopy_$sufixoLog.err.log"
+
     try {
-        $streamDestino = [System.IO.File]::Create($Destino)
-        try {
-            $totalBytes = $streamOrigem.Length
-            # Bloco de 256KB - TESTADO na pratica (v1 desta funcao usava
-            # 4MB, apostando que o gargalo fosse latencia/numero de
-            # idas-e-voltas pela rede): a taxa media ficou IDENTICA
-            # (~0.55 MB/s) com blocos de 256KB e de 4MB, em arquivos de
-            # tamanhos bem diferentes (33 a 127 MB) - isso descarta
-            # latencia como gargalo; o link so tem banda limitada mesmo
-            # (~4.4 Mbit/s), que nenhum tamanho de bloco muda. Voltou pro
-            # bloco pequeno porque da granularidade de progresso mais
-            # suave no log/barra, sem ganho nenhum em trocar.
-            $buffer = New-Object byte[] 262144
-            $totalCopiado = 0
-            $ultimoPercentLogado = -5
-            $cronometro = [System.Diagnostics.Stopwatch]::StartNew()
+        # -RedirectStandardOutput/-Error gravam DIRETO em arquivo (nao
+        # via pipe) - evita o classico deadlock de "pipe cheio" que
+        # rolaria se tentassemos ler o stdout ao vivo sem drenar direito.
+        $processo = Start-Process -FilePath "robocopy.exe" -ArgumentList $argsRobocopy -NoNewWindow -PassThru -RedirectStandardOutput $logSaida -RedirectStandardError $logErro
 
-            while (($lidos = $streamOrigem.Read($buffer, 0, $buffer.Length)) -gt 0) {
-                Write-BlocoStreamComDoEvents -Stream $streamDestino -Buffer $buffer -Count $lidos
-                $totalCopiado += $lidos
+        $mbTotal = [Math]::Round($totalBytes / 1MB, 1)
+        $cronometro = [System.Diagnostics.Stopwatch]::StartNew()
+        $proximaAtualizacao = [System.Diagnostics.Stopwatch]::StartNew()
+        $textoStatus = "Copiando '$NomePacote' (robocopy, $mbTotal MB) ha 0s..."
+        Update-StatusPacoteAtivo -Texto $textoStatus -GridStatus $GridStatus -LinhaIndice $LinhaIndice
+        Add-Log $textoStatus "Gray"
+        while (-not $processo.HasExited) {
+            [System.Windows.Forms.Application]::DoEvents()
+            Start-Sleep -Milliseconds 200
 
-                if ($totalBytes -gt 0) {
-                    $percent = [Math]::Floor(($totalCopiado / $totalBytes) * 100)
-                    # -ge ($ultimoPercentLogado + 5) OU 100% (ultimo bloco)
-                    # - sem o "ou 100%", um bloco grande o suficiente podia
-                    # pular direto de, por exemplo, 97% pro fim sem nunca
-                    # bater um multiplo de 5% de novo (102% nunca chega),
-                    # entao o log/barra ficava "parado" no ultimo % batido
-                    # ate a mensagem final aparecer.
-                    if ($percent -ge ($ultimoPercentLogado + 5) -or $percent -ge 100) {
-                        $mbCopiado = [Math]::Round($totalCopiado / 1MB, 1)
-                        $mbTotal = [Math]::Round($totalBytes / 1MB, 1)
-                        $velocidade = if ($cronometro.Elapsed.TotalSeconds -gt 0) { [Math]::Round(($totalCopiado / 1MB) / $cronometro.Elapsed.TotalSeconds, 1) } else { 0 }
-                        $textoStatus = "Copiando '$NomePacote': $percent% ($mbCopiado / $mbTotal MB, $velocidade MB/s)"
-                        Add-Log $textoStatus "Gray"
-                        if ($AoAtualizarProgresso) { & $AoAtualizarProgresso $percent $textoStatus }
-                        $ultimoPercentLogado = $percent
-                    }
-                }
-                [System.Windows.Forms.Application]::DoEvents()
+            if ($proximaAtualizacao.Elapsed.TotalSeconds -ge 3) {
+                $proximaAtualizacao.Restart()
+                $segundosDecorridos = [Math]::Round($cronometro.Elapsed.TotalSeconds)
+                $textoStatus = "Copiando '$NomePacote' (robocopy, $mbTotal MB) ha ${segundosDecorridos}s..."
+                Update-StatusPacoteAtivo -Texto $textoStatus -GridStatus $GridStatus -LinhaIndice $LinhaIndice
+                Add-Log $textoStatus "Gray"
             }
-        } finally {
-            Invoke-FecharStreamComDoEvents -Stream $streamDestino
         }
+        $processo.WaitForExit()
     } finally {
-        $streamOrigem.Close()
+        Remove-Item -Path $logSaida, $logErro -Force -ErrorAction SilentlyContinue
     }
+
+    # Codigo de saida do robocopy e um BITMASK, nao "0 = sucesso" como a
+    # maioria dos programas: 0-7 sao variacoes de sucesso (1 = copiou
+    # arquivo(s), 2 = achou extras no destino, 4 = alguns arquivos/pastas
+    # incompativeis - raro copiando 1 arquivo so); 8+ indica falha real.
+    if ($processo.ExitCode -ge 8) {
+        throw "robocopy falhou (codigo de saida $($processo.ExitCode)) ao copiar '$NomePacote' para '$Destino'."
+    }
+
+    # robocopy terminou e copiou o arquivo com o NOME DE ORIGEM (do
+    # cache local) - renomeia pro nome final esperado, se forem
+    # diferentes (quase sempre sao, ja que o cache usa nome com hash).
+    if ($nomeFinalDesejado -ne $nomeArquivo) {
+        if (-not (Move-ArquivoRenomeandoComDoEvents -CaminhoAtual $caminhoComNomeOrigem -NovoNome $nomeFinalDesejado)) {
+            throw "robocopy copiou o arquivo, mas falhou ao renomear de '$nomeArquivo' para '$nomeFinalDesejado' no destino."
+        }
+    }
+
+    $textoConcluido = "Copiando '$NomePacote' (robocopy, $mbTotal MB) concluido em $([Math]::Round($cronometro.Elapsed.TotalSeconds, 1))s."
+    Add-Log $textoConcluido "Gray"
+    Update-StatusPacoteAtivo -Texto $textoConcluido -GridStatus $GridStatus -LinhaIndice $LinhaIndice
+    if ($AoAtualizarProgresso) { & $AoAtualizarProgresso 100 $textoConcluido }
 }
 
 function Invoke-AcaoBaixarPacote {
@@ -1483,7 +1595,7 @@ function Invoke-AcaoBaixarPacote {
         Devolve $true se copiou E o tamanho confere, $false em qualquer
         outro caso (falha, ou tamanho divergente).
     #>
-    param($Resultado, $Pacote, [scriptblock]$AoAtualizarProgresso = $null)
+    param($Resultado, $Pacote, [scriptblock]$AoAtualizarProgresso = $null, [System.Windows.Forms.DataGridView]$GridStatus = $null, [int]$LinhaIndice = -1)
 
     if (-not $Pacote -or -not $Pacote.IdArquivo) {
         [System.Windows.Forms.MessageBox]::Show("Pacote sem ID de arquivo do Drive valido.", "Aviso", "OK", "Warning") | Out-Null
@@ -1504,12 +1616,14 @@ function Invoke-AcaoBaixarPacote {
 
         if (Test-Path $caminhos.ArquivoLocal) {
             Add-Log "Pacote '$($Pacote.Pacote)' ja esta em cache local ($($caminhos.ArquivoLocal)) - pulando novo download." "Gray"
+            Update-StatusPacoteAtivo -Texto "Ja em cache local - pulando download..." -GridStatus $GridStatus -LinhaIndice $LinhaIndice
             $nomeArquivoOriginal = if (Test-Path $caminhos.ArquivoNome) { (Get-Content -Path $caminhos.ArquivoNome -Raw -Encoding UTF8).Trim() } else { $null }
         } else {
             Add-Log "Baixando pacote '$($Pacote.Pacote)' do Google Drive (pode demorar bastante em arquivos grandes)..." "Cyan"
+            Update-StatusPacoteAtivo -Texto "Baixando do Google Drive..." -GridStatus $GridStatus -LinhaIndice $LinhaIndice
             $cronometroDownload = [System.Diagnostics.Stopwatch]::StartNew()
             try {
-                $nomeArquivoOriginal = Invoke-DownloadGoogleDrivePublico -FileId $Pacote.IdArquivo -DestinoLocal $caminhos.ArquivoLocal -NomePacote $Pacote.Pacote -AoAtualizarProgresso $AoAtualizarProgresso
+                $nomeArquivoOriginal = Invoke-DownloadGoogleDrivePublico -FileId $Pacote.IdArquivo -DestinoLocal $caminhos.ArquivoLocal -NomePacote $Pacote.Pacote -AoAtualizarProgresso $AoAtualizarProgresso -GridStatus $GridStatus -LinhaIndice $LinhaIndice
             } catch {
                 if (Test-Path $caminhos.ArquivoLocal) { Remove-Item $caminhos.ArquivoLocal -Force -ErrorAction SilentlyContinue }
                 throw
@@ -1533,6 +1647,7 @@ function Invoke-AcaoBaixarPacote {
             (Get-Content -Path $caminhos.ArquivoHash -Raw -Encoding UTF8).Trim()
         } else {
             Add-Log "Calculando hash MD5 do pacote (cache local)..." "Gray"
+            Update-StatusPacoteAtivo -Texto "Calculando hash MD5 (local)..." -GridStatus $GridStatus -LinhaIndice $LinhaIndice
             $h = (Get-FileHash -Path $caminhos.ArquivoLocal -Algorithm MD5).Hash
             Set-Content -Path $caminhos.ArquivoHash -Value $h -Encoding UTF8
             $h
@@ -1554,14 +1669,10 @@ function Invoke-AcaoBaixarPacote {
 
         Add-Log "Copiando pacote para '$arquivoDestinoUnc'..." "Cyan"
         $cronometroCopia = [System.Diagnostics.Stopwatch]::StartNew()
-        Copy-ArquivoComProgresso -Origem $caminhos.ArquivoLocal -Destino $arquivoDestinoUnc -NomePacote $Pacote.Pacote -AoAtualizarProgresso $AoAtualizarProgresso
+        Copy-ArquivoComRobocopy -Origem $caminhos.ArquivoLocal -Destino $arquivoDestinoUnc -NomePacote $Pacote.Pacote -AoAtualizarProgresso $AoAtualizarProgresso -GridStatus $GridStatus -LinhaIndice $LinhaIndice
 
-        # O ultimo Write() do loop de copia pode ainda nao ter sido
-        # confirmado pelo servidor (fechar o FileStream e o que forca o
-        # flush final pela rede) - avisa que ainda esta trabalhando nessa
-        # janela, senao a interface fica "parada" sem explicacao entre o
-        # ultimo % logado e a mensagem final.
-        if ($AoAtualizarProgresso) { & $AoAtualizarProgresso 100 "Finalizando copia de '$($Pacote.Pacote)' e conferindo tamanho no destino..." }
+        Update-StatusPacoteAtivo -Texto "Conferindo tamanho no destino..." -GridStatus $GridStatus -LinhaIndice $LinhaIndice
+        if ($AoAtualizarProgresso) { & $AoAtualizarProgresso 100 "Conferindo tamanho de '$($Pacote.Pacote)' no destino..." }
 
         # Conferencia automatica pos-copia e SO DE TAMANHO (metadado,
         # instantaneo) - reler o arquivo inteiro pela rede da zona a cada
@@ -1638,7 +1749,7 @@ function Invoke-AcaoVerificarHashPacote {
         recursiva do InstSeg inteiro de novo - so recalcula do zero se nao
         vier nada (fallback de seguranca).
     #>
-    param($Resultado, $Pacote, $StatusInfo = $null)
+    param($Resultado, $Pacote, $StatusInfo = $null, [System.Windows.Forms.DataGridView]$GridStatus = $null, [int]$LinhaIndice = -1)
 
     $statusInfo = $StatusInfo
     if (-not $statusInfo) {
@@ -1665,6 +1776,7 @@ function Invoke-AcaoVerificarHashPacote {
 
     Add-Log "Verificando hash MD5 de '$($Pacote.Pacote)' em '$($statusInfo.ArquivoDestino)' contra referencia da $origemHash (pode demorar em arquivos grandes/links lentos)..." "Cyan"
     $cronometro = [System.Diagnostics.Stopwatch]::StartNew()
+    Update-StatusPacoteAtivo -Texto "Verificando hash MD5 (lendo arquivo inteiro pela rede)..." -GridStatus $GridStatus -LinhaIndice $LinhaIndice
 
     # Le o arquivo INTEIRO pela rede da zona pra calcular o hash - roda num
     # runspace em segundo plano (mesmo padrao ja usado pra listar o
@@ -1698,9 +1810,14 @@ function Invoke-AcaoVerificarHashPacote {
     try {
         [void]$psHash.AddScript($scriptBlockHashRemoto).AddArgument($statusInfo.ArquivoDestino)
         $handleHash = $psHash.BeginInvoke()
+        $proximaAtualizacaoHash = [System.Diagnostics.Stopwatch]::StartNew()
         while (-not $handleHash.IsCompleted) {
             [System.Windows.Forms.Application]::DoEvents()
             Start-Sleep -Milliseconds 50
+            if ($proximaAtualizacaoHash.Elapsed.TotalSeconds -ge 3) {
+                $proximaAtualizacaoHash.Restart()
+                Update-StatusPacoteAtivo -Texto "Verificando hash MD5 ha $([Math]::Round($cronometro.Elapsed.TotalSeconds))s..." -GridStatus $GridStatus -LinhaIndice $LinhaIndice
+            }
         }
         $hashRemoto = $psHash.EndInvoke($handleHash)
         if ($psHash.Streams.Error.Count -gt 0) { throw $psHash.Streams.Error[0].Exception }
@@ -1714,9 +1831,11 @@ function Invoke-AcaoVerificarHashPacote {
 
     if ($hashRemoto -eq $hashReferencia) {
         Add-Log "Hash MD5 confere para '$($Pacote.Pacote)' em '$($Resultado.Hostname)' ($([Math]::Round($cronometro.Elapsed.TotalSeconds, 1))s, referencia: $origemHash)." "Green"
+        Update-StatusPacoteAtivo -Texto "Hash MD5 conferido - integro." -GridStatus $GridStatus -LinhaIndice $LinhaIndice
         [System.Windows.Forms.MessageBox]::Show("O sistema '$($Pacote.Pacote)' esta INTEGRO em '$($Resultado.Hostname)' ($($Resultado.IP)).`r`n`r`nHash MD5 origem ($origemHash):`r`n$hashReferencia`r`n`r`nHash MD5 destino ($($statusInfo.ArquivoDestino)):`r`n$hashRemoto`r`n`r`nOs dois hashes conferem.", "Integridade OK", "OK", "Information") | Out-Null
     } else {
         Add-Log "[ERRO] Hash MD5 NAO confere para '$($Pacote.Pacote)' em '$($Resultado.Hostname)' (destino=$hashRemoto referencia=$hashReferencia, $origemHash)." "OrangeRed"
+        Update-StatusPacoteAtivo -Texto "Hash MD5 NAO confere - possivel corrupcao." -GridStatus $GridStatus -LinhaIndice $LinhaIndice
         [System.Windows.Forms.MessageBox]::Show("ATENCAO: o sistema '$($Pacote.Pacote)' em '$($Resultado.Hostname)' ($($Resultado.IP)) NAO esta integro - o arquivo no destino pode estar corrompido.`r`n`r`nHash MD5 origem ($origemHash):`r`n$hashReferencia`r`n`r`nHash MD5 destino ($($statusInfo.ArquivoDestino)):`r`n$hashRemoto`r`n`r`nRecomendado copiar de novo.", "Hash NAO confere", "OK", "Warning") | Out-Null
     }
 }
@@ -3664,7 +3783,7 @@ function Show-JanelaSistemasEleitorais {
                 [System.Windows.Forms.Application]::DoEvents()
             }
             try {
-                Invoke-AcaoBaixarPacote -Resultado $Resultado -Pacote $tagLinha.Pacote -AoAtualizarProgresso $callbackProgressoLocal | Out-Null
+                Invoke-AcaoBaixarPacote -Resultado $Resultado -Pacote $tagLinha.Pacote -AoAtualizarProgresso $callbackProgressoLocal -GridStatus $gridSis -LinhaIndice $e.RowIndex | Out-Null
             } finally {
                 if ($barraProgressoLocal) { $barraProgressoLocal.Visible = $false }
                 if ($lblProgressoLocal) { $lblProgressoLocal.Text = "" }
@@ -3674,7 +3793,7 @@ function Show-JanelaSistemasEleitorais {
         } elseif ($nomeColuna -eq "Verificar") {
             $dlg.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
             try {
-                Invoke-AcaoVerificarHashPacote -Resultado $Resultado -Pacote $tagLinha.Pacote -StatusInfo $tagLinha.StatusInfo
+                Invoke-AcaoVerificarHashPacote -Resultado $Resultado -Pacote $tagLinha.Pacote -StatusInfo $tagLinha.StatusInfo -GridStatus $gridSis -LinhaIndice $e.RowIndex
             } finally {
                 $dlg.Cursor = [System.Windows.Forms.Cursors]::Default
             }
