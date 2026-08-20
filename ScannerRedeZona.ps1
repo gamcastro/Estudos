@@ -159,6 +159,12 @@ $script:SistemasEleitoraisExtra = @(
     # maquina) qual e o NAME exato dessas chaves e ajuste aqui.
     [PSCustomObject]@{ Chave = "PADA-UE";   Propriedade = "VersaoPadaUe";     Coluna = "PadaUe";    Titulo = "PADA-UE";   Largura = 150; ComNomeAmigavel = $true; NaGradePrincipal = $false }
     [PSCustomObject]@{ Chave = "FBR";       Propriedade = "VersaoFbr";        Coluna = "Fbr";       Titulo = "FBR";       Largura = 150; ComNomeAmigavel = $true; NaGradePrincipal = $false }
+    # Chave "TRANSPORTADORTDTOT" confirmada no cadastro de registro do OCS
+    # Inventory (HKLM\SOFTWARE\Sistemas Eleitorais\TransportadorTDTOT,
+    # campo NAME = valor da coluna "Versao"). Sem nome amigavel (nao tem
+    # "nome de praia" na planilha de Versoes, igual BitLocker/SIS) - mostra
+    # a versao crua mesmo.
+    [PSCustomObject]@{ Chave = "TRANSPORTADORTDTOT"; Propriedade = "VersaoTransportadorTdtot"; Coluna = "TransportadorTdtot"; Titulo = "Transportador TDTOT"; Largura = 150; ComNomeAmigavel = $false; NaGradePrincipal = $true }
 )
 
 $script:ArquivoConfigVnc = Join-Path $PSScriptRoot "vnc_config.txt"
