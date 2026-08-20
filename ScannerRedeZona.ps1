@@ -2855,121 +2855,117 @@ function Open-RcViewer {
 # criar ou alterar registros por essa API - qualquer acao de escrita no
 # OCS (excluir maquina, etc.) precisa ser feita pelo console web mesmo.
 
-function Get-OcsComputadoresDaZona {
+function Get-OcsComputadoresPorIp {
     <#
-        Enumera as maquinas de uma zona percorrendo TODO o inventario do
-        OCS, ja que /computers/search?NAME=... so aceita nome EXATO
-        (confirmado na pratica: nem prefixo nem coringa "%" embutido
-        funcionam - devolve 0 pra qualquer coisa que nao seja o nome
-        completo certinho).
+        Acha as maquinas do OCS Inventory cadastradas numa rede /24 fazendo
+        uma busca EXATA por IP (coluna "IPADDR" da tabela hardware) pra
+        cada um dos 254 enderecos, em paralelo - confirmado na pratica que
+        /computers/search aceita IPADDR como :searchCriteria (nao esta
+        documentado com esse exemplo especifico, mas o teste manual
+        devolveu "[{"ID":12940}]" pra um IP conhecido).
 
-        /computers (sem "/search") se comportou diferente: SEM nenhum
-        filtro de nome, ele pagina o inventario INTEIRO via start/limit e
-        devolve o registro COMPLETO de cada maquina (hardware + bios +
-        registry, igual ao que /computer/:id/bios e /computer/:id/registry
-        dariam separados). Entao aqui a gente pagina esse endpoint e filtra
-        pelo nome (hardware.NAME) no proprio script, com o mesmo padrao de
-        prefixo de zona usado no resto da ferramenta (Test-HostnamePertenceZona).
+        Property: MUITO mais rapido que paginar o inventario inteiro (o
+        antigo Get-OcsComputadoresDaZona, que baixava o registro COMPLETO
+        de uns 2000+ maquinas cadastradas e filtrava por nome no proprio
+        script) - a maioria dos 254 IPs de uma rede nao tem nada
+        cadastrado, entao a busca devolve vazio na hora; so quem da match
+        (normalmente 20-40 maquinas por zona) precisa de uma 2a chamada
+        pra pegar hardware/bios/registry completos via /computer/:id.
 
-        Cada pagina e "pesada" (registro completo, com impressoras/discos/
-        placas de rede etc. de cada maquina) e o servidor tem uns 2000+
-        maquinas cadastradas no total - buscando pagina por pagina, uma de
-        cada vez, isso demorava bastante (14 idas-e-voltas sequenciais na
-        pratica). Como o gargalo e rede/round-trip (nao processamento local),
-        buscamos varias paginas em paralelo usando o mesmo RunspacePool do
-        scan de IP - um lote de $Paralelismo paginas por vez. Ao final de
-        cada lote, se alguma pagina do lote veio incompleta (menos que
-        $TamanhoPagina itens) ou deu erro, paramos de disparar novos lotes -
-        pode sobrar 1-2 chamadas "a mais" perto do fim (paginas que ja
-        passaram do total), o que e barato comparado ao ganho de tempo.
-
-        $PrefixoRede (opcional, ex: "10.198.54.") tambem inclui no resultado
-        qualquer maquina cujo ULTIMO IP CONHECIDO (hardware.IPADDR) comece
-        com esse prefixo, mesmo que o nome nao bata com nenhum padrao -
-        usado para resolver hostname pelo IP de hosts que responderam a
-        varredura mas nao tem DNS reverso/NetBIOS funcionando.
+        Como a busca e por IP (nao por padrao de nome), dispensa
+        Test-HostnamePertenceZona pra decidir se uma maquina "e desta
+        zona" - o ULTIMO IP CONHECIDO (hardware.IPADDR) ja fica dentro da
+        rede fisica da propria zona/predio, mesmo em rede compartilhada
+        entre varias zonas (o problema do filtro por nome era justamente
+        esse: em rede compartilhada, o nome nao da pra confiar sozinho).
     #>
-    param([string[]]$Padroes, [string]$PrefixoRede = $null, [int]$TamanhoPagina = 150, [int]$TimeoutSec = 30, [int]$MaxPaginas = 40, [int]$Paralelismo = 5)
+    param([string]$PrefixoRede, [int]$TimeoutSec = 8, [int]$Paralelismo = 40)
 
-    $scriptBlockPagina = {
-        param($UrlBase, $Start, $Limite, $TimeoutSec)
+    $scriptBlockPorIp = {
+        param($UrlBase, $Ip, $TimeoutSec)
         try {
-            $resp = Invoke-RestMethod -Uri "$UrlBase/computers?start=$Start&limit=$Limite" -TimeoutSec $TimeoutSec
-            $itens = @($resp.PSObject.Properties) | ForEach-Object { $_.Value }
-            return [PSCustomObject]@{ Start = $Start; Itens = $itens; Erro = $null }
+            $urlBusca = "$UrlBase/computers/search?start=0&limit=5&IPADDR=$Ip"
+            $respBusca = Invoke-RestMethod -Uri $urlBusca -TimeoutSec $TimeoutSec
+            $ids = @($respBusca) | Where-Object { $_.ID } | Select-Object -ExpandProperty ID -Unique
+            if (@($ids).Count -eq 0) { return [PSCustomObject]@{ Comps = @(); Erro = $null } }
+
+            # /computer/:id SEM secao especifica (documentado como "todos os
+            # detalhes") na pratica devolve um objeto VAZIO nesse servidor -
+            # confirmado com diagnostico (0 propriedades no objeto extraido),
+            # apesar de nao dar erro nenhum. Em vez disso, busca as 3 secoes
+            # especificas necessarias (hardware/bios/registry) separadamente -
+            # o MESMO formato de chamada (/computer/:id/<secao>) que a
+            # varredura principal ja usa com sucesso pra VERSAO_SIS/BitLocker/
+            # etc. em toda varredura, entao e um formato comprovado.
+            $comps = New-Object System.Collections.Generic.List[object]
+            $erroDetalhe = $null
+            foreach ($id in $ids) {
+                try {
+                    $respHw = Invoke-RestMethod -Uri "$UrlBase/computer/$id/hardware" -TimeoutSec $TimeoutSec
+                    $hw = $respHw."$id".hardware
+                    if (-not $hw -or -not $hw.NAME) { continue }
+
+                    $bios = $null
+                    try {
+                        $respBios = Invoke-RestMethod -Uri "$UrlBase/computer/$id/bios" -TimeoutSec $TimeoutSec
+                        $bios = $respBios."$id".bios
+                    } catch {}
+
+                    $registry = $null
+                    try {
+                        $respReg = Invoke-RestMethod -Uri "$UrlBase/computer/$id/registry" -TimeoutSec $TimeoutSec
+                        $registry = $respReg."$id".registry
+                    } catch {}
+
+                    $comps.Add([PSCustomObject]@{ hardware = $hw; bios = $bios; registry = $registry })
+                } catch {
+                    $erroDetalhe = $_.Exception.Message
+                }
+            }
+            return [PSCustomObject]@{ Comps = $comps; Erro = $erroDetalhe }
         } catch {
-            return [PSCustomObject]@{ Start = $Start; Itens = @(); Erro = $_.Exception.Message }
+            return [PSCustomObject]@{ Comps = @(); Erro = $_.Exception.Message }
         }
     }
 
     $sessionState = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
-    $poolPaginas = [runspacefactory]::CreateRunspacePool(1, $Paralelismo, $sessionState, $Host)
-    $poolPaginas.Open()
+    $pool = [runspacefactory]::CreateRunspacePool(1, $Paralelismo, $sessionState, $Host)
+    $pool.Open()
 
     $encontrados = New-Object System.Collections.Generic.List[object]
+    $erros = 0
     try {
-        $proximoStart = 0
-        $paginasDisparadas = 0
-        $terminou = $false
+        $jobs = New-Object System.Collections.Generic.List[object]
+        for ($i = 1; $i -le 254; $i++) {
+            $ip = "$PrefixoRede$i"
+            $ps = [powershell]::Create()
+            $ps.RunspacePool = $pool
+            [void]$ps.AddScript($scriptBlockPorIp).AddArgument($script:UrlOcsApiBase).AddArgument($ip).AddArgument($TimeoutSec)
+            $jobs.Add([PSCustomObject]@{ Pipe = $ps; Handle = $ps.BeginInvoke() })
+        }
 
-        while (-not $terminou -and $paginasDisparadas -lt $MaxPaginas) {
-            $lote = New-Object System.Collections.Generic.List[object]
-            for ($i = 0; $i -lt $Paralelismo -and $paginasDisparadas -lt $MaxPaginas; $i++) {
-                $ps = [powershell]::Create()
-                $ps.RunspacePool = $poolPaginas
-                [void]$ps.AddScript($scriptBlockPagina).AddArgument($script:UrlOcsApiBase).AddArgument($proximoStart).AddArgument($TamanhoPagina).AddArgument($TimeoutSec)
-                $lote.Add([PSCustomObject]@{ Pipe = $ps; Handle = $ps.BeginInvoke(); Start = $proximoStart })
-                $proximoStart += $TamanhoPagina
-                $paginasDisparadas++
-            }
+        # Mesma tecnica de DoEvents em polling ja usada no resto da
+        # ferramenta pra nao travar a janela enquanto espera as 254
+        # chamadas paralelas terminarem.
+        while ($jobs | Where-Object { -not $_.Handle.IsCompleted }) {
+            [System.Windows.Forms.Application]::DoEvents()
+            Start-Sleep -Milliseconds 30
+        }
 
-            Add-Log "[DEBUG OCS] Buscando lote de $($lote.Count) pagina(s) em paralelo (registros a partir de $($lote[0].Start))..." "Gray"
-
-            # Espera o lote terminar SEM travar a interface: esta funcao roda
-            # sincrona, direto no evento de conclusao da varredura (thread da
-            # UI) - um EndInvoke() direto bloqueia ali parado, sem bombear as
-            # mensagens do Windows Forms, entao a janela fica sem repintar (e
-            # o log parece "pular" tudo de uma vez so quando volta a
-            # responder). O DoEvents() aqui mantem a tela viva enquanto
-            # espera, igual o timer da varredura de IP ja faz via polling.
-            while ($lote | Where-Object { -not $_.Handle.IsCompleted }) {
-                [System.Windows.Forms.Application]::DoEvents()
-                Start-Sleep -Milliseconds 30
-            }
-
-            $resultadosLote = foreach ($job in $lote) {
-                $r = $job.Pipe.EndInvoke($job.Handle)
-                $job.Pipe.Dispose()
-                $r
-            }
-
-            foreach ($r in ($resultadosLote | Sort-Object Start)) {
-                if ($r.Erro) {
-                    Add-Log "[DEBUG OCS] Erro ao paginar inventario (start=$($r.Start)): $($r.Erro)" "OrangeRed"
-                    $terminou = $true
-                    continue
-                }
-
-                foreach ($comp in $r.Itens) {
-                    $hw = $comp.hardware
-                    if (-not $hw -or -not $hw.NAME) { continue }
-                    $nomeUpper = $hw.NAME.ToUpper()
-                    $bateNome = $false
-                    foreach ($padrao in $Padroes) {
-                        if ($nomeUpper.Contains($padrao)) { $bateNome = $true; break }
-                    }
-                    $bateIp = $PrefixoRede -and $hw.IPADDR -and $hw.IPADDR.StartsWith($PrefixoRede)
-                    if ($bateNome -or $bateIp) { $encontrados.Add($comp) }
-                }
-
-                if ($r.Itens.Count -lt $TamanhoPagina) { $terminou = $true }
-            }
+        foreach ($job in $jobs) {
+            $r = $job.Pipe.EndInvoke($job.Handle)
+            $job.Pipe.Dispose()
+            if ($r.Erro) { $erros++; continue }
+            foreach ($comp in $r.Comps) { $encontrados.Add($comp) }
         }
     } finally {
-        $poolPaginas.Close()
-        $poolPaginas.Dispose()
+        $pool.Close()
+        $pool.Dispose()
     }
 
+    if ($erros -gt 0) {
+        Add-Log "[AVISO] $erros IP(s) falharam na busca por IPADDR no OCS Inventory (timeout/erro de rede) - podem ter ficado de fora do resultado." "Yellow"
+    }
     return $encontrados
 }
 
@@ -4400,20 +4396,15 @@ function Invoke-BuscarDesligadosOcs {
     $padroes = @("ZMA$zonaPad", "CMA$zonaPad", "ZE-$zonaPad", "ZE$zonaPad")
     $resolucaoAtual = Resolve-RedeDaZona -Zona $zona
 
-    # Em rede COMPARTILHADA (varias zonas no mesmo prefixo, ex: 10.11.81.0/24
-    # de Sao Luis), o prefixo de rede nao identifica uma zona especifica -
-    # bater IP contra esse prefixo acharia praticamente toda maquina do
-    # predio, de QUALQUER zona. So passa -PrefixoRede quando a rede NAO e
-    # compartilhada (ai sim o prefixo e exclusivo dessa zona); em rede
-    # compartilhada, a UNICA forma confiavel de identificar a zona e o
-    # padrao do hostname ($padroes).
-    $prefixoParaOcs = if ($script:RedeCompartilhada) { $null } else { $resolucaoAtual.Prefixo }
-
-    Add-Log "=== Buscando no OCS Inventory maquinas da Zona $zonaPad que nao apareceram na varredura (paginando o inventario completo) ===" "Yellow"
+    Add-Log "=== Buscando no OCS Inventory maquinas da Zona $zonaPad (busca exata por IP em $($resolucaoAtual.Prefixo)0/24) ===" "Yellow"
     $grid.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
 
-    $comps = Get-OcsComputadoresDaZona -Padroes $padroes -PrefixoRede $prefixoParaOcs
-    Add-Log "$($comps.Count) maquina(s) da zona encontrada(s) no cadastro do OCS Inventory (por nome ou IP)." "Gray"
+    # Busca por IP (nao por padrao de nome) - o ultimo IP conhecido de uma
+    # maquina ja fica dentro da rede fisica da propria zona/predio, mesmo
+    # em rede compartilhada entre varias zonas, entao nao precisa mais
+    # distinguir rede compartilhada aqui.
+    $comps = Get-OcsComputadoresPorIp -PrefixoRede $resolucaoAtual.Prefixo
+    Add-Log "$($comps.Count) maquina(s) da zona encontrada(s) no cadastro do OCS Inventory (por IP)." "Gray"
 
     # Preenche o Hostname de quem respondeu a varredura mas ficou "(sem
     # resolucao de nome)" (DNS reverso/NetBIOS falharam) - cruza pelo ULTIMO
@@ -4503,8 +4494,31 @@ function Invoke-BuscarDesligadosOcs {
     $nomesJaAdicionados = @{}
     foreach ($comp in $comps) {
         $hw = $comp.hardware
+        # Registro incompleto/orfao no proprio OCS (sem nome, sem IP) - as
+        # vezes sobra quando uma maquina e reinstalada e o OCS cria um
+        # cadastro novo sem mesclar o antigo. Nao da pra mostrar como
+        # "possivelmente desligado" util (nada pra identificar a maquina),
+        # entao pula.
+        if (-not $hw -or -not $hw.NAME) { continue }
         $nomeOcs = $hw.NAME
         $nomeCurto = ($nomeOcs -split '\.')[0]
+
+        # A busca por IP acha TODA maquina fisicamente naquela rede /24 -
+        # numa rede COMPARTILHADA entre varias zonas (varios prédios tem
+        # mais de uma zona no mesmo /24), isso inclui maquinas de OUTRAS
+        # zonas do mesmo predio. So o padrao de nome (ZMA075 etc.) separa
+        # qual maquina e desta zona especifica nesse caso - em rede NAO
+        # compartilhada, o IP sozinho ja e exclusivo da zona, entao nao
+        # precisa filtrar por nome.
+        if ($script:RedeCompartilhada) {
+            $nomeUpper = if ($nomeOcs) { $nomeOcs.ToUpper() } else { "" }
+            $bateNome = $false
+            foreach ($padrao in $padroes) {
+                if ($nomeUpper.Contains($padrao)) { $bateNome = $true; break }
+            }
+            if (-not $bateNome) { continue }
+        }
+
         if ($nomesOnline.ContainsKey($nomeCurto.ToUpper())) { continue }
         if ($nomesJaAdicionados.ContainsKey($nomeCurto.ToUpper())) { continue }   # inventario pode listar a mesma maquina mais de uma vez
         $nomesJaAdicionados[$nomeCurto.ToUpper()] = $true
