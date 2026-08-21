@@ -20,10 +20,11 @@ Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
 Import-Module (Join-Path $PSScriptRoot "VisaoRemoting.psm1") -Force
+Import-Module (Join-Path $PSScriptRoot "VisaoAD.psm1") -Force
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "Visao - Teste de Conexao Remota (Fase 0)"
-$form.Size = New-Object System.Drawing.Size(560, 460)
+$form.Size = New-Object System.Drawing.Size(560, 490)
 $form.StartPosition = "CenterScreen"
 $form.Font = New-Object System.Drawing.Font("Segoe UI", 9)
 
@@ -59,9 +60,24 @@ $btnTestarFase1.Height = 28
 $btnTestarFase1.Enabled = $false
 $form.Controls.Add($btnTestarFase1)
 
+$numZonaTesteAd = New-Object System.Windows.Forms.NumericUpDown
+$numZonaTesteAd.Location = New-Object System.Drawing.Point(15, 120)
+$numZonaTesteAd.Width = 60
+$numZonaTesteAd.Minimum = 1
+$numZonaTesteAd.Maximum = 253
+$numZonaTesteAd.Value = 72
+$form.Controls.Add($numZonaTesteAd)
+
+$btnTestarFase2 = New-Object System.Windows.Forms.Button
+$btnTestarFase2.Text = "Testar Fase 2 (AD local - Usuarios da ZE)"
+$btnTestarFase2.Location = New-Object System.Drawing.Point(80, 118)
+$btnTestarFase2.Width = 300
+$btnTestarFase2.Height = 28
+$form.Controls.Add($btnTestarFase2)
+
 $txtLog = New-Object System.Windows.Forms.TextBox
-$txtLog.Location = New-Object System.Drawing.Point(15, 125)
-$txtLog.Size = New-Object System.Drawing.Size(520, 245)
+$txtLog.Location = New-Object System.Drawing.Point(15, 158)
+$txtLog.Size = New-Object System.Drawing.Size(520, 250)
 $txtLog.Multiline = $true
 $txtLog.ScrollBars = "Vertical"
 $txtLog.ReadOnly = $true
@@ -106,6 +122,33 @@ $btnTestarFase1.Add_Click({
         }
     } catch {
         Add-LinhaLog "ERRO: $($_.Exception.Message)"
+    }
+}.GetNewClosure())
+
+$btnTestarFase2.Add_Click({
+    # SEM Invoke-ComandoRemoto de proposito - roda local, direto na
+    # estacao (ver VisaoAD.psm1: nao passa pelo servidor).
+    $zona = [int]$numZonaTesteAd.Value
+    try {
+        $usuarios = Get-UsuariosDaZona -Zona $zona
+        Add-LinhaLog "AD local (zona $zona): $($usuarios.Count) usuario(s) encontrado(s)."
+        foreach ($u in $usuarios) {
+            $situacao = if ($u.ContaDesabilitada) { " [DESABILITADA]" } elseif ($u.ContaBloqueada) { " [BLOQUEADA]" } else { "" }
+            Add-LinhaLog "  $($u.Nome) ($($u.Login)) - $($u.Lotacao) - $($u.Grupos.Count) grupo(s)$situacao"
+        }
+    } catch {
+        Add-LinhaLog "ERRO AD: $($_.Exception.Message)"
+    }
+
+    try {
+        $maquinas = Get-MaquinasLiberadasInstalador
+        if ($null -eq $maquinas) {
+            Add-LinhaLog "Instalador: consulta falhou (usuario nao encontrado ou AD inacessivel)."
+        } else {
+            Add-LinhaLog "Instalador: liberado em $($maquinas.Count) maquina(s)."
+        }
+    } catch {
+        Add-LinhaLog "ERRO Instalador: $($_.Exception.Message)"
     }
 }.GetNewClosure())
 

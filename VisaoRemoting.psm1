@@ -141,3 +141,9 @@ function Get-ResultadosCampanhasRemoto {
 }
 
 Export-ModuleMember -Function Connect-ServidorVisao, Disconnect-ServidorVisao, Invoke-ComandoRemoto, Get-ZonasRemoto, Get-GruposSistemasRemoto, Get-CampanhasRemoto, Get-ResultadosCampanhasRemoto
+
+# NOTA: as consultas ao AD (Usuarios da ZE, status do Instalador) NAO
+# passam por aqui - ver VisaoAD.psm1. Nao sao trafego de varredura, e
+# rotea-las pelo servidor esbarra no duplo-salto do Kerberos (a
+# credencial do WinRM nao e repassada do POLICY-SERVER pro Controlador
+# de Dominio) - ver o plano da migracao.

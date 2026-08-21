@@ -12,12 +12,24 @@
     desenho completo da migracao por fases.
 
     FASE 0: infraestrutura de teste de conexao (Get-TesteConexaoServidor).
-    FASE 1 (atual): leituras de planilha Google (Zonas, Grupos-Sistemas,
+    FASE 1: leituras de planilha Google (Zonas, Grupos-Sistemas,
     Campanhas, Resultados-Campanhas) - request/resposta simples, sem
     efeito colateral, sem polling. Cada uma tinha uma chamada a Add-Log no
     caminho de erro no script original - aqui isso virou retorno
     estruturado (Ok/Avisos/Erro), ja que Add-Log escreve num RichTextBox
-    que so existe do lado cliente. Ver o plano completo em
+    que so existe do lado cliente.
+    FASE 2: tentativa de prova de conceito com AD - REVERTIDA. Consulta
+    LDAP via Invoke-Command deu "An operations error occurred" (problema
+    classico de duplo-salto do Kerberos: a credencial usada pra
+    autenticar no POLICY-SERVER nao e repassada por ele pra autenticar
+    numa TERCEIRA maquina, o Controlador de Dominio). Decisao (do
+    usuario, correta): consulta ao AD nao e trafego de varredura/scan -
+    nao ha motivo pra rotear pelo servidor. As funcoes de AD (Get-
+    UsuariosDaZona, Get-MaquinasLiberadasInstalador) ficam no
+    VisaoAD.psm1, rodando DIRETO na estacao do tecnico, fora desta
+    camada de remoting inteiramente.
+
+    Ver o plano completo em
     C:\Users\029342881104\.claude\plans\splendid-enchanting-mochi.md.
 
     NOTA: $PSScriptRoot fica VAZIO quando este arquivo e carregado via
@@ -411,3 +423,8 @@ function Get-ResultadosCampanhas {
         return ([PSCustomObject]@{ Ok = $false; Contagem = 0; Dados = @(); Erro = "Falha ao buscar resultados de campanhas: $($_.Exception.Message)" } | ConvertTo-Json -Depth 6 -Compress)
     }
 }
+
+# As funcoes de AD (Get-RaizBuscaAd, ConvertTo-InfoObjetoAd,
+# Get-UsuariosDaZona, Get-MaquinasLiberadasInstalador) NAO ficam aqui -
+# ver VisaoAD.psm1 (rodam direto no cliente, sem remoting, por causa do
+# problema de duplo-salto do Kerberos documentado no topo deste arquivo).
