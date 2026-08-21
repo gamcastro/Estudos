@@ -95,9 +95,17 @@ $btnTestarFase4.Height = 28
 $btnTestarFase4.Enabled = $false
 $form.Controls.Add($btnTestarFase4)
 
+$btnTestarFase5 = New-Object System.Windows.Forms.Button
+$btnTestarFase5.Text = "Testar Fase 5 (Varredura completa da zona acima)"
+$btnTestarFase5.Location = New-Object System.Drawing.Point(15, 188)
+$btnTestarFase5.Width = 520
+$btnTestarFase5.Height = 28
+$btnTestarFase5.Enabled = $false
+$form.Controls.Add($btnTestarFase5)
+
 $txtLog = New-Object System.Windows.Forms.TextBox
-$txtLog.Location = New-Object System.Drawing.Point(15, 188)
-$txtLog.Size = New-Object System.Drawing.Size(520, 220)
+$txtLog.Location = New-Object System.Drawing.Point(15, 223)
+$txtLog.Size = New-Object System.Drawing.Size(520, 185)
 $txtLog.Multiline = $true
 $txtLog.ScrollBars = "Vertical"
 $txtLog.ReadOnly = $true
@@ -214,11 +222,115 @@ $btnTestarFase4.Add_Click({
     }
 }.GetNewClosure())
 
+# ============================================================
+# FASE 5: varredura completa da zona (254 IPs) - reproduz
+# $btnIniciar.Add_Click/$timer.Add_Tick do ScannerRedeZona.ps1 original,
+# mas com um Timer de VERDADE fazendo polling (750ms, dentro da faixa
+# 500-1000ms do plano) em vez do loop com DoEvents usado no teste da
+# Fase 4 (aceitavel la por ser 1 IP so, mas nao pra 254). A classificacao
+# (impressora/gateway/nobreak/voip/pertence-a-zona) ja vem PRONTA do
+# servidor (Get-VarreduraNovosResultados) - ver comentario em
+# VisaoServidor.ps1 sobre essa mudanca em relacao ao original (la
+# acontecia aqui no cliente, dentro do proprio $timer.Add_Tick).
+# ============================================================
+$script:TimerVarreduraFase5 = New-Object System.Windows.Forms.Timer
+$script:TimerVarreduraFase5.Interval = 750
+$script:EstadoTesteFase5 = $null
+
+$btnTestarFase5.Add_Click({
+    $zona = [int]$numZonaTesteAd.Value
+    $btnTestarFase5.Enabled = $false
+    try {
+        $resolucao = Resolve-RedeDaZonaRemoto -Zona $zona
+        $baseIP = $resolucao.Prefixo
+        if (-not $baseIP) {
+            Add-LinhaLog "Nao foi possivel resolver a rede da zona $zona."
+            $btnTestarFase5.Enabled = $true
+            return
+        }
+        $redeCompartilhada = Test-RedeEhCompartilhadaRemoto -Prefixo $baseIP
+        $sedeTxt = if ($resolucao.Sede) { $resolucao.Sede } else { "(sede desconhecida)" }
+        Add-LinhaLog "=== Zona $zona - $sedeTxt ($($baseIP)0/24) - rede determinada por: $($resolucao.Origem) - compartilhada=$redeCompartilhada ==="
+
+        $ips = 1..254 | ForEach-Object { "$baseIP$_" }
+        $idSessao = Start-VarreduraRemota -Ips $ips -Zona $zona -RedeCompartilhada $redeCompartilhada
+
+        $script:EstadoTesteFase5 = @{
+            IdSessao       = $idSessao
+            Online         = 0
+            Impressoras    = 0
+            Gateway        = 0
+            NobreakCentral = 0
+            Voip           = 0
+            Cronometro     = [System.Diagnostics.Stopwatch]::StartNew()
+        }
+        $script:TimerVarreduraFase5.Start()
+    } catch {
+        Add-LinhaLog "ERRO ao iniciar varredura da zona: $($_.Exception.Message)"
+        $btnTestarFase5.Enabled = $true
+    }
+}.GetNewClosure())
+
+$script:TimerVarreduraFase5.Add_Tick({
+    if (-not $script:EstadoTesteFase5) { $script:TimerVarreduraFase5.Stop(); return }
+
+    try {
+        $resposta = Get-VarreduraNovosResultadosRemoto -IdSessaoEsperado $script:EstadoTesteFase5.IdSessao
+    } catch {
+        $script:TimerVarreduraFase5.Stop()
+        Add-LinhaLog "ERRO no polling da varredura: $($_.Exception.Message)"
+        $btnTestarFase5.Enabled = $true
+        $script:EstadoTesteFase5 = $null
+        return
+    }
+
+    if ($resposta.SessaoPerdida) {
+        $script:TimerVarreduraFase5.Stop()
+        Add-LinhaLog "Conexao com o POLICY-SERVER foi perdida durante a varredura - incompleta, inicie de novo."
+        $btnTestarFase5.Enabled = $true
+        $script:EstadoTesteFase5 = $null
+        return
+    }
+
+    foreach ($item in $resposta.Novos) {
+        if (-not $item.Online) { continue }
+        $script:EstadoTesteFase5.Online++
+        if ($item.PossivelImpressora) { $script:EstadoTesteFase5.Impressoras++ }
+        if ($item.EhGateway) { $script:EstadoTesteFase5.Gateway++ }
+        if ($item.EhNobreakCentral) { $script:EstadoTesteFase5.NobreakCentral++ }
+        if ($item.EhTelefoneVoip) { $script:EstadoTesteFase5.Voip++ }
+        $tag = if ($item.PossivelImpressora) { "IMPRESSORA" } elseif ($item.EhGateway) { "GATEWAY" } elseif ($item.EhNobreakCentral) { "NOBREAK" } elseif ($item.EhTelefoneVoip) { "VOIP" } else { "HOST" }
+        Add-LinhaLog "  [$tag] $($item.IP)  $($item.Hostname)"
+    }
+
+    if (-not $resposta.EmAndamento) {
+        $script:TimerVarreduraFase5.Stop()
+        $script:EstadoTesteFase5.Cronometro.Stop()
+        $seg = [math]::Round($script:EstadoTesteFase5.Cronometro.Elapsed.TotalSeconds, 1)
+        Add-LinhaLog "=== Varredura concluida: $($resposta.Concluidos)/$($resposta.Total) IPs - $($script:EstadoTesteFase5.Online) online ($($script:EstadoTesteFase5.Impressoras) impressora(s), $($script:EstadoTesteFase5.Gateway) gateway, $($script:EstadoTesteFase5.NobreakCentral) nobreak, $($script:EstadoTesteFase5.Voip) voip) em $($seg)s ==="
+        $btnTestarFase5.Enabled = $true
+        $script:EstadoTesteFase5 = $null
+    }
+}.GetNewClosure())
+
 $form.Add_Shown({
     if (Connect-ServidorVisao) {
         $lblStatusConexao.Text = "Conectado ao POLICY-SERVER."
         $lblStatusConexao.ForeColor = [System.Drawing.Color]::FromArgb(0, 128, 0)
         Add-LinhaLog "Conexao inicial OK."
+
+        # Carrega a tabela de zonas UMA VEZ, na conexao (igual o
+        # ScannerRedeZona.ps1 original fazia na abertura da janela) -
+        # Resolve-RedeDaZonaRemoto/Test-RedeEhCompartilhadaRemoto (usados
+        # pela Fase 5) dependem dela estar carregada NA SESSAO, senao
+        # tudo cai no calculo padrao (10.198.<zona>.) mesmo pra zonas com
+        # rede substituta/compartilhada cadastrada na planilha.
+        try {
+            $z = Get-ZonasRemoto
+            Add-LinhaLog "Tabela de zonas carregada: $($z.Contagem) zona(s) (origem: $($z.Origem))."
+        } catch {
+            Add-LinhaLog "ERRO ao carregar tabela de zonas: $($_.Exception.Message)"
+        }
     } else {
         $lblStatusConexao.Text = "Falha ao conectar ao POLICY-SERVER."
         $lblStatusConexao.ForeColor = [System.Drawing.Color]::FromArgb(220, 53, 69)
@@ -228,6 +340,7 @@ $form.Add_Shown({
     $btnDerrubarSessao.Enabled = $true
     $btnTestarFase1.Enabled = $true
     $btnTestarFase4.Enabled = $true
+    $btnTestarFase5.Enabled = $true
 }.GetNewClosure())
 
 $form.Add_FormClosed({ Disconnect-ServidorVisao }.GetNewClosure())

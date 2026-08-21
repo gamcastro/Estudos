@@ -683,11 +683,13 @@ function Start-VarreduraZona {
     }
 
     $script:EstadoVarredura = @{
-        Jobs        = $jobs
-        Total       = $Ips.Count
-        Concluidos  = 0
-        EmAndamento = $true
-        Pool        = $pool
+        Jobs              = $jobs
+        Total             = $Ips.Count
+        Concluidos        = 0
+        EmAndamento       = $true
+        Pool              = $pool
+        Zona              = $Zona
+        RedeCompartilhada = $RedeCompartilhada
     }
 
     return $true
@@ -723,7 +725,28 @@ function Get-VarreduraNovosResultados {
         try {
             $saida = $job.Pipe.EndInvoke($job.Handle)
             $item = @($saida)[0]
-            if ($item) { $novos.Add($item) }
+            if ($item) {
+                if ($item.Online) {
+                    # Classificacao que no ScannerRedeZona.ps1 original
+                    # acontecia no $timer.Add_Tick, do lado cliente - move
+                    # pra ca porque ja tem tudo que precisa (Zona/
+                    # RedeCompartilhada guardados no Start-VarreduraZona,
+                    # e Test-HostnamePertenceZona ja roda neste mesmo
+                    # servidor) e evita o cliente ter que chamar de volta
+                    # pro servidor pra cada um dos ate 254 resultados.
+                    $ultimoOcteto = [int]($item.IP -split '\.')[3]
+                    $ehGateway = (-not $estado.RedeCompartilhada) -and $item.IP.EndsWith(".70")
+                    $ehNobreakCentral = ($ultimoOcteto -eq 10 -or $ultimoOcteto -eq 11)
+                    $ehTelefoneVoip = (-not $estado.RedeCompartilhada) -and ($ultimoOcteto -ge 190 -and $ultimoOcteto -le 195)
+                    $pertence = if ($estado.RedeCompartilhada) { Test-HostnamePertenceZona -Hostname $item.Hostname -Zona $estado.Zona } else { $true }
+
+                    $item | Add-Member -NotePropertyName EhGateway -NotePropertyValue $ehGateway -Force
+                    $item | Add-Member -NotePropertyName EhNobreakCentral -NotePropertyValue $ehNobreakCentral -Force
+                    $item | Add-Member -NotePropertyName EhTelefoneVoip -NotePropertyValue $ehTelefoneVoip -Force
+                    $item | Add-Member -NotePropertyName PertenceZonaAtual -NotePropertyValue $pertence -Force
+                }
+                $novos.Add($item)
+            }
         } catch {
             # Um IP especifico falhou de um jeito inesperado (nao coberto
             # pelos try/catch internos do proprio $scriptBlock) - marca
@@ -734,6 +757,7 @@ function Get-VarreduraNovosResultados {
                 PossivelImpressora = $false; PortasAbertas = ""
                 DetectadoPor = "erro na varredura: $($_.Exception.Message)"
                 VncAtivo = $false; RcIvantiAtivo = $false; VersaoSis = "-"; Modelo = "-"
+                EhGateway = $false; EhNobreakCentral = $false; EhTelefoneVoip = $false; PertenceZonaAtual = $false
             })
         } finally {
             $job.Pipe.Dispose()

@@ -145,6 +145,21 @@ function Get-GruposSistemasRemoto {
     Invoke-ComandoRemoto -ScriptBlock { param($f) Import-TabelaGruposSistemas -ForcarCache:$f } -ArgumentList @($ForcarCache.IsPresent)
 }
 
+function Resolve-RedeDaZonaRemoto {
+    <#
+        Devolve um PSCustomObject simples (nao-array) - atravessa o
+        remoting sem precisar do contorno JSON (so array de PSCustomObject
+        tem o bug, ver comentario em Get-ResultadosCampanhas).
+    #>
+    param([Parameter(Mandatory)][int]$Zona)
+    Invoke-ComandoRemoto -ScriptBlock { param($z) Resolve-RedeDaZona -Zona $z } -ArgumentList @($Zona)
+}
+
+function Test-RedeEhCompartilhadaRemoto {
+    param([Parameter(Mandatory)][string]$Prefixo)
+    Invoke-ComandoRemoto -ScriptBlock { param($p) Test-RedeEhCompartilhada -Prefixo $p } -ArgumentList @($Prefixo)
+}
+
 function Get-CampanhasRemoto {
     param([switch]$ForcarCache)
     Invoke-ComandoRemoto -ScriptBlock { param($f) Import-TabelaCampanhas -ForcarCache:$f } -ArgumentList @($ForcarCache.IsPresent)
@@ -232,7 +247,7 @@ function Get-VarreduraNovosResultadosRemoto {
     $obj | Add-Member -NotePropertyName SessaoPerdida -NotePropertyValue $false -PassThru
 }
 
-Export-ModuleMember -Function Connect-ServidorVisao, Disconnect-ServidorVisao, Invoke-ComandoRemoto, Get-IdSessaoAtualVisao, Get-ZonasRemoto, Get-GruposSistemasRemoto, Get-CampanhasRemoto, Get-ResultadosCampanhasRemoto, Start-VarreduraRemota, Get-VarreduraNovosResultadosRemoto
+Export-ModuleMember -Function Connect-ServidorVisao, Disconnect-ServidorVisao, Invoke-ComandoRemoto, Get-IdSessaoAtualVisao, Get-ZonasRemoto, Get-GruposSistemasRemoto, Get-CampanhasRemoto, Get-ResultadosCampanhasRemoto, Resolve-RedeDaZonaRemoto, Test-RedeEhCompartilhadaRemoto, Start-VarreduraRemota, Get-VarreduraNovosResultadosRemoto
 
 # NOTA: as consultas ao AD (Usuarios da ZE, status do Instalador) NAO
 # passam por aqui - ver VisaoAD.psm1. Nao sao trafego de varredura, e
