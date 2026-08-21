@@ -58,6 +58,13 @@ Add-Type -AssemblyName Microsoft.VisualBasic
 # ============================================================
 # ESTADO GLOBAL
 # ============================================================
+# "Visao" - nome batizado pelos tecnicos em reuniao (21/08/2026) pra essa
+# ferramenta, ate entao so chamada pelo nome tecnico "Scanner de Rede por
+# Zona Eleitoral". Usado no titulo da janela principal e das janelas
+# secundarias (ver $form.Text/$dlg.Text ao longo do arquivo).
+$script:NomeFerramenta = "Visão"
+$script:VersaoFerramenta = "1.0"
+
 $script:Pool         = $null
 $script:Jobs         = New-Object System.Collections.Generic.List[object]
 $script:Resultados   = New-Object System.Collections.Generic.List[object]
@@ -502,7 +509,7 @@ $scriptBlock = {
 # FORM PRINCIPAL
 # ============================================================
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "TRE-MA / SEASU-COINF-STIC - Scanner de Rede por Zona Eleitoral"
+$form.Text = "$($script:NomeFerramenta) $($script:VersaoFerramenta) - TRE-MA / SEASU-COINF-STIC"
 $form.Size = New-Object System.Drawing.Size(1385, 706)
 $form.StartPosition = "CenterScreen"
 $form.MinimumSize = $form.Size
@@ -2787,7 +2794,7 @@ function Show-InfoImpressora {
 
     $altura = 90 + ($campos.Count * 26) + 70
     $dlg = New-Object System.Windows.Forms.Form
-    $dlg.Text = "Informacoes da Impressora - $IP  (via $fonte)"
+    $dlg.Text = "$($script:NomeFerramenta) - Informacoes da Impressora - $IP  (via $fonte)"
     $dlg.Size = New-Object System.Drawing.Size(430, $altura)
     $dlg.StartPosition = "CenterParent"
     $dlg.FormBorderStyle = "FixedDialog"
@@ -3150,7 +3157,7 @@ function Atualizar-MaximoZona {
 
 function Show-GerenciarZonas {
     $dlg = New-Object System.Windows.Forms.Form
-    $dlg.Text = "Gerenciar Zonas Eleitorais - Redes e Substitutas (planilha)"
+    $dlg.Text = "$($script:NomeFerramenta) - Gerenciar Zonas Eleitorais - Redes e Substitutas (planilha)"
     $dlg.Size = New-Object System.Drawing.Size(780, 620)
     $dlg.MinimumSize = New-Object System.Drawing.Size(650, 400)
     $dlg.StartPosition = "CenterParent"
@@ -3454,7 +3461,7 @@ function Show-JanelaVerificarCampanha {
     param($Resultado, $Campanha)
 
     $dlg = New-Object System.Windows.Forms.Form
-    $dlg.Text = "Verificar Campanha - $($Resultado.Hostname) ($($Resultado.IP))"
+    $dlg.Text = "$($script:NomeFerramenta) - Verificar Campanha - $($Resultado.Hostname) ($($Resultado.IP))"
     $dlg.Size = New-Object System.Drawing.Size(650, 430)
     $dlg.StartPosition = "CenterParent"
     $dlg.FormBorderStyle = "FixedDialog"
@@ -3744,7 +3751,7 @@ function Show-JanelaVerificarCampanhaZona {
     }
 
     $dlg = New-Object System.Windows.Forms.Form
-    $dlg.Text = "Verificar Campanha - Zona $script:ZonaAtual"
+    $dlg.Text = "$($script:NomeFerramenta) - Verificar Campanha - Zona $script:ZonaAtual"
     $dlg.Size = New-Object System.Drawing.Size(900, 560)
     $dlg.StartPosition = "CenterParent"
     $dlg.FormBorderStyle = "FixedDialog"
@@ -4129,7 +4136,7 @@ function Show-RelatorioCampanhaHtml {
 
 function Show-JanelaRelatorioCampanhas {
     $dlg = New-Object System.Windows.Forms.Form
-    $dlg.Text = "Relatorio de Campanhas"
+    $dlg.Text = "$($script:NomeFerramenta) - Relatorio de Campanhas"
     $dlg.Size = New-Object System.Drawing.Size(1170, 580)
     $dlg.StartPosition = "CenterParent"
     $dlg.FormBorderStyle = "FixedDialog"
@@ -4609,7 +4616,7 @@ function Show-JanelaSistemasEleitorais {
     }
 
     $dlg = New-Object System.Windows.Forms.Form
-    $dlg.Text = "Sistemas Eleitorais - $($Resultado.Hostname) ($($Resultado.IP))"
+    $dlg.Text = "$($script:NomeFerramenta) - Sistemas Eleitorais - $($Resultado.Hostname) ($($Resultado.IP))"
     $dlg.Size = New-Object System.Drawing.Size(1280, 490)
     $dlg.MinimumSize = New-Object System.Drawing.Size(750, 320)
     $dlg.StartPosition = "CenterParent"
@@ -5737,7 +5744,7 @@ function Show-JanelaUsuariosZona {
     param([int]$Zona)
 
     $dlg = New-Object System.Windows.Forms.Form
-    $dlg.Text = "Usuarios da ZE $Zona"
+    $dlg.Text = "$($script:NomeFerramenta) - Usuarios da ZE $Zona"
     $dlg.Size = New-Object System.Drawing.Size(1400, 600)
     $dlg.StartPosition = "CenterParent"
     $dlg.FormBorderStyle = "FixedDialog"
@@ -6013,7 +6020,7 @@ $btnExportar.Add_Click({
 # ============================================================
 function Show-Configuracoes {
     $dlg = New-Object System.Windows.Forms.Form
-    $dlg.Text = "Configuracoes da Ferramenta"
+    $dlg.Text = "$($script:NomeFerramenta) - Configuracoes da Ferramenta"
     $dlg.Size = New-Object System.Drawing.Size(530, 520)
     $dlg.StartPosition = "CenterParent"
     $dlg.FormBorderStyle = "FixedDialog"
