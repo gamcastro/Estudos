@@ -522,15 +522,16 @@ $lblSedeInfo.ForeColor = [System.Drawing.Color]::FromArgb(0, 90, 158)
 $form.Controls.Add($lblSedeInfo)
 
 $btnGerenciarZonas = New-Object System.Windows.Forms.Button
-$btnGerenciarZonas.Text = "Gerenciar Zonas..."
-$btnGerenciarZonas.Location = New-Object System.Drawing.Point(825, 43)
-$btnGerenciarZonas.Width = 105
-$btnGerenciarZonas.Height = 24
+$btnGerenciarZonas.Text = "Gerenciar Redes Zonas"
+$btnGerenciarZonas.Location = New-Object System.Drawing.Point(305, 611)
+$btnGerenciarZonas.Width = 165
+$btnGerenciarZonas.Height = 28
+$btnGerenciarZonas.Anchor = "Bottom,Left"
 $form.Controls.Add($btnGerenciarZonas)
 
 $btnUsuariosZona = New-Object System.Windows.Forms.Button
 $btnUsuariosZona.Text = "Usuarios da ZE 1"
-$btnUsuariosZona.Location = New-Object System.Drawing.Point(935, 43)
+$btnUsuariosZona.Location = New-Object System.Drawing.Point(710, 43)
 $btnUsuariosZona.Width = 150
 $btnUsuariosZona.Height = 24
 $form.Controls.Add($btnUsuariosZona)
@@ -5117,13 +5118,13 @@ function Show-Configuracoes {
     $cfgVersoesAtual = Get-ConfigVersoes
 
     $lblVersoes = New-Object System.Windows.Forms.Label
-    $lblVersoes.Text = "URL da ABA (nao so da planilha) com os Sistemas Eleitorais - FONTE UNICA pro mapeamento Versao->Nome Amigavel na grade principal E pra lista de pacotes de instalacao (janela 'Pacotes de Instalacao...' nas linhas Host/PC). Pode ser uma aba dentro de qualquer planilha (inclusive a de Zonas), compartilhada como 'Qualquer pessoa com o link - Leitor'. Cole a URL com a aba certa ja aberta no navegador (a ferramenta pega o gid automaticamente). Colunas esperadas:`r`n   Sistema | Versao | NomeAmigavel | LinkDrive | PastaDestino | Atual | NomeArquivo | Hash | Tamanho`r`n`r`nSistema deve ser GEDAI, HOLOCRON, PADA-UE ou FBR pra participar do nome amigavel na grade (SIS e BitLocker nao entram, sempre mostram a versao crua) - outros nomes de Sistema (ex: CRIPTOSIS, EXECJAVA) sao aceitos normalmente, so nao aparecem la. LinkDrive = link de 'Compartilhar' do ARQUIVO no Drive (publico como Leitor). PastaDestino = caminho RELATIVO ao compartilhamento \\IP\InstSeg (ex: 'Eleicoes 2026'), nao um caminho tipo C:\... LinkDrive/PastaDestino sao opcionais por linha - sem os dois, a linha so participa do nome amigavel, sem virar pacote. Atual=SIM so na linha com a versao mais recente de cada sistema. NomeArquivo (opcional) = nome exato do arquivo que vai ficar no destino - se preenchido, a janela de Pacotes ja sabe o status sem precisar baixar nada antes. Hash e Tamanho (opcionais) = MD5 e tamanho oficiais do arquivo no Drive - preencha usando o menu 'Sistemas Eleitorais > Calcular Hashes e Tamanhos' na propria planilha (ver apps_script_calcular_hash.gs). Tamanho e conferido automaticamente (sem clique, sem reler o arquivo) toda vez que a tela de Pacotes carrega o status, mesmo em pacotes copiados ha tempo - se nao bater, aparece 'TAMANHO NAO CONFERE!' em vermelho. Hash so e conferido sob demanda, no botao 'Verificar Hash'. Toda a planilha e opcional - sem isso a grade so mostra a versao crua e o menu de pacotes nao aparece."
+    $lblVersoes.Text = "URL da ABA (nao da planilha inteira) com os Sistemas Eleitorais - usada pro nome amigavel na grade e pelos pacotes de instalacao. Compartilhe como 'Qualquer pessoa com o link - Leitor'.`r`n`r`nColunas esperadas:`r`nSistema | Versao | NomeAmigavel | LinkDrive | PastaDestino | Atual | NomeArquivo | Hash | Tamanho`r`n`r`nLinkDrive/PastaDestino (opcionais) viram pacote baixavel. Atual=SIM na versao mais recente de cada sistema. Hash/Tamanho (opcionais) conferem a integridade do pacote copiado. Todo o recurso e opcional - sem planilha, a grade so mostra a versao crua."
     $lblVersoes.Location = New-Object System.Drawing.Point(15, 15)
-    $lblVersoes.Size = New-Object System.Drawing.Size(455, 350)
+    $lblVersoes.Size = New-Object System.Drawing.Size(455, 180)
     $tabVersoes.Controls.Add($lblVersoes)
 
     $txtVersoes = New-Object System.Windows.Forms.TextBox
-    $txtVersoes.Location = New-Object System.Drawing.Point(15, 370)
+    $txtVersoes.Location = New-Object System.Drawing.Point(15, 200)
     $txtVersoes.Width = 455
     $txtVersoes.Text = if ($cfgVersoesAtual) { $cfgVersoesAtual.SpreadsheetId } else { "" }
     $tabVersoes.Controls.Add($txtVersoes)
