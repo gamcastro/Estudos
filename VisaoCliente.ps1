@@ -21,10 +21,11 @@ Add-Type -AssemblyName System.Drawing
 
 Import-Module (Join-Path $PSScriptRoot "VisaoRemoting.psm1") -Force
 Import-Module (Join-Path $PSScriptRoot "VisaoAD.psm1") -Force
+Import-Module (Join-Path $PSScriptRoot "VisaoPacotes.psm1") -Force
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "Visao - Teste de Conexao Remota (Fase 0)"
-$form.Size = New-Object System.Drawing.Size(560, 490)
+$form.Size = New-Object System.Drawing.Size(560, 560)
 $form.StartPosition = "CenterScreen"
 $form.Font = New-Object System.Drawing.Font("Segoe UI", 9)
 
@@ -103,9 +104,23 @@ $btnTestarFase5.Height = 28
 $btnTestarFase5.Enabled = $false
 $form.Controls.Add($btnTestarFase5)
 
+$txtPacoteTeste = New-Object System.Windows.Forms.TextBox
+$txtPacoteTeste.Location = New-Object System.Drawing.Point(15, 223)
+$txtPacoteTeste.Width = 150
+$txtPacoteTeste.Text = "CRIPTOSIS"
+$form.Controls.Add($txtPacoteTeste)
+
+$btnTestarFase6 = New-Object System.Windows.Forms.Button
+$btnTestarFase6.Text = "Testar Fase 6 (Baixar+Copiar pro IP acima)"
+$btnTestarFase6.Location = New-Object System.Drawing.Point(175, 221)
+$btnTestarFase6.Width = 360
+$btnTestarFase6.Height = 28
+$btnTestarFase6.Enabled = $false
+$form.Controls.Add($btnTestarFase6)
+
 $txtLog = New-Object System.Windows.Forms.TextBox
-$txtLog.Location = New-Object System.Drawing.Point(15, 223)
-$txtLog.Size = New-Object System.Drawing.Size(520, 185)
+$txtLog.Location = New-Object System.Drawing.Point(15, 258)
+$txtLog.Size = New-Object System.Drawing.Size(520, 250)
 $txtLog.Multiline = $true
 $txtLog.ScrollBars = "Vertical"
 $txtLog.ReadOnly = $true
@@ -313,6 +328,70 @@ $script:TimerVarreduraFase5.Add_Tick({
     }
 }.GetNewClosure())
 
+# ============================================================
+# FASE 6: baixar (no servidor, cache compartilhado) + copiar (na propria
+# estacao, via robocopy - ver VisaoPacotes.psm1) um pacote de instalacao
+# real pro \\IP\InstSeg da maquina de teste. Reusa o campo de IP da
+# Fase 4/5 ($txtIpTesteVarredura) - so precisa de um IP, nao de zona.
+# ============================================================
+$btnTestarFase6.Add_Click({
+    $ip = $txtIpTesteVarredura.Text.Trim()
+    $nomePacote = $txtPacoteTeste.Text.Trim()
+    if (-not $ip) { Add-LinhaLog "Informe um IP (campo da Fase 4/5) pra testar a copia de pacote."; return }
+    if (-not $nomePacote) { Add-LinhaLog "Informe o nome do pacote (coluna Pacote da planilha, ex: CRIPTOSIS)."; return }
+
+    $btnTestarFase6.Enabled = $false
+    try {
+        Add-LinhaLog "Buscando pacote '$nomePacote' na planilha de Versoes..."
+        $v = Get-VersoesRemoto
+        if (-not $v.Ok) { Add-LinhaLog "ERRO ao carregar planilha de versoes: $($v.Erro)"; return }
+        $pacote = $v.Pacotes | Where-Object { $_.Pacote -eq $nomePacote -or $_.Sistema -eq $nomePacote } | Select-Object -First 1
+        if (-not $pacote) { Add-LinhaLog "Pacote '$nomePacote' nao encontrado (disponiveis: $(($v.Pacotes.Pacote) -join ', '))."; return }
+
+        Add-LinhaLog "Pacote encontrado: $($pacote.Pacote) v$($pacote.Versao) ($([math]::Round($pacote.TamanhoEsperado / 1MB, 1)) MB esperados)."
+        $resultado = [PSCustomObject]@{ IP = $ip }
+
+        Add-LinhaLog "Verificando se ja esta copiado em $ip antes de baixar..."
+        $statusAntes = Get-StatusPacoteNoDestino -Resultado $resultado -Pacote $pacote
+        Add-LinhaLog "  Existe=$($statusAntes.Existe) TamanhoConfere=$($statusAntes.TamanhoConfere) ArquivoDestino=$($statusAntes.ArquivoDestino)"
+
+        Add-LinhaLog "Disparando download no servidor (cache compartilhado entre tecnicos)..."
+        $jobId = Start-BaixarPacoteRemoto -Pacote $pacote
+        $iteracoes = 0
+        do {
+            Start-Sleep -Milliseconds 750
+            [System.Windows.Forms.Application]::DoEvents()
+            $status = Get-StatusPacoteRemoto -JobId $jobId
+            $iteracoes++
+        } while (-not $status.Concluido -and $iteracoes -lt 400)
+        Add-LinhaLog "  [servidor] $($status.Texto)"
+        foreach ($aviso in $status.Avisos) { Add-LinhaLog "  [AVISO] $aviso" }
+
+        if (-not $status.Concluido) {
+            Add-LinhaLog "Tempo limite de teste atingido esperando o download no servidor."
+            return
+        }
+        if (-not $status.Sucesso) {
+            Add-LinhaLog "ERRO no download: $($status.Erro)"
+            return
+        }
+
+        Add-LinhaLog "Download OK ($($status.ArquivoCacheUnc)) - copiando pra $ip via robocopy (roda aqui, na propria estacao, sem passar pelo servidor)..."
+        $callback = { param($texto) Add-LinhaLog "  [copia] $texto" }.GetNewClosure()
+        $resultadoCopia = Invoke-AcaoCopiarPacoteJaBaixado -Resultado $resultado -Pacote $pacote -ArquivoCacheUnc $status.ArquivoCacheUnc -NomeArquivoOriginal $status.NomeArquivoOriginal -AoAtualizarStatus $callback
+
+        if ($resultadoCopia.Sucesso) {
+            Add-LinhaLog "=== SUCESSO: $($resultadoCopia.Mensagem) ==="
+        } else {
+            Add-LinhaLog "=== FALHA: $($resultadoCopia.Mensagem) ==="
+        }
+    } catch {
+        Add-LinhaLog "ERRO: $($_.Exception.Message)"
+    } finally {
+        $btnTestarFase6.Enabled = $true
+    }
+}.GetNewClosure())
+
 $form.Add_Shown({
     if (Connect-ServidorVisao) {
         $lblStatusConexao.Text = "Conectado ao POLICY-SERVER."
@@ -341,6 +420,7 @@ $form.Add_Shown({
     $btnTestarFase1.Enabled = $true
     $btnTestarFase4.Enabled = $true
     $btnTestarFase5.Enabled = $true
+    $btnTestarFase6.Enabled = $true
 }.GetNewClosure())
 
 $form.Add_FormClosed({ Disconnect-ServidorVisao }.GetNewClosure())

@@ -165,6 +165,29 @@ function Get-CampanhasRemoto {
     Invoke-ComandoRemoto -ScriptBlock { param($f) Import-TabelaCampanhas -ForcarCache:$f } -ArgumentList @($ForcarCache.IsPresent)
 }
 
+function Get-VersoesRemoto {
+    <#
+        Import-TabelaVersoes do lado servidor devolve uma STRING JSON
+        (Pacotes e uma lista de PSCustomObject - mesmo bug de sempre).
+        Aqui desserializa de volta; o objeto devolvido tem .Pacotes como
+        array normal do PowerShell, pronto pra popular um ComboBox/menu
+        no cliente.
+    #>
+    param([switch]$ForcarCache)
+    $json = Invoke-ComandoRemoto -ScriptBlock { param($f) Import-TabelaVersoes -ForcarCache:$f } -ArgumentList @($ForcarCache.IsPresent)
+    return ($json | ConvertFrom-Json)
+}
+
+# NOTA: nao existe "Get-StatusPacoteNoDestinoRemoto" nem
+# "Start-BaixarECopiarPacoteRemoto" (a copia INTEIRA, incluindo a
+# checagem "ja esta copiado?") - ver VisaoPacotes.psm1: acesso a
+# \\IP\InstSeg das zonas roda DIRETO na estacao do tecnico, sem
+# remoting, pelo mesmo motivo do AD (duplo-salto do Kerberos, so que
+# desta vez sem alternativa de rodar no servidor - ver a nota grande
+# em VisaoServidor.ps1 acima de $script:EstadoPacotes). So o DOWNLOAD
+# do Google Drive fica aqui (Start-BaixarPacoteRemoto/
+# Get-StatusPacoteRemoto, mais abaixo).
+
 function Get-ResultadosCampanhasRemoto {
     <#
         Get-ResultadosCampanhas do lado servidor devolve uma STRING JSON,
@@ -247,7 +270,46 @@ function Get-VarreduraNovosResultadosRemoto {
     $obj | Add-Member -NotePropertyName SessaoPerdida -NotePropertyValue $false -PassThru
 }
 
-Export-ModuleMember -Function Connect-ServidorVisao, Disconnect-ServidorVisao, Invoke-ComandoRemoto, Get-IdSessaoAtualVisao, Get-ZonasRemoto, Get-GruposSistemasRemoto, Get-CampanhasRemoto, Get-ResultadosCampanhasRemoto, Resolve-RedeDaZonaRemoto, Test-RedeEhCompartilhadaRemoto, Start-VarreduraRemota, Get-VarreduraNovosResultadosRemoto
+# ============================================================
+# FASE 6: download de pacote (SO download - a copia final pro InstSeg
+# roda direto no cliente, ver VisaoPacotes.psm1 e a nota grande em
+# VisaoServidor.ps1). Mesmo padrao "dispara sem esperar + poll" da
+# varredura, mas SEM precisar do guard de IdSessaoAtual: aqui "job nao
+# encontrado" (Encontrado=$false) ja e, por si so, inequivoco -
+# diferente da varredura, nao existe um "Concluido=$false" que pudesse
+# ser confundido com "ainda rodando". Se a sessao cair e reconectar no
+# meio de um download, o PROCESSO remoto antigo (e o job em segundo
+# plano rodando nele) morre junto - Encontrado=$false nesse caso
+# reflete a realidade (o job parou mesmo), nao so "esqueceu".
+# ============================================================
+function Start-BaixarPacoteRemoto {
+    <#
+        Gera o JobId (GUID) aqui no cliente e devolve pra quem chamou
+        comecar o polling (Get-StatusPacoteRemoto) imediatamente, sem
+        precisar de uma resposta a mais so pra descobrir o id.
+    #>
+    param(
+        [Parameter(Mandatory)][PSCustomObject]$Pacote
+    )
+    $jobId = [guid]::NewGuid().ToString()
+    Invoke-ComandoRemoto -ScriptBlock { param($j, $p) Start-BaixarPacote -JobId $j -Pacote $p } -ArgumentList @($jobId, $Pacote) | Out-Null
+    return $jobId
+}
+
+function Get-StatusPacoteRemoto {
+    <#
+        Get-StatusPacote do lado servidor devolve uma STRING JSON (Avisos
+        e um array). Aqui desserializa de volta. Quando Concluido+Sucesso,
+        .ArquivoCacheUnc e o caminho \\POLICY-SERVER...\ScanZonas\
+        CacheDownloads\<arquivo> pronto pra o cliente copiar dali pro
+        InstSeg da maquina de destino (ver VisaoPacotes.psm1).
+    #>
+    param([Parameter(Mandatory)][string]$JobId)
+    $json = Invoke-ComandoRemoto -ScriptBlock { param($j) Get-StatusPacote -JobId $j } -ArgumentList @($JobId)
+    return ($json | ConvertFrom-Json)
+}
+
+Export-ModuleMember -Function Connect-ServidorVisao, Disconnect-ServidorVisao, Invoke-ComandoRemoto, Get-IdSessaoAtualVisao, Get-ZonasRemoto, Get-GruposSistemasRemoto, Get-CampanhasRemoto, Get-ResultadosCampanhasRemoto, Resolve-RedeDaZonaRemoto, Test-RedeEhCompartilhadaRemoto, Start-VarreduraRemota, Get-VarreduraNovosResultadosRemoto, Get-VersoesRemoto, Start-BaixarPacoteRemoto, Get-StatusPacoteRemoto
 
 # NOTA: as consultas ao AD (Usuarios da ZE, status do Instalador) NAO
 # passam por aqui - ver VisaoAD.psm1. Nao sao trafego de varredura, e

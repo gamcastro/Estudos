@@ -71,6 +71,52 @@ $script:TabelaCampanhas         = New-Object System.Collections.Generic.List[obj
 
 $script:UrlPlanilhaResultadosCampanhasCSV = "https://docs.google.com/spreadsheets/d/1_2aZhFgplRqCdPVV_lq4XJT9wgqkfbZpEFZRu1Zu9_I/gviz/tq?tqx=out:csv&sheet=RESULTADOS-CAMPANHAS"
 
+# Config/cache de Versoes de Sistemas + Pacotes de Instalacao - mesmo
+# arquivo/pasta ja usado pelo ScannerRedeZona.ps1 quando rodava via RDP
+# neste servidor (confirmado ao vivo: E:\ScanZonas\versoes_config.json e
+# versoes_cache.csv ja existiam aqui antes desta migracao) - continua
+# sendo config COMPARTILHADA entre todos os tecnicos, nao por maquina.
+$script:ArquivoConfigVersoes      = Join-Path $script:PastaBaseServidor "versoes_config.json"
+$script:ArquivoVersoesCache       = Join-Path $script:PastaBaseServidor "versoes_cache.csv"
+$script:TabelaVersoes             = @{}   # "SISTEMA|VERSAO" -> PSCustomObject { NomeAmigavel }
+$script:VersaoAtualPorSistema     = @{}   # "SISTEMA" -> versao marcada "Atual" na planilha
+$script:TabelaPacotes             = New-Object System.Collections.Generic.List[object]
+$script:PastaCacheDownloadsServidor = Join-Path $script:PastaBaseServidor "CacheDownloads"
+# Mesma pasta acima, mas pelo caminho UNC que a ESTACAO DO TECNICO enxerga
+# (confirmado ao vivo que uma estacao comum acessa \\POLICY-SERVER...\
+# ScanZonas direto, sem problema nenhum) - usado pra Start-BaixarPacote
+# devolver ao cliente onde pegar o arquivo baixado. Ver a nota grande
+# logo abaixo sobre por que a copia final NAO roda mais aqui no servidor.
+$script:PastaCacheDownloadsUnc = "\\POLICY-SERVER.tre-ma.gov.br\ScanZonas\CacheDownloads"
+
+# Estado dos jobs de DOWNLOAD de pacote EM ANDAMENTO nesta sessao -
+# JobId (string/GUID gerado pelo CLIENTE) -> hashtable SINCRONIZADA (ver
+# Start-BaixarPacote) com o snapshot atual (Texto/Concluido/Sucesso/
+# Erro/Avisos/...). Sincronizada porque e escrita por um runspace em
+# segundo plano (o download em si) e lida por Get-StatusPacote, chamada
+# de uma invocacao SEPARADA de Invoke-Command (mesmo padrao de "estado
+# vivendo na sessao" ja usado em $script:EstadoVarredura, so que aqui
+# precisa ser thread-safe de verdade porque o job roda de fato em
+# paralelo, nao so "ainda nao verificado" como os jobs de varredura).
+#
+# IMPORTANTE - por que so DOWNLOAD, sem a copia final pro InstSeg (ao
+# contrario do desenho original do plano): testado ao vivo que qualquer
+# acesso SMB do POLICY-SERVER (dentro da sessao WinRM) pra uma TERCEIRA
+# maquina (\\IP-da-zona\InstSeg, e ate \\IP-da-zona\C$) da "Access is
+# denied" - o classico duplo-salto do Kerberos, mesma causa-raiz ja
+# diagnosticada pro AD (ver VisaoAD.psm1), so que aqui NAO da pra "rodar
+# local no cliente" da mesma forma simples, porque desta vez o servidor
+# faz sentido continuar no meio (cache compartilhado do download entre
+# tecnicos, chamada a API do Google). A saida (decidida pelo usuario):
+# o SERVIDOR baixa do Drive e guarda no cache compartilhado
+# (E:\ScanZonas\CacheDownloads); a ESTACAO DO TECNICO, que ja tem acesso
+# de 1 salto so tanto a esse cache (\\POLICY-SERVER...\ScanZonas\
+# CacheDownloads) quanto ao InstSeg de qualquer zona (é a mesma copia
+# manual de arquivo que o tecnico ja faz hoje, nao trafego de
+# varredura/scan), faz o robocopy final - ver VisaoPacotes.psm1 (modulo
+# cliente, sem remoting, mesmo espirito do VisaoAD.psm1).
+$script:EstadoPacotes = [hashtable]::Synchronized(@{})
+
 # Config da varredura de rede (copiada sem mudanca do topo do
 # ScannerRedeZona.ps1 original - ver Start-VarreduraZona/$script:scriptBlock
 # mais abaixo).
@@ -780,5 +826,450 @@ function Get-VarreduraNovosResultados {
         Concluidos  = $estado.Concluidos
         Total       = $estado.Total
         EmAndamento = $estado.EmAndamento
+    } | ConvertTo-Json -Depth 6 -Compress)
+}
+
+# ============================================================
+# FASE 6: download de pacote de instalacao (Google Drive -> cache
+# compartilhado em E:\ScanZonas\CacheDownloads). A COPIA final pro
+# \\IP\InstSeg da maquina de destino NAO roda aqui - ver a nota grande
+# acima de $script:EstadoPacotes (duplo-salto do Kerberos) e
+# VisaoPacotes.psm1 (modulo cliente). Mesmo padrao de estado-por-sessao
+# + polling da varredura (Fase 4/5), mas aqui o job roda de fato em
+# paralelo (background runspace via [powershell]::Create/BeginInvoke)
+# em vez de "so ainda nao verificado" - por isso $script:EstadoPacotes
+# usa hashtable SINCRONIZADA.
+# ============================================================
+
+function Get-ConfigVersoes {
+    if (-not (Test-Path $script:ArquivoConfigVersoes)) { return $null }
+    try {
+        $cfg = Get-Content -Path $script:ArquivoConfigVersoes -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($cfg.SpreadsheetId) { return $cfg }
+    } catch {}
+    return $null
+}
+
+function Resolve-NomeExibicaoSistema {
+    <#
+        Alguns "Sistema" da planilha tem nome de exibicao diferente da
+        chave interna usada pra bater com o registro do OCS (ex: chave
+        interna continua "GEDAI", mas o produto se chama comercialmente
+        "GEDAI-UE") - reaproveita o campo Titulo ja definido em
+        $script:SistemasEleitoraisExtra (mesma fonte dos cabecalhos da
+        grade principal).
+    #>
+    param([string]$Sistema)
+    if (-not $Sistema) { return $Sistema }
+    $entrada = $script:SistemasEleitoraisExtra | Where-Object { $_.Chave -eq $Sistema.ToUpper().Trim() } | Select-Object -First 1
+    if ($entrada) { return $entrada.Titulo }
+    return $Sistema
+}
+
+function Resolve-IdArquivoDrive {
+    <#
+        Aceita o link de compartilhamento inteiro do ARQUIVO no Drive ou
+        so o ID puro, e devolve so o ID.
+    #>
+    param([string]$Entrada)
+    if (-not $Entrada) { return $null }
+    $Entrada = $Entrada.Trim()
+    if ($Entrada -match "/file/d/([a-zA-Z0-9_-]+)") { return $Matches[1] }
+    if ($Entrada -match "[?&]id=([a-zA-Z0-9_-]+)") { return $Matches[1] }
+    return $Entrada
+}
+
+function ConvertTo-CaminhoRelativoInstSeg {
+    <#
+        A coluna PastaDestino da planilha aceita tanto um caminho ja
+        relativo ao compartilhamento InstSeg quanto um caminho local
+        completo copiado da propria estacao - nesse 2o caso, corta tudo
+        ate (e incluindo) o "InstSeg\" e fica so com o resto.
+    #>
+    param([string]$Caminho)
+    if (-not $Caminho) { return $Caminho }
+    $Caminho = $Caminho.Trim().Trim('\')
+    if ($Caminho -match '(?i)InstSeg\\(.*)$') { return $Matches[1] }
+    return $Caminho
+}
+
+function Import-TabelaVersoes {
+    <#
+        Fonte unica de verdade pra sistemas eleitorais: Sistema+Versao ->
+        Nome Amigavel (usado na grade principal) e a lista de pacotes de
+        instalacao baixaveis (LinkDrive + PastaDestino preenchidos).
+
+        Reestruturada como os outros Import-Tabela* (Ok/Origem/Contagem/
+        Avisos/Erro em vez de Add-Log + $true/$false) - e devolve como
+        STRING JSON (ConvertTo-Json -Depth 6 -Compress) porque Pacotes e
+        uma lista de PSCustomObject (mesmo bug de serializacao de sempre,
+        ver comentario extenso em Get-ResultadosCampanhas).
+    #>
+    param([switch]$ForcarCache)
+
+    $script:TabelaVersoes = @{}
+    $script:VersaoAtualPorSistema = @{}
+    $script:TabelaPacotes = New-Object System.Collections.Generic.List[object]
+    $avisos = New-Object System.Collections.Generic.List[string]
+    $origem = "nenhuma"
+
+    $cfg = Get-ConfigVersoes
+    if (-not $cfg) {
+        return ([PSCustomObject]@{ Ok = $false; Origem = $origem; Contagem = 0; Avisos = @(); Erro = "Planilha de Versoes/Pacotes ainda nao configurada neste servidor ($script:ArquivoConfigVersoes)."; Pacotes = @() } | ConvertTo-Json -Depth 6 -Compress)
+    }
+
+    $linhas = $null
+    if (-not $ForcarCache) {
+        try {
+            $gid = if ($cfg.Gid) { $cfg.Gid } else { "0" }
+            $urlCsv = "https://docs.google.com/spreadsheets/d/$($cfg.SpreadsheetId)/export?format=csv&gid=$gid"
+            $resp = Invoke-WebRequest -Uri $urlCsv -TimeoutSec 8 -UseBasicParsing
+            $bytesResposta = $resp.RawContentStream.ToArray()
+            $textoUtf8 = [System.Text.Encoding]::UTF8.GetString($bytesResposta)
+            $linhas = $textoUtf8 | ConvertFrom-Csv
+            if ($linhas -and $linhas.Count -gt 0) {
+                $linhas | Export-Csv -Path $script:ArquivoVersoesCache -NoTypeInformation -Encoding UTF8
+                $origem = "online"
+            }
+        } catch {
+            $avisos.Add("Nao foi possivel buscar a planilha de sistemas eleitorais online: $($_.Exception.Message)") | Out-Null
+            $linhas = $null
+        }
+    }
+
+    if (-not $linhas -and (Test-Path $script:ArquivoVersoesCache)) {
+        $avisos.Add("Usando cache local de sistemas eleitorais (ultima planilha baixada com sucesso).") | Out-Null
+        $linhas = Import-Csv -Path $script:ArquivoVersoesCache
+        $origem = "cache"
+    }
+
+    if (-not $linhas) {
+        return ([PSCustomObject]@{ Ok = $false; Origem = $origem; Contagem = 0; Avisos = @($avisos); Erro = "Nenhuma tabela de versoes/pacotes disponivel (nem online, nem cache local)."; Pacotes = @() } | ConvertTo-Json -Depth 6 -Compress)
+    }
+
+    foreach ($l in $linhas) {
+        $sistema = if ($l.Sistema) { $l.Sistema.ToUpper().Trim() } else { $null }
+        $versao  = if ($l.Versao) { $l.Versao.Trim() } else { $null }
+        if (-not $sistema -or -not $versao) { continue }
+
+        $script:TabelaVersoes["$sistema|$versao"] = [PSCustomObject]@{ NomeAmigavel = $l.NomeAmigavel }
+
+        $ehAtual = $l.Atual -and @("SIM", "S", "TRUE", "1", "X") -contains $l.Atual.ToUpper().Trim()
+        if ($ehAtual) { $script:VersaoAtualPorSistema[$sistema] = $versao }
+
+        if ($l.LinkDrive -and $l.PastaDestino) {
+            $script:TabelaPacotes.Add([PSCustomObject]@{
+                Pacote          = Resolve-NomeExibicaoSistema $sistema
+                Sistema         = $sistema
+                NomeAmigavel    = $l.NomeAmigavel
+                IdArquivo       = Resolve-IdArquivoDrive $l.LinkDrive
+                PastaDestino    = ConvertTo-CaminhoRelativoInstSeg $l.PastaDestino
+                Versao          = $versao
+                NomeArquivo     = if ($l.NomeArquivo) { $l.NomeArquivo.Trim() } else { $null }
+                Hash            = if ($l.Hash) { $l.Hash.Trim().ToUpper() } else { $null }
+                TamanhoEsperado = $(
+                    $tmp = 0L
+                    if ($l.Tamanho -and [long]::TryParse($l.Tamanho.Trim(), [ref]$tmp)) { $tmp } else { $null }
+                )
+            }) | Out-Null
+        }
+    }
+
+    return ([PSCustomObject]@{
+        Ok       = $true
+        Origem   = $origem
+        Contagem = $script:TabelaPacotes.Count
+        Avisos   = @($avisos)
+        Erro     = $null
+        Pacotes  = $script:TabelaPacotes
+    } | ConvertTo-Json -Depth 6 -Compress)
+}
+
+function Get-CaminhosCachePacote {
+    <#
+        Monta os 3 caminhos de cache local NO SERVIDOR de um pacote: o
+        arquivo baixado em si e os dois sidecars (nome original vindo do
+        Content-Disposition do Drive, hash MD5 ja calculado) - fica em
+        E:\ScanZonas\CacheDownloads, COMPARTILHADO entre todos os
+        tecnicos (tambem acessivel do lado cliente via
+        \\POLICY-SERVER.tre-ma.gov.br\ScanZonas\CacheDownloads, ver
+        $script:PastaCacheDownloadsUnc): um pacote baixado uma vez por
+        qualquer um fica em cache pra todo mundo, nao so pra quem baixou.
+    #>
+    param($Pacote)
+    $nomeArquivoCache = "$($Pacote.IdArquivo)_$($Pacote.Pacote -replace '[\\/:*?"<>|]', '_')"
+    $base = Join-Path $script:PastaCacheDownloadsServidor $nomeArquivoCache
+    return [PSCustomObject]@{
+        ArquivoLocal = $base
+        ArquivoNome  = "$base.nome"
+        ArquivoHash  = "$base.md5"
+    }
+}
+
+$script:scriptBlockBaixarPacote = {
+    <#
+        Corpo do job de DOWNLOAD (so download - ver a nota grande acima
+        de $script:EstadoPacotes sobre por que a copia pro InstSeg NAO
+        acontece mais aqui), executado num runspace em segundo plano
+        (ver Start-BaixarPacote). Roda ISOLADO - nao enxerga NENHUMA
+        funcao definida no resto deste arquivo (mesma restricao ja
+        confirmada e documentada no $script:scriptBlock da varredura,
+        por isso todo helper que precisa e redefinido aqui dentro,
+        aninhado).
+
+        Reescrito em relacao ao Invoke-AcaoBaixarPacote/Invoke-Download*
+        originais: sem $GridStatus/$LinhaIndice/MessageBox/Add-Log (UI
+        que so existe do lado cliente) - o progresso vira
+        $EstadoJob.Texto, avisos viram $EstadoJob.Avisos, e o resultado
+        final vira $EstadoJob.Sucesso/Erro/ArquivoCacheUnc/
+        NomeArquivoOriginal. Tambem sem os wrappers "ComDoEvents"
+        (Write-BlocoStreamComDoEvents) - so existiam pra bombear
+        DoEvents e nao travar a janela WinForms; aqui, sem thread de UI
+        nenhuma, um Stream.Write() sincrono normal basta.
+    #>
+    param($EstadoJob, $Pacote, $PastaCacheDownloads, $PastaCacheDownloadsUnc)
+
+    function Get-NomeArquivoDeContentDisposition {
+        param($Headers)
+        if (-not $Headers) { return $null }
+        $cd = ($Headers["Content-Disposition"] -join ";")
+        if (-not $cd) { return $null }
+        if ($cd -match "filename\*=UTF-8''([^;]+)") { return [uri]::UnescapeDataString($Matches[1]) }
+        if ($cd -match 'filename="([^"]+)"') { return $Matches[1] }
+        if ($cd -match 'filename=([^;]+)') { return $Matches[1].Trim() }
+        return $null
+    }
+
+    function Get-CaminhosCachePacote {
+        param($Pacote)
+        $nomeArquivoCache = "$($Pacote.IdArquivo)_$($Pacote.Pacote -replace '[\\/:*?"<>|]', '_')"
+        $base = Join-Path $PastaCacheDownloads $nomeArquivoCache
+        return [PSCustomObject]@{ ArquivoLocal = $base; ArquivoNome = "$base.nome"; ArquivoHash = "$base.md5"; NomeArquivoCache = $nomeArquivoCache }
+    }
+
+    function Invoke-DownloadArquivoComProgresso {
+        param([string]$Url, [System.Net.CookieContainer]$Cookies, [string]$DestinoLocal, [string]$NomePacote, $EstadoJob)
+
+        $req = [System.Net.HttpWebRequest]::Create($Url)
+        $req.CookieContainer = $Cookies
+        $req.Timeout = 600000
+        $req.ReadWriteTimeout = 600000
+        $req.UserAgent = "Mozilla/5.0 (Visao-TRE-MA)"
+
+        $resp = $req.GetResponse()
+        try {
+            $totalBytes = $resp.ContentLength
+            $streamResposta = $resp.GetResponseStream()
+            $streamArquivo = [System.IO.File]::Create($DestinoLocal)
+            try {
+                $buffer = New-Object byte[] 262144
+                $totalLido = 0
+                $ultimoPercentLogado = -5
+                $cronometro = [System.Diagnostics.Stopwatch]::StartNew()
+
+                while (($lidos = $streamResposta.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                    $streamArquivo.Write($buffer, 0, $lidos)
+                    $totalLido += $lidos
+
+                    if ($totalBytes -gt 0) {
+                        $percent = [Math]::Floor(($totalLido / $totalBytes) * 100)
+                        if ($percent -ge ($ultimoPercentLogado + 5) -or $percent -ge 100) {
+                            $mbLido = [Math]::Round($totalLido / 1MB, 1)
+                            $mbTotal = [Math]::Round($totalBytes / 1MB, 1)
+                            $velocidade = if ($cronometro.Elapsed.TotalSeconds -gt 0) { [Math]::Round(($totalLido / 1MB) / $cronometro.Elapsed.TotalSeconds, 1) } else { 0 }
+                            $EstadoJob.Texto = "Baixando '$NomePacote': $percent% ($mbLido / $mbTotal MB, $velocidade MB/s)"
+                            $ultimoPercentLogado = $percent
+                        }
+                    }
+                }
+            } finally {
+                $streamArquivo.Close()
+                $streamResposta.Close()
+            }
+            return (Get-NomeArquivoDeContentDisposition -Headers $resp.Headers)
+        } finally {
+            $resp.Close()
+        }
+    }
+
+    function Invoke-DownloadGoogleDrivePublico {
+        param([string]$FileId, [string]$DestinoLocal, [string]$NomePacote, $EstadoJob)
+
+        $ProgressPreference = 'SilentlyContinue'
+        $urlInicial = "https://drive.google.com/uc?export=download&id=$FileId"
+
+        $resp1 = Invoke-WebRequest -Uri $urlInicial -SessionVariable sessaoWeb -UseBasicParsing -TimeoutSec 30
+        $tipoConteudo = ($resp1.Headers["Content-Type"] -join ";")
+        $ehHtml = $tipoConteudo -match "text/html"
+
+        if (-not $ehHtml) {
+            [System.IO.File]::WriteAllBytes($DestinoLocal, $resp1.Content)
+            return (Get-NomeArquivoDeContentDisposition -Headers $resp1.Headers)
+        }
+
+        $html = $resp1.Content
+
+        if ($html -match "(?i)accounts\.google\.com" -or $html -match "(?i)ServiceLogin" -or $html -match "(?i)You need permission" -or $html -match "(?i)Sign in to continue") {
+            throw "O arquivo nao esta publico no Google Drive (o Google pediu login em vez de mandar o arquivo). Verifique o compartilhamento do arquivo: precisa ser 'Qualquer pessoa com o link', nao so o dominio TRE-MA."
+        }
+
+        $urlFinal = $null
+        if ($html -match 'action="([^"]+)"') {
+            $acao = $Matches[1] -replace "&amp;", "&"
+            $campos = [ordered]@{}
+            foreach ($m in [regex]::Matches($html, '<input\s+type="hidden"\s+name="([^"]+)"\s+value="([^"]*)"')) {
+                $campos[$m.Groups[1].Value] = $m.Groups[2].Value
+            }
+            if ($campos.Count -gt 0) {
+                $qs = ($campos.GetEnumerator() | ForEach-Object { "$($_.Key)=$([uri]::EscapeDataString($_.Value))" }) -join "&"
+                $urlFinal = "$acao`?$qs"
+            }
+        }
+        if (-not $urlFinal -and $html -match 'confirm=([0-9A-Za-z_-]+)&amp;id=') {
+            $urlFinal = "https://drive.google.com/uc?export=download&confirm=$($Matches[1])&id=$FileId"
+        }
+        if (-not $urlFinal) {
+            throw "Nao consegui reconhecer a pagina de confirmacao de download grande do Google Drive (formato mudou) - ajustar o parser em Invoke-DownloadGoogleDrivePublico."
+        }
+
+        return (Invoke-DownloadArquivoComProgresso -Url $urlFinal -Cookies $sessaoWeb.Cookies -DestinoLocal $DestinoLocal -NomePacote $NomePacote -EstadoJob $EstadoJob)
+    }
+
+    try {
+        if (-not $Pacote -or -not $Pacote.IdArquivo) { throw "Pacote sem ID de arquivo do Drive valido." }
+
+        $caminhos = Get-CaminhosCachePacote -Pacote $Pacote
+
+        if (-not (Test-Path $PastaCacheDownloads)) {
+            New-Item -ItemType Directory -Path $PastaCacheDownloads -Force | Out-Null
+        }
+
+        if (Test-Path $caminhos.ArquivoLocal) {
+            $EstadoJob.Texto = "Ja em cache no servidor - pulando download..."
+            $nomeArquivoOriginal = if (Test-Path $caminhos.ArquivoNome) { (Get-Content -Path $caminhos.ArquivoNome -Raw -Encoding UTF8).Trim() } else { $null }
+        } else {
+            $EstadoJob.Texto = "Baixando do Google Drive..."
+            try {
+                $nomeArquivoOriginal = Invoke-DownloadGoogleDrivePublico -FileId $Pacote.IdArquivo -DestinoLocal $caminhos.ArquivoLocal -NomePacote $Pacote.Pacote -EstadoJob $EstadoJob
+            } catch {
+                if (Test-Path $caminhos.ArquivoLocal) { Remove-Item $caminhos.ArquivoLocal -Force -ErrorAction SilentlyContinue }
+                throw
+            }
+            if ($nomeArquivoOriginal) {
+                Set-Content -Path $caminhos.ArquivoNome -Value $nomeArquivoOriginal -Encoding UTF8
+            } else {
+                [void]$EstadoJob.Avisos.Add("Nao veio o nome original do arquivo no cabecalho do Drive - o cliente vai usar o nome do pacote da planilha como nome de arquivo no destino.")
+            }
+        }
+
+        $hashLocal = if (Test-Path $caminhos.ArquivoHash) {
+            (Get-Content -Path $caminhos.ArquivoHash -Raw -Encoding UTF8).Trim()
+        } else {
+            $EstadoJob.Texto = "Calculando hash MD5 (no servidor)..."
+            $h = (Get-FileHash -Path $caminhos.ArquivoLocal -Algorithm MD5).Hash
+            Set-Content -Path $caminhos.ArquivoHash -Value $h -Encoding UTF8
+            $h
+        }
+        if ($Pacote.Hash -and $hashLocal -ne $Pacote.Hash) {
+            [void]$EstadoJob.Avisos.Add("ATENCAO: hash MD5 do pacote baixado NAO confere com o oficial da planilha (baixado=$hashLocal planilha=$($Pacote.Hash)) - o download pode ter vindo corrompido. Apague o cache no servidor ($($caminhos.ArquivoLocal)) e baixe de novo.")
+        }
+
+        $EstadoJob.ArquivoCacheUnc = Join-Path $PastaCacheDownloadsUnc $caminhos.NomeArquivoCache
+        $EstadoJob.NomeArquivoOriginal = $nomeArquivoOriginal
+        $EstadoJob.Sucesso = $true
+        $tamanhoMb = [Math]::Round((Get-Item -LiteralPath $caminhos.ArquivoLocal).Length / 1MB, 1)
+        $EstadoJob.Texto = "Download concluido ($tamanhoMb MB) - pronto pra copiar (a copia pro InstSeg roda na propria estacao do tecnico, nao aqui)."
+    } catch {
+        $EstadoJob.Sucesso = $false
+        $EstadoJob.Erro = $_.Exception.Message
+        $EstadoJob.Texto = "ERRO: $($_.Exception.Message)"
+    } finally {
+        $EstadoJob.Concluido = $true
+    }
+}
+
+function Start-BaixarPacote {
+    <#
+        Dispara, num runspace em segundo plano (SEM pool - e sempre 1 job
+        por chamada, diferente da varredura), SO O DOWNLOAD do pacote do
+        Google Drive pro cache compartilhado no servidor
+        (E:\ScanZonas\CacheDownloads). Devolve NA HORA - Get-StatusPacote
+        acompanha por polling.
+
+        A copia final pro \\IP\InstSeg\<PastaDestino> da maquina de
+        destino NAO acontece aqui (ver a nota grande sobre duplo-salto
+        do Kerberos acima de $script:EstadoPacotes) - roda na propria
+        estacao do tecnico, que ja tem acesso direto (1 salto so) tanto
+        ao cache compartilhado (\\POLICY-SERVER...\ScanZonas\
+        CacheDownloads) quanto ao InstSeg de qualquer zona, do mesmo
+        jeito que uma copia manual de arquivo ja funciona hoje - ver
+        VisaoPacotes.psm1 (modulo cliente, sem remoting).
+
+        $JobId e um GUID gerado pelo CLIENTE (nao pelo servidor) - assim
+        o cliente ja sabe a chave pra comecar a fazer polling
+        imediatamente depois de chamar esta funcao.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [string]$JobId,
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Pacote
+    )
+
+    $estadoJob = [hashtable]::Synchronized(@{
+        Texto               = "Iniciando..."
+        Concluido           = $false
+        Sucesso             = $false
+        Erro                = $null
+        ArquivoCacheUnc     = $null
+        NomeArquivoOriginal = $null
+        Avisos              = [System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList))
+    })
+    $script:EstadoPacotes[$JobId] = $estadoJob
+
+    $ps = [powershell]::Create()
+    [void]$ps.AddScript($script:scriptBlockBaixarPacote).AddArgument($estadoJob).AddArgument($Pacote).AddArgument($script:PastaCacheDownloadsServidor).AddArgument($script:PastaCacheDownloadsUnc)
+    $handle = $ps.BeginInvoke()
+
+    # So pra manter uma referencia viva (sem isso o GC poderia coletar o
+    # [powershell] no meio da execucao) - Get-StatusPacote nao le Pipe/
+    # Handle, so os libera (Dispose) quando o job termina.
+    $estadoJob.Pipe = $ps
+    $estadoJob.Handle = $handle
+
+    return $true
+}
+
+function Get-StatusPacote {
+    <#
+        Devolve o snapshot ATUAL (nao um delta - so existe 1 job por
+        chamada, entao devolver o estado inteiro toda vez e simples e
+        barato) do job iniciado por Start-BaixarPacote. STRING JSON pelo
+        mesmo motivo de sempre (Avisos e um array).
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [string]$JobId
+    )
+
+    $estadoJob = $script:EstadoPacotes[$JobId]
+    if (-not $estadoJob) {
+        return ([PSCustomObject]@{ Encontrado = $false; Texto = ""; Concluido = $false; Sucesso = $false; Erro = "Job nao encontrado nesta sessao (se a sessao foi reconectada no meio, o progresso anterior se perdeu - inicie o download de novo)."; Avisos = @(); ArquivoCacheUnc = $null; NomeArquivoOriginal = $null } | ConvertTo-Json -Depth 6 -Compress)
+    }
+
+    if ($estadoJob.Concluido -and $estadoJob.Pipe) {
+        try { $estadoJob.Pipe.Dispose() } catch {}
+        $estadoJob.Pipe = $null
+    }
+
+    return ([PSCustomObject]@{
+        Encontrado          = $true
+        Texto               = $estadoJob.Texto
+        Concluido           = $estadoJob.Concluido
+        Sucesso             = $estadoJob.Sucesso
+        Erro                = $estadoJob.Erro
+        Avisos              = @($estadoJob.Avisos)
+        ArquivoCacheUnc     = $estadoJob.ArquivoCacheUnc
+        NomeArquivoOriginal = $estadoJob.NomeArquivoOriginal
     } | ConvertTo-Json -Depth 6 -Compress)
 }
