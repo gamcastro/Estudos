@@ -117,6 +117,19 @@ $script:PastaCacheDownloadsUnc = "\\POLICY-SERVER.tre-ma.gov.br\ScanZonas\CacheD
 # cliente, sem remoting, mesmo espirito do VisaoAD.psm1).
 $script:EstadoPacotes = [hashtable]::Synchronized(@{})
 
+# Config dos 3 Web Apps do Apps Script usados pelas escritas na planilha
+# (Fase 7) - mesmos arquivos ja usados pelo ScannerRedeZona.ps1 quando
+# rodava via RDP neste servidor (confirmado ao vivo: os 3 ja existiam em
+# E:\ScanZonas antes desta migracao, mesma situacao do versoes_config.json
+# na Fase 6). So os LEITORES (Get-Config*) sao migrados aqui - os
+# assistentes interativos de PRIMEIRA CONFIGURACAO (Read-Config*
+# Interativo, que usam InputBox) nao entram nesta fase: os 3 Web Apps ja
+# estao configurados, reconfigurar (se um dia precisar) continua sendo
+# feito direto no servidor por enquanto.
+$script:ArquivoConfigZonasWebApp     = Join-Path $script:PastaBaseServidor "zonas_webapp_config.json"
+$script:ArquivoConfigCampanhasWebApp = Join-Path $script:PastaBaseServidor "campanhas_webapp_config.json"
+$script:ArquivoConfigDrive           = Join-Path $script:PastaBaseServidor "drive_upload_config.json"
+
 # Config da varredura de rede (copiada sem mudanca do topo do
 # ScannerRedeZona.ps1 original - ver Start-VarreduraZona/$script:scriptBlock
 # mais abaixo).
@@ -1272,4 +1285,229 @@ function Get-StatusPacote {
         ArquivoCacheUnc     = $estadoJob.ArquivoCacheUnc
         NomeArquivoOriginal = $estadoJob.NomeArquivoOriginal
     } | ConvertTo-Json -Depth 6 -Compress)
+}
+
+# ============================================================
+# FASE 7: escritas no Apps Script (request/resposta unico, sem
+# polling). Os 3 Web Apps (atualizar Zonas, registrar resultado de
+# Campanha, enviar arquivo ao Drive) ja estavam configurados neste
+# servidor antes desta migracao (E:\ScanZonas\*_config.json, mesma
+# situacao do versoes_config.json na Fase 6) - so os LEITORES (Get-
+# Config*) sao migrados; os assistentes de PRIMEIRA CONFIGURACAO
+# (Read-Config*Interativo, InputBox) ficam de fora por enquanto -
+# reconfigurar continua sendo feito direto no servidor.
+# ============================================================
+
+function Get-ConfigZonasWebApp {
+    if (-not (Test-Path $script:ArquivoConfigZonasWebApp)) { return $null }
+    try {
+        $cfg = Get-Content -Path $script:ArquivoConfigZonasWebApp -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($cfg.UrlWebApp -and $cfg.Token) { return $cfg }
+    } catch {}
+    return $null
+}
+
+function Get-ConfigCampanhasWebApp {
+    if (-not (Test-Path $script:ArquivoConfigCampanhasWebApp)) { return $null }
+    try {
+        $cfg = Get-Content -Path $script:ArquivoConfigCampanhasWebApp -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($cfg.UrlWebApp -and $cfg.Token) { return $cfg }
+    } catch {}
+    return $null
+}
+
+function Get-ConfigEnvioDrive {
+    if (-not (Test-Path $script:ArquivoConfigDrive)) { return $null }
+    try {
+        $cfg = Get-Content -Path $script:ArquivoConfigDrive -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($cfg.UrlWebApp -and $cfg.Token) { return $cfg }
+    } catch {}
+    return $null
+}
+
+function Send-AtualizacaoZonaViaAppsScript {
+    <#
+        Manda a Substituta/Observacao de uma zona por HTTP POST ao Web
+        App do Apps Script, que grava direto nas colunas D/E da linha
+        correspondente na planilha "Zonas".
+
+        Reestruturada em relacao ao original: ja recebia so parametros
+        explicitos (nada de controle WinForms), so precisou perder o
+        parametro $Config (resolvido aqui dentro via
+        Get-ConfigZonasWebApp, ja que roda no servidor agora) e trocar
+        Add-Log + $true/$false por um retorno estruturado
+        [PSCustomObject]@{ Ok; Mensagem }.
+    #>
+    param(
+        [Parameter(Mandatory)][int]$Zona,
+        [string]$Substituta = "",
+        [string]$Observacao = ""
+    )
+
+    $cfg = Get-ConfigZonasWebApp
+    if (-not $cfg) {
+        return [PSCustomObject]@{ Ok = $false; Mensagem = "Atualizacao da planilha de zonas ainda nao configurada neste servidor ($script:ArquivoConfigZonasWebApp)." }
+    }
+
+    $zonaPad = "{0:D3}" -f $Zona
+    try {
+        $corpo = @{ token = $cfg.Token; zona = $zonaPad; rede = $Substituta; observacao = $Observacao } | ConvertTo-Json -Compress
+        # Bytes UTF-8 explicitos (nao a string direto) - o PowerShell 5.1
+        # nao usa UTF-8 sozinho pra converter uma string com acento pro
+        # corpo da requisicao, corrompendo Observacao com acento.
+        $corpoBytesUtf8 = [System.Text.Encoding]::UTF8.GetBytes($corpo)
+        $resp = Invoke-RestMethod -Uri $cfg.UrlWebApp -Method Post -Body $corpoBytesUtf8 -ContentType "application/json; charset=utf-8" -TimeoutSec 20
+    } catch {
+        # O Web App do Apps Script as vezes devolve erro HTTP MESMO
+        # quando o doPost ja gravou certinho (comum logo apos implantar
+        # um Web App novo) - antes de considerar falha de verdade,
+        # confere se o valor foi mesmo gravado buscando a planilha de
+        # novo.
+        $resultadoImport = Import-TabelaZonas
+        if ($resultadoImport.Ok) {
+            $zonaInfo = $script:TabelaZonas[$Zona]
+            $substitutaGravada = if ($zonaInfo -and $zonaInfo.Substituta) { $zonaInfo.Substituta.Trim() } else { "" }
+            $obsGravada = if ($zonaInfo -and $zonaInfo.Observacao) { $zonaInfo.Observacao.Trim() } else { "" }
+            if ($substitutaGravada -eq $Substituta.Trim() -and $obsGravada -eq $Observacao.Trim()) {
+                return [PSCustomObject]@{ Ok = $true; Mensagem = "Confirmado: zona $zonaPad foi gravada na planilha apesar do erro HTTP (falso alarme conhecido do Apps Script)." }
+            }
+        }
+        return [PSCustomObject]@{ Ok = $false; Mensagem = "Falha ao atualizar zona $zonaPad na planilha: $($_.Exception.Message)" }
+    }
+
+    if (-not $resp.ok) {
+        return [PSCustomObject]@{ Ok = $false; Mensagem = "Planilha recusou atualizar a zona $zonaPad`: $($resp.erro)" }
+    }
+    return [PSCustomObject]@{ Ok = $true; Mensagem = "Zona $zonaPad atualizada na planilha." }
+}
+
+function Send-ResultadoCampanhaZona {
+    <#
+        Manda o resultado JA CALCULADO de uma verificacao de campanha por
+        HTTP POST ao Web App do Apps Script, que acrescenta uma linha na
+        aba RESULTADOS-CAMPANHAS da planilha.
+
+        Reestruturada: o original lia total/aptas/maquinas DIRETO das
+        linhas de um DataGridView (via $GridZona) e a campanha de um
+        ComboBox (via $ComboCampanha.SelectedIndex) - nenhum dos dois
+        atravessa remoting. Aqui o CLIENTE ja manda tudo pronto (a grade
+        e o combo continuam existindo do lado cliente, sao so lidos ANTES
+        de chamar esta funcao, nao durante). $Tecnico tambem vem do
+        cliente ($env:USERNAME de la) em vez de ler daqui - mais simples
+        e robusto do que depender de como o WinRM propaga variaveis de
+        ambiente pra dentro da sessao.
+    #>
+    param(
+        [Parameter(Mandatory)][int]$Zona,
+        [Parameter(Mandatory)][string]$NomeCampanha,
+        [Parameter(Mandatory)][int]$Total,
+        [Parameter(Mandatory)][int]$Aptas,
+        [string]$MaquinasAptas = "",
+        [Parameter(Mandatory)][string]$Tecnico
+    )
+
+    $cfg = Get-ConfigCampanhasWebApp
+    if (-not $cfg) {
+        return [PSCustomObject]@{ Ok = $false; Mensagem = "Envio de resultado de campanha ainda nao configurado neste servidor ($script:ArquivoConfigCampanhasWebApp)." }
+    }
+
+    $resolucaoZona = Resolve-RedeDaZona -Zona $Zona
+    $sedeTxt = if ($resolucaoZona.Sede) { $resolucaoZona.Sede } else { "" }
+    $zonaPad = "{0:D3}" -f $Zona
+
+    try {
+        $corpo = @{
+            token         = $cfg.Token
+            zona          = $zonaPad
+            sede          = $sedeTxt
+            campanha      = $NomeCampanha
+            total         = $Total
+            aptas         = $Aptas
+            tecnico       = $Tecnico
+            maquinasAptas = $MaquinasAptas
+        } | ConvertTo-Json -Compress
+        # 60s (nao 20s) de proposito - a PRIMEIRA chamada a um Web App
+        # recem-implantado pode demorar bem mais que o normal pro Google
+        # "esquentar" o ambiente de execucao (confirmado na pratica no
+        # ScannerRedeZona.ps1 original).
+        $corpoBytesUtf8 = [System.Text.Encoding]::UTF8.GetBytes($corpo)
+        $resp = Invoke-RestMethod -Uri $cfg.UrlWebApp -Method Post -Body $corpoBytesUtf8 -ContentType "application/json; charset=utf-8" -TimeoutSec 60
+    } catch {
+        # Mesmo caso do Send-AtualizacaoZonaViaAppsScript - confere se
+        # gravou mesmo assim antes de considerar falha de verdade.
+        # Get-ResultadosCampanhas (definida mais acima NESTE MESMO
+        # arquivo) e chamada aqui como funcao local normal, nao via
+        # Invoke-Command - ainda assim devolve STRING JSON (e o
+        # contrato dela pra QUALQUER chamador, direto ou remoto),
+        # entao precisa do ConvertFrom-Json mesmo sem cruzar remoting.
+        $todosVerificacao = (Get-ResultadosCampanhas | ConvertFrom-Json)
+        $gravouMesmoAssim = $null
+        if ($todosVerificacao.Ok) {
+            $gravouMesmoAssim = $todosVerificacao.Dados | Where-Object {
+                $_.Zona -eq $zonaPad -and $_.Campanha -eq $NomeCampanha -and $_.Total -eq $Total -and $_.Aptas -eq $Aptas -and $_.Tecnico -eq $Tecnico
+            } | Select-Object -Last 1
+        }
+        if ($gravouMesmoAssim) {
+            return [PSCustomObject]@{ Ok = $true; Mensagem = "Resultado enviado com sucesso (o aviso de erro foi um falso alarme - conferido na planilha)." }
+        }
+        return [PSCustomObject]@{ Ok = $false; Mensagem = "Falha ao enviar resultado da campanha '$NomeCampanha' (zona $zonaPad): $($_.Exception.Message)" }
+    }
+
+    if (-not $resp.ok) {
+        return [PSCustomObject]@{ Ok = $false; Mensagem = "Planilha recusou o resultado da campanha '$NomeCampanha' (zona $zonaPad): $($resp.erro)" }
+    }
+
+    return [PSCustomObject]@{ Ok = $true; Mensagem = "Resultado da campanha '$NomeCampanha' (zona $zonaPad - $sedeTxt, $Aptas de $Total aptas) enviado para a planilha." }
+}
+
+function Send-ArquivoParaGoogleDriveViaAppsScript {
+    <#
+        Manda um arquivo (nome + conteudo em base64) por HTTP POST ao Web
+        App do Apps Script, que grava direto na pasta do Drive.
+
+        Reestruturada: o original recebia um [System.IO.FileInfo] e lia
+        os bytes AQUI dentro - nao da mais, porque o arquivo tipicamente
+        vem de uma maquina de ZONA (ex: \\IP\InstSeg\CVC\<host>.cvc, usado
+        por Invoke-AcaoEnviarCvcDrive) e ler isso de dentro da sessao
+        remota do servidor esbarraria no MESMO duplo-salto de Kerberos ja
+        documentado na Fase 6 (SMB pra uma terceira maquina). Por isso
+        quem chama (o cliente, que ja acessa a maquina de zona direto,
+        1 salto so) le o arquivo e converte pra base64 ANTES de chamar
+        esta funcao - aqui so falta o POST em si (chamada a API do
+        Google, centralizada por preferencia do usuario, nao por
+        limitacao tecnica desta parte).
+
+        ATENCAO: arquivos GRANDES podem esbarrar no limite padrao de
+        tamanho de mensagem do WinRM (MaxEnvelopeSizekb, ~500KB) - CVCs
+        sao tipicamente pequenos (arquivo por maquina, nao a zona
+        inteira), entao nao deve ser problema na pratica, mas se um dia
+        precisar mandar algo maior, ajustar essa quota no servidor (ver
+        Fase 8) ou repensar pra upload em pedacos.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$NomeArquivo,
+        [Parameter(Mandatory)][string]$ConteudoBase64,
+        [int]$TimeoutSec = 30
+    )
+
+    $cfg = Get-ConfigEnvioDrive
+    if (-not $cfg) {
+        return [PSCustomObject]@{ Ok = $false; Mensagem = "Envio automatico ao Google Drive ainda nao configurado neste servidor ($script:ArquivoConfigDrive)."; Url = $null }
+    }
+
+    try {
+        $corpo = @{ token = $cfg.Token; nomeArquivo = $NomeArquivo; conteudoBase64 = $ConteudoBase64 } | ConvertTo-Json -Compress
+        # Bytes UTF-8 explicitos - mesmo motivo de sempre (nomeArquivo
+        # pode ter acento).
+        $corpoBytesUtf8 = [System.Text.Encoding]::UTF8.GetBytes($corpo)
+        $resp = Invoke-RestMethod -Uri $cfg.UrlWebApp -Method Post -Body $corpoBytesUtf8 -ContentType "application/json; charset=utf-8" -TimeoutSec $TimeoutSec
+    } catch {
+        return [PSCustomObject]@{ Ok = $false; Mensagem = "Falha ao enviar '$NomeArquivo' via Apps Script: $($_.Exception.Message)"; Url = $null }
+    }
+
+    if (-not $resp.ok) {
+        return [PSCustomObject]@{ Ok = $false; Mensagem = "Apps Script recusou o envio de '$NomeArquivo': $($resp.erro)"; Url = $null }
+    }
+
+    return [PSCustomObject]@{ Ok = $true; Mensagem = "Arquivo '$NomeArquivo' enviado ao Google Drive."; Url = $resp.url }
 }

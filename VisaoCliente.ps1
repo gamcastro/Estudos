@@ -25,7 +25,7 @@ Import-Module (Join-Path $PSScriptRoot "VisaoPacotes.psm1") -Force
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "Visao - Teste de Conexao Remota (Fase 0)"
-$form.Size = New-Object System.Drawing.Size(560, 560)
+$form.Size = New-Object System.Drawing.Size(560, 600)
 $form.StartPosition = "CenterScreen"
 $form.Font = New-Object System.Drawing.Font("Segoe UI", 9)
 
@@ -118,8 +118,16 @@ $btnTestarFase6.Height = 28
 $btnTestarFase6.Enabled = $false
 $form.Controls.Add($btnTestarFase6)
 
+$btnTestarFase7 = New-Object System.Windows.Forms.Button
+$btnTestarFase7.Text = "Testar Fase 7 (Resultado de campanha TESTE + arquivo TESTE ao Drive)"
+$btnTestarFase7.Location = New-Object System.Drawing.Point(15, 256)
+$btnTestarFase7.Width = 520
+$btnTestarFase7.Height = 28
+$btnTestarFase7.Enabled = $false
+$form.Controls.Add($btnTestarFase7)
+
 $txtLog = New-Object System.Windows.Forms.TextBox
-$txtLog.Location = New-Object System.Drawing.Point(15, 258)
+$txtLog.Location = New-Object System.Drawing.Point(15, 291)
 $txtLog.Size = New-Object System.Drawing.Size(520, 250)
 $txtLog.Multiline = $true
 $txtLog.ScrollBars = "Vertical"
@@ -392,6 +400,36 @@ $btnTestarFase6.Add_Click({
     }
 }.GetNewClosure())
 
+# ============================================================
+# FASE 7: escritas no Apps Script (request/resposta unico, sem
+# polling). So exercita Send-ResultadoCampanhaZonaRemoto (linha NOVA na
+# aba RESULTADOS-CAMPANHAS, nao sobrescreve nada) e
+# Send-ArquivoParaGoogleDriveRemoto (arquivo NOVO no Drive) com dados
+# claramente marcados como teste. NAO exercita
+# Send-AtualizacaoZonaRemoto aqui de proposito - essa funcao
+# SOBRESCREVE a Substituta/Observacao de uma zona REAL na planilha,
+# validada so por revisao de codigo (decisao tomada com o usuario
+# durante a migracao).
+# ============================================================
+$btnTestarFase7.Add_Click({
+    $btnTestarFase7.Enabled = $false
+    try {
+        Add-LinhaLog "Enviando resultado de campanha de TESTE (zona 999, nao e uma zona real)..."
+        $r1 = Send-ResultadoCampanhaZonaRemoto -Zona 999 -NomeCampanha "TESTE-MIGRACAO-FASE7" -Total 1 -Aptas 1 -MaquinasAptas "TESTE-MAQUINA-FASE7"
+        if ($r1.Ok) { Add-LinhaLog "  OK: $($r1.Mensagem)" } else { Add-LinhaLog "  ERRO: $($r1.Mensagem)" }
+
+        Add-LinhaLog "Enviando arquivo de TESTE ao Google Drive..."
+        $conteudoTeste = "Arquivo de teste da migracao Fase 7 - Visao - $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') - pode apagar."
+        $base64 = [System.Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($conteudoTeste))
+        $r2 = Send-ArquivoParaGoogleDriveRemoto -NomeArquivo "TESTE-MIGRACAO-FASE7.txt" -ConteudoBase64 $base64
+        if ($r2.Ok) { Add-LinhaLog "  OK: $($r2.Mensagem) ($($r2.Url))" } else { Add-LinhaLog "  ERRO: $($r2.Mensagem)" }
+    } catch {
+        Add-LinhaLog "ERRO: $($_.Exception.Message)"
+    } finally {
+        $btnTestarFase7.Enabled = $true
+    }
+}.GetNewClosure())
+
 $form.Add_Shown({
     if (Connect-ServidorVisao) {
         $lblStatusConexao.Text = "Conectado ao POLICY-SERVER."
@@ -421,6 +459,7 @@ $form.Add_Shown({
     $btnTestarFase4.Enabled = $true
     $btnTestarFase5.Enabled = $true
     $btnTestarFase6.Enabled = $true
+    $btnTestarFase7.Enabled = $true
 }.GetNewClosure())
 
 $form.Add_FormClosed({ Disconnect-ServidorVisao }.GetNewClosure())

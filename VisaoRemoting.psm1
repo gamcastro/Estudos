@@ -309,7 +309,52 @@ function Get-StatusPacoteRemoto {
     return ($json | ConvertFrom-Json)
 }
 
-Export-ModuleMember -Function Connect-ServidorVisao, Disconnect-ServidorVisao, Invoke-ComandoRemoto, Get-IdSessaoAtualVisao, Get-ZonasRemoto, Get-GruposSistemasRemoto, Get-CampanhasRemoto, Get-ResultadosCampanhasRemoto, Resolve-RedeDaZonaRemoto, Test-RedeEhCompartilhadaRemoto, Start-VarreduraRemota, Get-VarreduraNovosResultadosRemoto, Get-VersoesRemoto, Start-BaixarPacoteRemoto, Get-StatusPacoteRemoto
+# ============================================================
+# FASE 7: escritas no Apps Script - request/resposta unico, sem
+# polling (cada uma faz 1 chamada HTTP so, no maximo 60s de timeout
+# server-side) - cada wrapper so encaminha pra funcao equivalente do
+# VisaoServidor.ps1, que ja devolve um PSCustomObject simples
+# {Ok; Mensagem} (nao-array, atravessa sem contorno JSON).
+# ============================================================
+function Send-AtualizacaoZonaRemoto {
+    param(
+        [Parameter(Mandatory)][int]$Zona,
+        [string]$Substituta = "",
+        [string]$Observacao = ""
+    )
+    Invoke-ComandoRemoto -ScriptBlock { param($z, $s, $o) Send-AtualizacaoZonaViaAppsScript -Zona $z -Substituta $s -Observacao $o } -ArgumentList @($Zona, $Substituta, $Observacao)
+}
+
+function Send-ResultadoCampanhaZonaRemoto {
+    param(
+        [Parameter(Mandatory)][int]$Zona,
+        [Parameter(Mandatory)][string]$NomeCampanha,
+        [Parameter(Mandatory)][int]$Total,
+        [Parameter(Mandatory)][int]$Aptas,
+        [string]$MaquinasAptas = "",
+        [string]$Tecnico = $env:USERNAME
+    )
+    Invoke-ComandoRemoto -ScriptBlock { param($z, $c, $t, $a, $m, $tec) Send-ResultadoCampanhaZona -Zona $z -NomeCampanha $c -Total $t -Aptas $a -MaquinasAptas $m -Tecnico $tec } -ArgumentList @($Zona, $NomeCampanha, $Total, $Aptas, $MaquinasAptas, $Tecnico)
+}
+
+function Send-ArquivoParaGoogleDriveRemoto {
+    <#
+        $NomeArquivo/$ConteudoBase64 ja vem PRONTO de quem chama - se o
+        arquivo original vive numa maquina de zona (ex: CVC em
+        \\IP\InstSeg\CVC), quem chama precisa te-lo lido DIRETO (sem
+        remoting, mesmo motivo do VisaoPacotes.psm1) antes de chegar
+        aqui. Ver comentario completo em
+        Send-ArquivoParaGoogleDriveViaAppsScript no VisaoServidor.ps1.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$NomeArquivo,
+        [Parameter(Mandatory)][string]$ConteudoBase64,
+        [int]$TimeoutSec = 30
+    )
+    Invoke-ComandoRemoto -ScriptBlock { param($n, $c, $t) Send-ArquivoParaGoogleDriveViaAppsScript -NomeArquivo $n -ConteudoBase64 $c -TimeoutSec $t } -ArgumentList @($NomeArquivo, $ConteudoBase64, $TimeoutSec)
+}
+
+Export-ModuleMember -Function Connect-ServidorVisao, Disconnect-ServidorVisao, Invoke-ComandoRemoto, Get-IdSessaoAtualVisao, Get-ZonasRemoto, Get-GruposSistemasRemoto, Get-CampanhasRemoto, Get-ResultadosCampanhasRemoto, Resolve-RedeDaZonaRemoto, Test-RedeEhCompartilhadaRemoto, Start-VarreduraRemota, Get-VarreduraNovosResultadosRemoto, Get-VersoesRemoto, Start-BaixarPacoteRemoto, Get-StatusPacoteRemoto, Send-AtualizacaoZonaRemoto, Send-ResultadoCampanhaZonaRemoto, Send-ArquivoParaGoogleDriveRemoto
 
 # NOTA: as consultas ao AD (Usuarios da ZE, status do Instalador) NAO
 # passam por aqui - ver VisaoAD.psm1. Nao sao trafego de varredura, e
