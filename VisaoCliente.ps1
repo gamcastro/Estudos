@@ -75,9 +75,29 @@ $btnTestarFase2.Width = 300
 $btnTestarFase2.Height = 28
 $form.Controls.Add($btnTestarFase2)
 
+$txtIpTesteVarredura = New-Object System.Windows.Forms.TextBox
+$txtIpTesteVarredura.Location = New-Object System.Drawing.Point(15, 153)
+$txtIpTesteVarredura.Width = 110
+$txtIpTesteVarredura.Text = ""
+$form.Controls.Add($txtIpTesteVarredura)
+
+$chkRedeCompartilhadaTeste = New-Object System.Windows.Forms.CheckBox
+$chkRedeCompartilhadaTeste.Text = "Rede compartilhada"
+$chkRedeCompartilhadaTeste.Location = New-Object System.Drawing.Point(135, 155)
+$chkRedeCompartilhadaTeste.Width = 140
+$form.Controls.Add($chkRedeCompartilhadaTeste)
+
+$btnTestarFase4 = New-Object System.Windows.Forms.Button
+$btnTestarFase4.Text = "Testar Fase 4 (Varredura remota - 1 IP)"
+$btnTestarFase4.Location = New-Object System.Drawing.Point(280, 152)
+$btnTestarFase4.Width = 255
+$btnTestarFase4.Height = 28
+$btnTestarFase4.Enabled = $false
+$form.Controls.Add($btnTestarFase4)
+
 $txtLog = New-Object System.Windows.Forms.TextBox
-$txtLog.Location = New-Object System.Drawing.Point(15, 158)
-$txtLog.Size = New-Object System.Drawing.Size(520, 250)
+$txtLog.Location = New-Object System.Drawing.Point(15, 188)
+$txtLog.Size = New-Object System.Drawing.Size(520, 220)
 $txtLog.Multiline = $true
 $txtLog.ScrollBars = "Vertical"
 $txtLog.ReadOnly = $true
@@ -152,6 +172,48 @@ $btnTestarFase2.Add_Click({
     }
 }.GetNewClosure())
 
+$btnTestarFase4.Add_Click({
+    $ip = $txtIpTesteVarredura.Text.Trim()
+    if (-not $ip) {
+        Add-LinhaLog "Informe um IP pra testar a varredura remota."
+        return
+    }
+    $zona = [int]$numZonaTesteAd.Value
+    $redeCompartilhada = $chkRedeCompartilhadaTeste.Checked
+
+    try {
+        Add-LinhaLog "Disparando varredura remota de '$ip' (zona $zona, rede compartilhada=$redeCompartilhada)..."
+        $idSessao = Start-VarreduraRemota -Ips @($ip) -Zona $zona -RedeCompartilhada $redeCompartilhada
+
+        # Loop de polling simples pra esta tela de teste (a tela real vai
+        # usar um Timer, ver "Redesenho do progresso ao vivo" no plano) -
+        # DoEvents mantem a janela respondendo enquanto espera. Teto de 60
+        # iteracoes (~30s) cobre o pior caso (2 chamadas OCS de 5s cada +
+        # checagens de porta) sem travar pra sempre se algo ficar preso.
+        $iteracoes = 0
+        do {
+            Start-Sleep -Milliseconds 500
+            [System.Windows.Forms.Application]::DoEvents()
+            $resposta = Get-VarreduraNovosResultadosRemoto -IdSessaoEsperado $idSessao
+            if ($resposta.SessaoPerdida) { break }
+            foreach ($item in $resposta.Novos) {
+                Add-LinhaLog "  IP $($item.IP): Online=$($item.Online) Hostname='$($item.Hostname)' DetectadoPor='$($item.DetectadoPor)' VersaoSis=$($item.VersaoSis) Modelo=$($item.Modelo)"
+            }
+            $iteracoes++
+        } while ($resposta.EmAndamento -and $iteracoes -lt 60)
+
+        if ($resposta.SessaoPerdida) {
+            Add-LinhaLog "Conexao com o POLICY-SERVER foi perdida durante a varredura - incompleta, inicie de novo."
+        } elseif ($resposta.EmAndamento) {
+            Add-LinhaLog "Tempo limite de teste atingido (30s) com a varredura ainda em andamento no servidor."
+        } else {
+            Add-LinhaLog "Varredura concluida: $($resposta.Concluidos)/$($resposta.Total)."
+        }
+    } catch {
+        Add-LinhaLog "ERRO na varredura: $($_.Exception.Message)"
+    }
+}.GetNewClosure())
+
 $form.Add_Shown({
     if (Connect-ServidorVisao) {
         $lblStatusConexao.Text = "Conectado ao POLICY-SERVER."
@@ -165,6 +227,7 @@ $form.Add_Shown({
     $btnTestarChamada.Enabled = $true
     $btnDerrubarSessao.Enabled = $true
     $btnTestarFase1.Enabled = $true
+    $btnTestarFase4.Enabled = $true
 }.GetNewClosure())
 
 $form.Add_FormClosed({ Disconnect-ServidorVisao }.GetNewClosure())

@@ -20,6 +20,16 @@
 $script:NomeServidorVisao = "POLICY-SERVER.tre-ma.gov.br"
 $script:CaminhoVisaoServidorPs1 = Join-Path $PSScriptRoot "VisaoServidor.ps1"
 $script:PSSessionServidor = $null
+# Identidade da sessao ATUAL - trocada (novo GUID) toda vez que uma sessao
+# NOVA e criada de verdade (nunca no caso de "ja estava aberta, so
+# reaproveitou"). Existe so pra quem faz POLLING sobre estado acumulado no
+# servidor (Get-VarreduraNovosResultadosRemoto) conseguir perceber quando a
+# sessao caiu e foi reconectada NO MEIO do polling - sem isso, uma sessao
+# nova (processo remoto novo, sem $script:EstadoVarredura nenhum) devolve
+# "EmAndamento=$false, Total=0", visualmente identico a "varredura
+# concluida com 0 resultados", confirmado ao vivo como um cenario real (ver
+# teste de resiliencia da Fase 4).
+$script:IdSessaoAtual = $null
 
 function Connect-ServidorVisao {
     <#
@@ -39,10 +49,12 @@ function Connect-ServidorVisao {
     try {
         $script:PSSessionServidor = New-PSSession -ComputerName $script:NomeServidorVisao -ErrorAction Stop
         Invoke-Command -Session $script:PSSessionServidor -FilePath $script:CaminhoVisaoServidorPs1 -ErrorAction Stop
+        $script:IdSessaoAtual = [guid]::NewGuid()
         return $true
     } catch {
         Write-Warning "Falha ao conectar/carregar logica no servidor '$($script:NomeServidorVisao)': $($_.Exception.Message)"
         $script:PSSessionServidor = $null
+        $script:IdSessaoAtual = $null
         return $false
     }
 }
@@ -56,6 +68,17 @@ function Disconnect-ServidorVisao {
         try { Remove-PSSession -Session $script:PSSessionServidor -ErrorAction SilentlyContinue } catch {}
         $script:PSSessionServidor = $null
     }
+    $script:IdSessaoAtual = $null
+}
+
+function Get-IdSessaoAtualVisao {
+    <#
+        Devolve o GUID da sessao atual (ou $null se nao conectado) - ver o
+        comentario de $script:IdSessaoAtual acima. Usado por quem inicia
+        uma operacao com estado acumulado no servidor (hoje so a
+        varredura) pra depois conseguir detectar reconexao no meio.
+    #>
+    return $script:IdSessaoAtual
 }
 
 function Invoke-ComandoRemoto {
@@ -140,7 +163,76 @@ function Get-ResultadosCampanhasRemoto {
     return ($json | ConvertFrom-Json)
 }
 
-Export-ModuleMember -Function Connect-ServidorVisao, Disconnect-ServidorVisao, Invoke-ComandoRemoto, Get-ZonasRemoto, Get-GruposSistemasRemoto, Get-CampanhasRemoto, Get-ResultadosCampanhasRemoto
+# ============================================================
+# FASE 4/5: varredura de rede - padrao de POLLING sobre a sessao
+# persistente (ver "Redesenho do progresso ao vivo" no plano). Quem
+# chama (o Timer do VisaoCliente.ps1) dispara Start-VarreduraRemota uma
+# vez e depois fica chamando Get-VarreduraNovosResultadosRemoto em
+# intervalo (~500-1000ms), acumulando o delta recebido a cada chamada.
+# ============================================================
+function Start-VarreduraRemota {
+    <#
+        Devolve o GUID da sessao (Get-IdSessaoAtualVisao) capturado DEPOIS
+        que Invoke-ComandoRemoto garantiu que a sessao esta aberta (e,
+        se precisou reconectar, ja reconectou) - quem chama guarda esse
+        valor e passa em TODA chamada de Get-VarreduraNovosResultadosRemoto
+        subsequente, pra conseguir detectar se a sessao caiu e foi
+        recriada no meio do polling (ver comentario de $script:IdSessaoAtual
+        no topo deste arquivo).
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [string[]]$Ips,
+        [Parameter(Mandatory)]
+        [int]$Zona,
+        [bool]$RedeCompartilhada = $false
+    )
+    Invoke-ComandoRemoto -ScriptBlock { param($i, $z, $rc) Start-VarreduraZona -Ips $i -Zona $z -RedeCompartilhada $rc } -ArgumentList @($Ips, $Zona, $RedeCompartilhada) | Out-Null
+    return $script:IdSessaoAtual
+}
+
+function Get-VarreduraNovosResultadosRemoto {
+    <#
+        Get-VarreduraNovosResultados do lado servidor devolve uma STRING
+        JSON (mesmo motivo de Get-ResultadosCampanhas - array de
+        PSCustomObject nao atravessa o remoting neste servidor). Aqui
+        desserializa de volta.
+
+        $IdSessaoEsperado e o GUID devolvido por Start-VarreduraRemota no
+        inicio desta varredura. Se a sessao atual (antes OU depois de
+        fazer a chamada - ela pode reconectar sozinha DURANTE a propria
+        chamada, via Invoke-ComandoRemoto) nao bater com esse GUID, a
+        sessao foi recriada no meio do caminho: o estado da varredura
+        (`$script:EstadoVarredura`) que estava acumulado no servidor
+        antigo se perdeu (processo remoto novo = do zero). Confirmado ao
+        vivo que, sem essa checagem, esse cenario devolve
+        "EmAndamento=$false, Total=0, Concluidos=0" - visualmente
+        IDENTICO a uma varredura genuina que terminou sem nenhum host,
+        em vez de aparecer como "conexao perdida". Por isso devolve
+        SessaoPerdida=$true nesse caso, pra quem chama poder mostrar a
+        mensagem certa ("varredura incompleta, comece de novo") em vez de
+        reportar "concluida" por engano.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [guid]$IdSessaoEsperado
+    )
+
+    if ($script:IdSessaoAtual -ne $IdSessaoEsperado) {
+        return [PSCustomObject]@{ Novos = @(); Concluidos = 0; Total = 0; EmAndamento = $false; SessaoPerdida = $true }
+    }
+
+    $json = Invoke-ComandoRemoto -ScriptBlock { Get-VarreduraNovosResultados }
+
+    if ($script:IdSessaoAtual -ne $IdSessaoEsperado) {
+        return [PSCustomObject]@{ Novos = @(); Concluidos = 0; Total = 0; EmAndamento = $false; SessaoPerdida = $true }
+    }
+
+    $obj = $json | ConvertFrom-Json
+    $obj | Add-Member -NotePropertyName SessaoPerdida -NotePropertyValue $false -PassThru
+}
+
+Export-ModuleMember -Function Connect-ServidorVisao, Disconnect-ServidorVisao, Invoke-ComandoRemoto, Get-IdSessaoAtualVisao, Get-ZonasRemoto, Get-GruposSistemasRemoto, Get-CampanhasRemoto, Get-ResultadosCampanhasRemoto, Start-VarreduraRemota, Get-VarreduraNovosResultadosRemoto
 
 # NOTA: as consultas ao AD (Usuarios da ZE, status do Instalador) NAO
 # passam por aqui - ver VisaoAD.psm1. Nao sao trafego de varredura, e
