@@ -235,6 +235,17 @@ $script:TabelaZonas          = @{}   # int (zona) -> PSCustomObject { Sede; Rede
 $script:ZonaAtual            = 0
 $script:RedeCompartilhada    = $false   # true quando a rede da varredura atual e compartilhada entre zonas (ex: Sao Luis)
 
+# --- Aba SEPARADA "GRUPOS-SISTEMAS-ELEITORAIS" da MESMA planilha de Zonas
+# (mesmo SpreadsheetId, gid proprio dessa aba) - mapeia grupo do AD (ex:
+# "GEDAI2K12GAdmin") -> Sistema + Perfil de acesso (ex: "GEDAI-UE" /
+# "Administrador"), usada na janela "Usuarios da ZE" pra mostrar o que
+# cada grupo do usuario realmente da acesso, alem so do nome cru do
+# grupo. Cache local por igual motivo das outras planilhas (continua
+# funcionando com a ultima versao baixada se a planilha ficar fora do ar).
+$script:UrlPlanilhaGruposSistemasCSV = "https://docs.google.com/spreadsheets/d/1_2aZhFgplRqCdPVV_lq4XJT9wgqkfbZpEFZRu1Zu9_I/export?format=csv&gid=634558318"
+$script:ArquivoGruposSistemasCache   = Join-Path $PSScriptRoot "grupos_sistemas_cache.csv"
+$script:TabelaGruposSistemas         = @{}   # "GRUPO" (maiusculo) -> PSCustomObject { Sistema; Perfil }
+
 # --- Planilha SEPARADA de Sistemas Eleitorais (Sistema, Versao,
 # NomeAmigavel, LinkDrive, PastaDestino, Atual) - FONTE UNICA pra dois
 # recursos: (1) mapeia a versao "crua" que o OCS Inventory reporta no
@@ -517,8 +528,16 @@ $btnGerenciarZonas.Width = 105
 $btnGerenciarZonas.Height = 24
 $form.Controls.Add($btnGerenciarZonas)
 
+$btnUsuariosZona = New-Object System.Windows.Forms.Button
+$btnUsuariosZona.Text = "Usuarios da ZE 1"
+$btnUsuariosZona.Location = New-Object System.Drawing.Point(935, 43)
+$btnUsuariosZona.Width = 150
+$btnUsuariosZona.Height = 24
+$form.Controls.Add($btnUsuariosZona)
+
 $numZona.Add_ValueChanged({ Update-LabelSedeInfo })
 $btnGerenciarZonas.Add_Click({ Show-GerenciarZonas })
+$btnUsuariosZona.Add_Click({ Show-JanelaUsuariosZona -Zona ([int]$numZona.Value) })
 
 $progressBar = New-Object System.Windows.Forms.ProgressBar
 $progressBar.Location = New-Object System.Drawing.Point(15, 76)
@@ -713,6 +732,72 @@ function Import-TabelaZonas {
         }
     }
     return $true
+}
+
+function Import-TabelaGruposSistemas {
+    <#
+        Carrega Grupo (do AD) -> {Sistema, Perfil} a partir da aba
+        "GRUPOS-SISTEMAS-ELEITORAIS" (mesma planilha de Zonas, gid
+        proprio). Mesmo esquema de cache local das outras planilhas -
+        cai pra ultima versao baixada com sucesso se a planilha estiver
+        fora do ar. Usada so pela janela "Usuarios da ZE" (nao bloqueia
+        nada na varredura principal se falhar).
+    #>
+    param([switch]$ForcarCache)
+
+    $script:TabelaGruposSistemas = @{}
+    $linhas = $null
+
+    if (-not $ForcarCache) {
+        try {
+            $resp = Invoke-WebRequest -Uri $script:UrlPlanilhaGruposSistemasCSV -TimeoutSec 8 -UseBasicParsing
+            $bytesResposta = $resp.RawContentStream.ToArray()
+            $textoUtf8 = [System.Text.Encoding]::UTF8.GetString($bytesResposta)
+            $linhas = $textoUtf8 | ConvertFrom-Csv
+            if ($linhas -and $linhas.Count -gt 0) {
+                $linhas | Export-Csv -Path $script:ArquivoGruposSistemasCache -NoTypeInformation -Encoding UTF8
+            }
+        } catch {
+            Add-Log "[AVISO] Nao foi possivel buscar a planilha de grupos/sistemas online: $($_.Exception.Message)" "Yellow"
+            $linhas = $null
+        }
+    }
+
+    if (-not $linhas -and (Test-Path $script:ArquivoGruposSistemasCache)) {
+        Add-Log "Usando cache local de grupos/sistemas (ultima planilha baixada com sucesso)." "Yellow"
+        $linhas = Import-Csv -Path $script:ArquivoGruposSistemasCache
+    }
+
+    if (-not $linhas) { return $false }
+
+    foreach ($l in $linhas) {
+        $grupo = if ($l.Grupo) { $l.Grupo.Trim() } else { $null }
+        if (-not $grupo) { continue }
+        $script:TabelaGruposSistemas[$grupo.ToUpper()] = [PSCustomObject]@{
+            Sistema = $l.Sistema
+            Perfil  = $l.Perfil
+        }
+    }
+    return $true
+}
+
+function Get-InfoGrupoSistema {
+    <#
+        Le $script:TabelaGruposSistemas - existe como FUNCAO separada (em
+        vez de acessar $script:TabelaGruposSistemas direto de dentro de um
+        scriptblock .GetNewClosure()) por causa do mesmo problema de escopo
+        ja mapeado nesta ferramenta: um scriptblock .GetNewClosure() so
+        enxerga um "retrato" de $script: tirado no momento em que foi
+        criado - se o handler de selecao da grade fosse criado ANTES da
+        planilha terminar de carregar (que e exatamente o caso aqui, ela
+        carrega dentro do evento Shown, DEPOIS que os handlers de clique ja
+        foram todos criados), ele nunca veria os dados carregados depois.
+        Uma FUNCAO chamada de dentro do closure nao tem esse problema -
+        sempre le o $script: real, na hora da chamada.
+    #>
+    param([string]$NomeGrupo)
+    if (-not $NomeGrupo) { return $null }
+    return $script:TabelaGruposSistemas[$NomeGrupo.ToUpper()]
 }
 
 function Resolve-RedeDaZona {
@@ -2892,6 +2977,8 @@ function Update-LabelSedeInfo {
     } else {
         $lblSedeInfo.ForeColor = [System.Drawing.Color]::FromArgb(0, 90, 158)
     }
+
+    $btnUsuariosZona.Text = "Usuarios da ZE $zona"
 }
 
 function Atualizar-MaximoZona {
@@ -4456,6 +4543,27 @@ $timer.Add_Tick({
 # ============================================================
 # CONSULTA AD: maquinas liberadas para o usuario "instalador"
 # ============================================================
+function Get-RaizBuscaAd {
+    <#
+        Amarra a raiz de busca do AD explicitamente na RAIZ DO DOMINIO
+        (LDAP://DC=tre-ma,DC=gov,DC=br) em vez de deixar o
+        DirectoryEntry() vazio decidir sozinho onde "comeca" a busca -
+        confirmado na pratica que o bind vazio pode nao alcancar certas
+        OUs (ex: OU=ZONAS_CAPITAL, usada pelos usuarios das zonas de Sao
+        Luis, estrutura diferente do resto do interior), causando "Falha
+        ao consultar o AD" so pra esses usuarios especificos. Cai pro
+        bind vazio (comportamento antigo) se nao conseguir detectar o
+        dominio atual por algum motivo.
+    #>
+    try {
+        $dominioAtual = [System.DirectoryServices.ActiveDirectory.Domain]::GetCurrentDomain()
+        $dnDominio = "DC=" + ($dominioAtual.Name -split '\.' -join ',DC=')
+        return New-Object System.DirectoryServices.DirectoryEntry("LDAP://$dnDominio")
+    } catch {
+        return New-Object System.DirectoryServices.DirectoryEntry
+    }
+}
+
 function Get-MaquinasLiberadasInstalador {
     <#
         Consulta o atributo LDAP userWorkstations do usuario
@@ -4468,8 +4576,9 @@ function Get-MaquinasLiberadasInstalador {
         pra todo mundo, ja que nao da pra saber o status real.
     #>
     try {
-        $raizBusca = New-Object System.DirectoryServices.DirectoryEntry
+        $raizBusca = Get-RaizBuscaAd
         $busca = New-Object System.DirectoryServices.DirectorySearcher($raizBusca)
+        $busca.ReferralChasing = [System.DirectoryServices.ReferralChasingOption]::None
         $busca.Filter = "(&(objectClass=user)(objectCategory=person)(samAccountName=$script:NomeUsuarioInstalador))"
         [void]$busca.PropertiesToLoad.Add("userWorkstations")
         $resultado = $busca.FindOne()
@@ -4486,6 +4595,273 @@ function Get-MaquinasLiberadasInstalador {
         Add-Log "[AVISO] Falha ao consultar AD para status do instalador: $_" "OrangeRed"
         return $null
     }
+}
+
+# ============================================================
+# JANELA: Usuarios da ZE (lista de usuarios do AD lotados numa zona,
+# com os grupos de cada um)
+# ============================================================
+function ConvertTo-InfoObjetoAd {
+    <#
+        Quebra um DN de objeto do AD (ex: "CN=GEDAI2K1GAdmin,OU=Grupos,
+        OU=TRIBUNAL,DC=tre-ma,DC=gov,DC=br") em Nome (primeiro CN/OU, o
+        proprio objeto) e Caminho (dominio + containers, na mesma ordem
+        "de cima pra baixo" que a tela nativa de propriedades do AD
+        mostra em "Pastas de Active Directory Domain..." - ex:
+        "tre-ma.gov.br/TRIBUNAL/Grupos"). Nao trata CN com virgula
+        escapada (raro nos nomes de grupo/usuario deste dominio).
+    #>
+    param([string]$Dn)
+    if (-not $Dn) { return $null }
+    $partes = $Dn -split ','
+    if ($partes.Count -eq 0) { return $null }
+    $nome = $partes[0] -replace '^(CN|OU)=', ''
+    $dcs = @()
+    $containers = @()
+    for ($i = 1; $i -lt $partes.Count; $i++) {
+        $p = $partes[$i].Trim()
+        if ($p -match '^DC=(.+)$') { $dcs += $Matches[1] }
+        elseif ($p -match '^(CN|OU)=(.+)$') { $containers += $Matches[2] }
+    }
+    [array]::Reverse($containers)
+    $caminho = $dcs -join '.'
+    if ($containers.Count -gt 0) { $caminho += "/" + ($containers -join '/') }
+    return [PSCustomObject]@{ Nome = $nome; Caminho = $caminho }
+}
+
+function Get-UsuariosDaZona {
+    <#
+        Busca no AD os usuarios lotados numa zona eleitoral - o cadastro
+        NAO e padronizado (as vezes fica no atributo "Escritorio"
+        (physicalDeliveryOfficeName), as vezes em "Departamento"
+        (department), confirmado na pratica olhando varios usuarios), e
+        quando esta em Departamento segue o padrao "ZE-<zona> - <zona>a
+        ZONA ELEITORAL - <SEDE>". Por isso a busca cobre as duas
+        possibilidades por OR. Retorna array de PSCustomObject (Nome,
+        Login, Descricao, Lotacao, Email, Telefone, ContaDesabilitada,
+        ContaBloqueada, Grupos). NAO trata falha internamente - se a
+        consulta ao AD der erro, a excecao propaga pra quem chamou
+        (Show-JanelaUsuariosZona mostra a mensagem completa na janela).
+    #>
+    param([int]$Zona)
+
+    $busca = $null
+    $resultados = $null
+    try {
+        $raizBusca = Get-RaizBuscaAd
+        $busca = New-Object System.DirectoryServices.DirectorySearcher($raizBusca)
+        $busca.ReferralChasing = [System.DirectoryServices.ReferralChasingOption]::None
+        $busca.PageSize = 1000
+        # O AD usa a zona SEMPRE com 2 digitos no minimo (ex: zona 1 vira
+        # "ZE-01", confirmado na pratica - "ZE-1" sozinho nao existe) - zonas
+        # de 2+ digitos (10, 72, 105...) ja tem naturalmente 2+ digitos,
+        # entao a formatacao nao muda nada pra elas. Ainda assim inclui a
+        # forma SEM padding tambem no OR, por seguranca contra cadastro
+        # manual inconsistente (o proprio motivo de ter essa tela).
+        $zonaPad = "{0:D2}" -f $Zona
+        $busca.Filter = "(&(objectClass=user)(objectCategory=person)(|(physicalDeliveryOfficeName=ZE-$Zona)(physicalDeliveryOfficeName=ZE-$zonaPad)(department=ZE-$Zona)(department=ZE-$Zona *)(department=ZE-$zonaPad)(department=ZE-$zonaPad *)))"
+        foreach ($p in @("samAccountName", "displayName", "description", "department", "physicalDeliveryOfficeName", "mail", "telephoneNumber", "userAccountControl", "lockoutTime", "memberOf")) {
+            [void]$busca.PropertiesToLoad.Add($p)
+        }
+        $resultados = $busca.FindAll()
+
+        $usuarios = New-Object System.Collections.Generic.List[object]
+        foreach ($r in $resultados) {
+            $props = $r.Properties
+            $uac = if ($props["useraccountcontrol"].Count -gt 0) { [int]$props["useraccountcontrol"][0] } else { 0 }
+            # "Bloqueado" (lockout por tentativas de senha erradas) e um
+            # status DIFERENTE de "Desabilitado" (uac bit ACCOUNTDISABLE) -
+            # nao tem bit proprio no userAccountControl, fica no atributo
+            # lockoutTime: 0 (ou ausente) = nunca bloqueado/desbloqueado,
+            # qualquer valor diferente de 0 = bloqueado desde aquele
+            # instante (FILETIME do Windows).
+            $lockoutTime = if ($props["lockouttime"].Count -gt 0) { [long]$props["lockouttime"][0] } else { 0 }
+            $grupos = New-Object System.Collections.Generic.List[object]
+            foreach ($g in $props["memberof"]) {
+                $info = ConvertTo-InfoObjetoAd -Dn $g
+                if ($info) { $grupos.Add($info) }
+            }
+            $usuarios.Add([PSCustomObject]@{
+                Nome              = if ($props["displayname"].Count -gt 0) { $props["displayname"][0] } elseif ($props["samaccountname"].Count -gt 0) { $props["samaccountname"][0] } else { "(sem nome)" }
+                Login             = if ($props["samaccountname"].Count -gt 0) { $props["samaccountname"][0] } else { "" }
+                Descricao         = if ($props["description"].Count -gt 0) { $props["description"][0] } else { "" }
+                Lotacao           = if ($props["department"].Count -gt 0) { $props["department"][0] } elseif ($props["physicaldeliveryofficename"].Count -gt 0) { $props["physicaldeliveryofficename"][0] } else { "" }
+                Email             = if ($props["mail"].Count -gt 0) { $props["mail"][0] } else { "" }
+                Telefone          = if ($props["telephonenumber"].Count -gt 0) { $props["telephonenumber"][0] } else { "" }
+                ContaDesabilitada = (($uac -band 2) -ne 0)
+                ContaBloqueada    = ($lockoutTime -ne 0)
+                Grupos            = ($grupos | Sort-Object Nome)
+            })
+        }
+        return ($usuarios | Sort-Object Nome)
+    } finally {
+        # SEM catch aqui de proposito - deixa a excecao propagar pra quem
+        # chamou tratar (Show-JanelaUsuariosZona mostra o erro completo
+        # direto na janela, mais confiavel do que so logar e a pessoa ter
+        # que catar a linha certa no log da janela principal).
+        if ($resultados) { $resultados.Dispose() }
+        if ($busca) { $busca.Dispose() }
+    }
+}
+
+function Show-JanelaUsuariosZona {
+    param([int]$Zona)
+
+    $dlg = New-Object System.Windows.Forms.Form
+    $dlg.Text = "Usuarios da ZE $Zona"
+    $dlg.Size = New-Object System.Drawing.Size(1400, 600)
+    $dlg.StartPosition = "CenterParent"
+    $dlg.FormBorderStyle = "FixedDialog"
+    $dlg.MaximizeBox = $false
+    $dlg.MinimizeBox = $false
+    $dlg.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+
+    $lblStatusUsuarios = New-Object System.Windows.Forms.Label
+    $lblStatusUsuarios.Text = "Consultando AD..."
+    $lblStatusUsuarios.Location = New-Object System.Drawing.Point(12, 12)
+    $lblStatusUsuarios.Size = New-Object System.Drawing.Size(1370, 36)
+    $lblStatusUsuarios.AutoSize = $false
+    $lblStatusUsuarios.ForeColor = [System.Drawing.Color]::Gray
+    $dlg.Controls.Add($lblStatusUsuarios)
+
+    $lblGrupos = New-Object System.Windows.Forms.Label
+    $lblGrupos.Text = "Acessos a Sistemas Eleitorais (grupos mapeados na planilha):"
+    $lblGrupos.Location = New-Object System.Drawing.Point(1007, 52)
+    $lblGrupos.AutoSize = $true
+    $dlg.Controls.Add($lblGrupos)
+
+    $gridUsuarios = New-Object System.Windows.Forms.DataGridView
+    # Location/Size/Anchor (NAO Dock=Fill) de proposito - confirmado em
+    # outra janela desta ferramenta (Sistemas Eleitorais) que Dock=Fill
+    # pode deixar o cabecalho de coluna sumido/em branco nesse ambiente.
+    $gridUsuarios.Location = New-Object System.Drawing.Point(12, 52)
+    $gridUsuarios.Size = New-Object System.Drawing.Size(980, 400)
+    $gridUsuarios.Anchor = "Top,Bottom,Left"
+    $gridUsuarios.AllowUserToAddRows = $false
+    $gridUsuarios.AllowUserToDeleteRows = $false
+    $gridUsuarios.ReadOnly = $true
+    $gridUsuarios.RowHeadersVisible = $false
+    $gridUsuarios.SelectionMode = [System.Windows.Forms.DataGridViewSelectionMode]::FullRowSelect
+    $gridUsuarios.MultiSelect = $false
+    $gridUsuarios.AutoSizeColumnsMode = [System.Windows.Forms.DataGridViewAutoSizeColumnsMode]::None
+    $dlg.Controls.Add($gridUsuarios)
+
+    function Add-ColunaGridUsuarios {
+        param($Nome, $Titulo, $Largura)
+        $c = New-Object System.Windows.Forms.DataGridViewTextBoxColumn
+        $c.Name = $Nome; $c.HeaderText = $Titulo; $c.Width = $Largura
+        [void]$gridUsuarios.Columns.Add($c)
+    }
+    Add-ColunaGridUsuarios "Nome" "Nome" 180
+    Add-ColunaGridUsuarios "Login" "Login" 95
+    Add-ColunaGridUsuarios "Descricao" "Descricao/Cargo" 210
+    Add-ColunaGridUsuarios "Lotacao" "Lotacao (AD)" 250
+    Add-ColunaGridUsuarios "Email" "Email" 220
+
+    $gridGrupos = New-Object System.Windows.Forms.DataGridView
+    $gridGrupos.Location = New-Object System.Drawing.Point(1007, 72)
+    $gridGrupos.Size = New-Object System.Drawing.Size(375, 380)
+    $gridGrupos.Anchor = "Top,Bottom,Right"
+    $gridGrupos.AllowUserToAddRows = $false
+    $gridGrupos.AllowUserToDeleteRows = $false
+    $gridGrupos.ReadOnly = $true
+    $gridGrupos.RowHeadersVisible = $false
+    $gridGrupos.SelectionMode = [System.Windows.Forms.DataGridViewSelectionMode]::FullRowSelect
+    $gridGrupos.MultiSelect = $false
+    $gridGrupos.AutoSizeColumnsMode = [System.Windows.Forms.DataGridViewAutoSizeColumnsMode]::None
+    $dlg.Controls.Add($gridGrupos)
+
+    function Add-ColunaGridGrupos {
+        param($Nome, $Titulo, $Largura)
+        $c = New-Object System.Windows.Forms.DataGridViewTextBoxColumn
+        $c.Name = $Nome; $c.HeaderText = $Titulo; $c.Width = $Largura
+        [void]$gridGrupos.Columns.Add($c)
+    }
+    Add-ColunaGridGrupos "Nome" "Grupo" 155
+    Add-ColunaGridGrupos "Sistema" "Sistema" 115
+    Add-ColunaGridGrupos "Perfil" "Perfil" 95
+
+    $painelLegendaUsuarios = New-Object System.Windows.Forms.FlowLayoutPanel
+    $painelLegendaUsuarios.Location = New-Object System.Drawing.Point(12, 460)
+    $painelLegendaUsuarios.Size = New-Object System.Drawing.Size(660, 26)
+    $painelLegendaUsuarios.Anchor = "Bottom,Left"
+    $dlg.Controls.Add($painelLegendaUsuarios)
+    function Add-ItemLegendaUsuarios {
+        param($Painel, $Texto, $Cor)
+        $lblItem = New-Object System.Windows.Forms.Label
+        $lblItem.Text = "● $Texto"
+        $lblItem.ForeColor = $Cor
+        $lblItem.AutoSize = $true
+        $lblItem.Margin = New-Object System.Windows.Forms.Padding(0, 4, 20, 0)
+        [void]$Painel.Controls.Add($lblItem)
+    }
+    Add-ItemLegendaUsuarios $painelLegendaUsuarios "Desabilitada" ([System.Drawing.Color]::FromArgb(150, 150, 150))
+    Add-ItemLegendaUsuarios $painelLegendaUsuarios "Bloqueada" ([System.Drawing.Color]::FromArgb(220, 53, 69))
+
+    $btnFecharUsuarios = New-Object System.Windows.Forms.Button
+    $btnFecharUsuarios.Text = "Fechar"
+    $btnFecharUsuarios.Location = New-Object System.Drawing.Point(1297, 498)
+    $btnFecharUsuarios.Width = 90
+    $btnFecharUsuarios.Height = 28
+    $btnFecharUsuarios.Anchor = "Bottom,Right"
+    $dlg.Controls.Add($btnFecharUsuarios)
+    $btnFecharUsuarios.Add_Click({ $dlg.Close() }.GetNewClosure())
+
+    $gridUsuarios.Add_SelectionChanged({
+        $gridGrupos.Rows.Clear()
+        if ($gridUsuarios.SelectedRows.Count -eq 0) { return }
+        $usuario = $gridUsuarios.SelectedRows[0].Tag
+        if (-not $usuario) { return }
+        foreach ($grupo in $usuario.Grupos) {
+            $mapeamento = Get-InfoGrupoSistema -NomeGrupo $grupo.Nome
+            if (-not $mapeamento) { continue }
+            $idxGrupo = $gridGrupos.Rows.Add(@($grupo.Nome, $mapeamento.Sistema, $mapeamento.Perfil))
+            $gridGrupos.Rows[$idxGrupo].Cells["Nome"].ToolTipText = $grupo.Caminho
+        }
+    }.GetNewClosure())
+
+    $dlg.Add_Shown({
+        [System.Windows.Forms.Application]::DoEvents()
+        Import-TabelaGruposSistemas | Out-Null
+        $usuarios = $null
+        try {
+            $usuarios = Get-UsuariosDaZona -Zona $Zona
+        } catch {
+            # Mostra a mensagem de erro completa DIRETO na janela (mais
+            # confiavel do que so mandar pro log da janela principal e a
+            # pessoa ter que catar a linha certa la).
+            $lblStatusUsuarios.Text = "Falha ao consultar o AD: $($_.Exception.Message)"
+            $lblStatusUsuarios.ForeColor = [System.Drawing.Color]::Firebrick
+            Add-Log "[ERRO] Falha ao consultar usuarios da zona $Zona no AD: $_" "OrangeRed"
+            return
+        }
+        if ($usuarios.Count -eq 0) {
+            $lblStatusUsuarios.Text = "Nenhum usuario encontrado no AD para a ZE $Zona (campo Departamento/Escritorio pode estar vazio ou fora do padrao)."
+            $lblStatusUsuarios.ForeColor = [System.Drawing.Color]::OrangeRed
+            return
+        }
+        $lblStatusUsuarios.Text = "$($usuarios.Count) usuario(s) encontrado(s) para a ZE ${Zona}:"
+        $lblStatusUsuarios.ForeColor = [System.Drawing.Color]::Gray
+        foreach ($usuario in $usuarios) {
+            $idx = $gridUsuarios.Rows.Add(@($usuario.Nome, $usuario.Login, $usuario.Descricao, $usuario.Lotacao, $usuario.Email))
+            $row = $gridUsuarios.Rows[$idx]
+            $row.Tag = $usuario
+            $situacoes = @()
+            if ($usuario.ContaDesabilitada) { $situacoes += "desabilitada" }
+            if ($usuario.ContaBloqueada) { $situacoes += "bloqueada" }
+            if ($usuario.ContaDesabilitada) {
+                $row.DefaultCellStyle.ForeColor = [System.Drawing.Color]::FromArgb(150, 150, 150)
+            } elseif ($usuario.ContaBloqueada) {
+                $row.DefaultCellStyle.ForeColor = [System.Drawing.Color]::FromArgb(220, 53, 69)
+                $row.DefaultCellStyle.Font = New-Object System.Drawing.Font($gridUsuarios.Font, [System.Drawing.FontStyle]::Bold)
+            }
+            if ($situacoes.Count -gt 0) {
+                $row.Cells["Nome"].ToolTipText = "Conta " + ($situacoes -join " e ") + " no AD"
+            }
+        }
+    }.GetNewClosure())
+
+    [void]$dlg.ShowDialog($form)
 }
 
 # ============================================================
