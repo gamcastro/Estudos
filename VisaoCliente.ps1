@@ -23,7 +23,7 @@ Import-Module (Join-Path $PSScriptRoot "VisaoRemoting.psm1") -Force
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "Visao - Teste de Conexao Remota (Fase 0)"
-$form.Size = New-Object System.Drawing.Size(560, 420)
+$form.Size = New-Object System.Drawing.Size(560, 460)
 $form.StartPosition = "CenterScreen"
 $form.Font = New-Object System.Drawing.Font("Segoe UI", 9)
 
@@ -51,9 +51,17 @@ $btnDerrubarSessao.Height = 28
 $btnDerrubarSessao.Enabled = $false
 $form.Controls.Add($btnDerrubarSessao)
 
+$btnTestarFase1 = New-Object System.Windows.Forms.Button
+$btnTestarFase1.Text = "Testar Fase 1 (Zonas/Grupos/Campanhas/Resultados)"
+$btnTestarFase1.Location = New-Object System.Drawing.Point(15, 85)
+$btnTestarFase1.Width = 480
+$btnTestarFase1.Height = 28
+$btnTestarFase1.Enabled = $false
+$form.Controls.Add($btnTestarFase1)
+
 $txtLog = New-Object System.Windows.Forms.TextBox
-$txtLog.Location = New-Object System.Drawing.Point(15, 90)
-$txtLog.Size = New-Object System.Drawing.Size(520, 280)
+$txtLog.Location = New-Object System.Drawing.Point(15, 125)
+$txtLog.Size = New-Object System.Drawing.Size(520, 245)
 $txtLog.Multiline = $true
 $txtLog.ScrollBars = "Vertical"
 $txtLog.ReadOnly = $true
@@ -80,6 +88,27 @@ $btnDerrubarSessao.Add_Click({
     Add-LinhaLog "Sessao derrubada. Clique em 'Chamar Get-TesteConexaoServidor' de novo - deve reconectar sozinho."
 }.GetNewClosure())
 
+$btnTestarFase1.Add_Click({
+    try {
+        $z = Get-ZonasRemoto
+        Add-LinhaLog "Zonas: Ok=$($z.Ok) Origem=$($z.Origem) Contagem=$($z.Contagem)"
+
+        $g = Get-GruposSistemasRemoto
+        Add-LinhaLog "Grupos-Sistemas: Ok=$($g.Ok) Origem=$($g.Origem) Contagem=$($g.Contagem)"
+
+        $c = Get-CampanhasRemoto
+        Add-LinhaLog "Campanhas: Ok=$($c.Ok) Origem=$($c.Origem) Contagem=$($c.Contagem)"
+
+        $rc = Get-ResultadosCampanhasRemoto
+        Add-LinhaLog "Resultados-Campanhas: Ok=$($rc.Ok) Contagem=$($rc.Contagem)"
+        foreach ($linha in $rc.Dados) {
+            Add-LinhaLog "  Zona $($linha.Zona) ($($linha.Sede)): $($linha.Aptas)/$($linha.Total) aptas - $($linha.Campanha)"
+        }
+    } catch {
+        Add-LinhaLog "ERRO: $($_.Exception.Message)"
+    }
+}.GetNewClosure())
+
 $form.Add_Shown({
     if (Connect-ServidorVisao) {
         $lblStatusConexao.Text = "Conectado ao POLICY-SERVER."
@@ -92,6 +121,7 @@ $form.Add_Shown({
     }
     $btnTestarChamada.Enabled = $true
     $btnDerrubarSessao.Enabled = $true
+    $btnTestarFase1.Enabled = $true
 }.GetNewClosure())
 
 $form.Add_FormClosed({ Disconnect-ServidorVisao }.GetNewClosure())

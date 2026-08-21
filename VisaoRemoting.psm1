@@ -107,4 +107,37 @@ function Invoke-ComandoRemoto {
     }
 }
 
-Export-ModuleMember -Function Connect-ServidorVisao, Disconnect-ServidorVisao, Invoke-ComandoRemoto
+# ============================================================
+# FASE 1: leituras de planilha Google (request/resposta simples, sem
+# polling) - cada uma so encaminha pra funcao equivalente do
+# VisaoServidor.ps1 via Invoke-ComandoRemoto.
+# ============================================================
+function Get-ZonasRemoto {
+    param([switch]$ForcarCache)
+    Invoke-ComandoRemoto -ScriptBlock { param($f) Import-TabelaZonas -ForcarCache:$f } -ArgumentList @($ForcarCache.IsPresent)
+}
+
+function Get-GruposSistemasRemoto {
+    param([switch]$ForcarCache)
+    Invoke-ComandoRemoto -ScriptBlock { param($f) Import-TabelaGruposSistemas -ForcarCache:$f } -ArgumentList @($ForcarCache.IsPresent)
+}
+
+function Get-CampanhasRemoto {
+    param([switch]$ForcarCache)
+    Invoke-ComandoRemoto -ScriptBlock { param($f) Import-TabelaCampanhas -ForcarCache:$f } -ArgumentList @($ForcarCache.IsPresent)
+}
+
+function Get-ResultadosCampanhasRemoto {
+    <#
+        Get-ResultadosCampanhas do lado servidor devolve uma STRING JSON,
+        nao um objeto direto - ver o comentario extenso dela em
+        VisaoServidor.ps1 (bug confirmado de PS Remoting nesse servidor
+        especifico com array de PSCustomObject cruzando a fronteira).
+        Aqui e so desserializar de volta pro objeto que o resto do
+        cliente espera.
+    #>
+    $json = Invoke-ComandoRemoto -ScriptBlock { Get-ResultadosCampanhas }
+    return ($json | ConvertFrom-Json)
+}
+
+Export-ModuleMember -Function Connect-ServidorVisao, Disconnect-ServidorVisao, Invoke-ComandoRemoto, Get-ZonasRemoto, Get-GruposSistemasRemoto, Get-CampanhasRemoto, Get-ResultadosCampanhasRemoto
