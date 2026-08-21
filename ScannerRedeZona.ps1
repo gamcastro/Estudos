@@ -246,6 +246,23 @@ $script:UrlPlanilhaGruposSistemasCSV = "https://docs.google.com/spreadsheets/d/1
 $script:ArquivoGruposSistemasCache   = Join-Path $PSScriptRoot "grupos_sistemas_cache.csv"
 $script:TabelaGruposSistemas         = @{}   # "GRUPO" (maiusculo) -> PSCustomObject { Sistema; Perfil }
 
+# --- Aba SEPARADA "CAMPANHAS" da MESMA planilha de Zonas - requisitos
+# minimos de versao de sistemas eleitorais por campanha (ex: campanha
+# "Simulado TDTOT 4" exige SIS >= 3.43, ExecJava >= 1.16 etc), usada pelo
+# menu de contexto "Verificar Campanha" nas linhas com SIS instalado.
+# Busca pelo NOME da aba (nao gid) - funciona assim que a aba for criada
+# na planilha, com esse nome exato, sem precisar configurar gid nenhum
+# (diferente da aba GRUPOS-SISTEMAS-ELEITORAIS acima, que ja existia
+# quando essa consulta foi implementada e por isso usa o gid direto).
+# Colunas esperadas: Campanha | Sistema | VersaoMinima - uma linha por
+# requisito, varias linhas com a mesma Campanha formam os requisitos
+# dela. "Sistema" aceita "SIS" ou o nome/titulo de qualquer sistema
+# eleitoral extra ja cadastrado em $script:SistemasEleitoraisExtra (ex:
+# "ExecJava", "Certificado P12", "Transportador TDTOT").
+$script:UrlPlanilhaCampanhasCSV = "https://docs.google.com/spreadsheets/d/1_2aZhFgplRqCdPVV_lq4XJT9wgqkfbZpEFZRu1Zu9_I/gviz/tq?tqx=out:csv&sheet=CAMPANHAS"
+$script:ArquivoCampanhasCache   = Join-Path $PSScriptRoot "campanhas_cache.csv"
+$script:TabelaCampanhas         = New-Object System.Collections.Generic.List[object]   # lista de { Nome; Requisitos = lista de { Sistema; VersaoMinima } }
+
 # --- Planilha SEPARADA de Sistemas Eleitorais (Sistema, Versao,
 # NomeAmigavel, LinkDrive, PastaDestino, Atual) - FONTE UNICA pra dois
 # recursos: (1) mapeia a versao "crua" que o OCS Inventory reporta no
@@ -536,9 +553,24 @@ $btnUsuariosZona.Width = 150
 $btnUsuariosZona.Height = 24
 $form.Controls.Add($btnUsuariosZona)
 
-$numZona.Add_ValueChanged({ Update-LabelSedeInfo })
+$btnVerificarCampanhaZona = New-Object System.Windows.Forms.Button
+$btnVerificarCampanhaZona.Text = "Verificar Campanha ZE 1"
+$btnVerificarCampanhaZona.Location = New-Object System.Drawing.Point(870, 43)
+$btnVerificarCampanhaZona.Width = 190
+$btnVerificarCampanhaZona.Height = 24
+$btnVerificarCampanhaZona.Enabled = $false
+$form.Controls.Add($btnVerificarCampanhaZona)
+
+$numZona.Add_ValueChanged({
+    Update-LabelSedeInfo
+    # Trocou o numero da zona - os resultados na grade (se houver) sao
+    # de OUTRA zona, entao "Verificar Campanha" desabilita ate rodar uma
+    # varredura nova pra esta zona (senao mostraria dado da zona errada).
+    $btnVerificarCampanhaZona.Enabled = $false
+})
 $btnGerenciarZonas.Add_Click({ Show-GerenciarZonas })
 $btnUsuariosZona.Add_Click({ Show-JanelaUsuariosZona -Zona ([int]$numZona.Value) })
+$btnVerificarCampanhaZona.Add_Click({ Show-JanelaVerificarCampanhaZona })
 
 $progressBar = New-Object System.Windows.Forms.ProgressBar
 $progressBar.Location = New-Object System.Drawing.Point(15, 76)
@@ -799,6 +831,105 @@ function Get-InfoGrupoSistema {
     param([string]$NomeGrupo)
     if (-not $NomeGrupo) { return $null }
     return $script:TabelaGruposSistemas[$NomeGrupo.ToUpper()]
+}
+
+function Import-TabelaCampanhas {
+    <#
+        Carrega a aba "CAMPANHAS" (mesma planilha de Zonas, buscada pelo
+        NOME da aba - ver $script:UrlPlanilhaCampanhasCSV) com os
+        requisitos minimos de versao por campanha. Agrupa as linhas por
+        Campanha (preservando a ordem em que apareceram na planilha) -
+        cada campanha vira um item de $script:TabelaCampanhas com sua
+        lista de requisitos. Mesmo esquema de cache local das outras
+        planilhas.
+    #>
+    param([switch]$ForcarCache)
+
+    $script:TabelaCampanhas = New-Object System.Collections.Generic.List[object]
+    $linhas = $null
+
+    if (-not $ForcarCache) {
+        try {
+            $resp = Invoke-WebRequest -Uri $script:UrlPlanilhaCampanhasCSV -TimeoutSec 8 -UseBasicParsing
+            $bytesResposta = $resp.RawContentStream.ToArray()
+            $textoUtf8 = [System.Text.Encoding]::UTF8.GetString($bytesResposta)
+            $linhas = $textoUtf8 | ConvertFrom-Csv
+            if ($linhas -and $linhas.Count -gt 0) {
+                $linhas | Export-Csv -Path $script:ArquivoCampanhasCache -NoTypeInformation -Encoding UTF8
+            }
+        } catch {
+            Add-Log "[AVISO] Nao foi possivel buscar a planilha de campanhas online: $($_.Exception.Message)" "Yellow"
+            $linhas = $null
+        }
+    }
+
+    if (-not $linhas -and (Test-Path $script:ArquivoCampanhasCache)) {
+        Add-Log "Usando cache local de campanhas (ultima planilha baixada com sucesso)." "Yellow"
+        $linhas = Import-Csv -Path $script:ArquivoCampanhasCache
+    }
+
+    if (-not $linhas) { return $false }
+
+    $indice = @{}
+    foreach ($l in $linhas) {
+        $nomeCampanha = if ($l.Campanha) { $l.Campanha.Trim() } else { $null }
+        $sistema = if ($l.Sistema) { $l.Sistema.Trim() } else { $null }
+        $versaoMinima = if ($l.VersaoMinima) { $l.VersaoMinima.Trim() } else { $null }
+        if (-not $nomeCampanha -or -not $sistema -or -not $versaoMinima) { continue }
+
+        $chave = $nomeCampanha.ToUpper()
+        if (-not $indice.ContainsKey($chave)) {
+            $campanha = [PSCustomObject]@{ Nome = $nomeCampanha; Requisitos = New-Object System.Collections.Generic.List[object] }
+            $indice[$chave] = $campanha
+            $script:TabelaCampanhas.Add($campanha)
+        }
+        $indice[$chave].Requisitos.Add([PSCustomObject]@{ Sistema = $sistema; VersaoMinima = $versaoMinima })
+    }
+    return $true
+}
+
+function Compare-VersaoSistema {
+    <#
+        Compara duas versoes no formato N.N.N (numeros separados por
+        ponto) segmento por segmento, NUMERICAMENTE - "1.9" e menor que
+        "1.10", mesmo sendo maior como texto puro. Devolve -1 (A < B),
+        0 (iguais) ou 1 (A > B); $null se algum segmento nao for um
+        numero (formato de versao inesperado, nao da pra comparar).
+    #>
+    param([string]$VersaoA, [string]$VersaoB)
+    if (-not $VersaoA -or -not $VersaoB) { return $null }
+    $a = $VersaoA.Trim() -split '\.'
+    $b = $VersaoB.Trim() -split '\.'
+    $max = [Math]::Max($a.Count, $b.Count)
+    for ($i = 0; $i -lt $max; $i++) {
+        $na = 0; $nb = 0
+        $okA = if ($i -lt $a.Count) { [int]::TryParse($a[$i], [ref]$na) } else { $true }
+        $okB = if ($i -lt $b.Count) { [int]::TryParse($b[$i], [ref]$nb) } else { $true }
+        if (-not $okA -or -not $okB) { return $null }
+        if ($na -ne $nb) { return [Math]::Sign($na - $nb) }
+    }
+    return 0
+}
+
+function Get-VersaoInstaladaPorNomeSistema {
+    <#
+        Acha a versao instalada (num $Resultado ja escaneado) do sistema
+        cujo nome bate com $NomeSistema - aceita "SIS" (caso especial,
+        propriedade VersaoSis) ou o Titulo/NomeVersaoAtual/Chave de
+        qualquer entrada de $script:SistemasEleitoraisExtra (comparacao
+        sem diferenciar maiusculas), pra aceitar tanto "ExecJava" quanto
+        "EXECJAVA" cadastrado na planilha de Campanhas. Devolve $null se
+        o nome do sistema nao for reconhecido.
+    #>
+    param($Resultado, [string]$NomeSistema)
+    if (-not $NomeSistema) { return $null }
+    $nomeUpper = $NomeSistema.Trim().ToUpper()
+    if ($nomeUpper -eq "SIS") { return $Resultado.VersaoSis }
+    $item = $script:SistemasEleitoraisExtra | Where-Object {
+        $_.NomeVersaoAtual.ToUpper() -eq $nomeUpper -or $_.Titulo.ToUpper() -eq $nomeUpper -or $_.Chave.ToUpper() -eq $nomeUpper
+    } | Select-Object -First 1
+    if (-not $item) { return $null }
+    return $Resultado.($item.Propriedade)
 }
 
 function Resolve-RedeDaZona {
@@ -2980,6 +3111,7 @@ function Update-LabelSedeInfo {
     }
 
     $btnUsuariosZona.Text = "Usuarios da ZE $zona"
+    $btnVerificarCampanhaZona.Text = "Verificar Campanha ZE $zona"
 }
 
 function Atualizar-MaximoZona {
@@ -3272,6 +3404,297 @@ function Invoke-AcaoAtualizarHost {
     }
     Reconstruir-Grid
     Add-Log "Status de '$($Resultado.Hostname)' ($($Resultado.IP)) atualizado." "Green"
+}
+
+function Show-JanelaVerificarCampanha {
+    <#
+        Confere se a maquina ja escaneada em $Resultado atende aos
+        requisitos minimos de versao da campanha $Campanha (vindos da
+        aba "CAMPANHAS" da planilha - ver Import-TabelaCampanhas). Nao
+        depende de rede nem AD - toda a informacao ja esta em memoria (o
+        que foi coletado na varredura + a planilha ja carregada), entao
+        preenche a grade direto, sem evento Shown/DoEvents.
+    #>
+    param($Resultado, $Campanha)
+
+    $dlg = New-Object System.Windows.Forms.Form
+    $dlg.Text = "Verificar Campanha - $($Resultado.Hostname) ($($Resultado.IP))"
+    $dlg.Size = New-Object System.Drawing.Size(650, 430)
+    $dlg.StartPosition = "CenterParent"
+    $dlg.FormBorderStyle = "FixedDialog"
+    $dlg.MaximizeBox = $false
+    $dlg.MinimizeBox = $false
+    $dlg.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+
+    $lblCampanha = New-Object System.Windows.Forms.Label
+    $lblCampanha.Text = "Campanha: $($Campanha.Nome)"
+    $lblCampanha.Location = New-Object System.Drawing.Point(15, 15)
+    $lblCampanha.AutoSize = $true
+    $lblCampanha.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+    $dlg.Controls.Add($lblCampanha)
+
+    $gridReq = New-Object System.Windows.Forms.DataGridView
+    # Location/Size/Anchor (NAO Dock=Fill) de proposito - mesmo motivo ja
+    # confirmado nas outras janelas desta ferramenta (cabecalho some com
+    # Dock=Fill nesse ambiente).
+    $gridReq.Location = New-Object System.Drawing.Point(15, 45)
+    $gridReq.Size = New-Object System.Drawing.Size(605, 270)
+    $gridReq.Anchor = "Top,Bottom,Left,Right"
+    $gridReq.AllowUserToAddRows = $false
+    $gridReq.AllowUserToDeleteRows = $false
+    $gridReq.ReadOnly = $true
+    $gridReq.RowHeadersVisible = $false
+    $gridReq.SelectionMode = [System.Windows.Forms.DataGridViewSelectionMode]::FullRowSelect
+    $gridReq.MultiSelect = $false
+    $gridReq.AutoSizeColumnsMode = [System.Windows.Forms.DataGridViewAutoSizeColumnsMode]::None
+    $dlg.Controls.Add($gridReq)
+
+    function Add-ColunaGridReq {
+        param($Nome, $Titulo, $Largura)
+        $c = New-Object System.Windows.Forms.DataGridViewTextBoxColumn
+        $c.Name = $Nome; $c.HeaderText = $Titulo; $c.Width = $Largura
+        [void]$gridReq.Columns.Add($c)
+    }
+    Add-ColunaGridReq "Sistema" "Sistema" 165
+    Add-ColunaGridReq "Minimo" "Minimo Exigido" 130
+    Add-ColunaGridReq "Instalado" "Instalado" 120
+    Add-ColunaGridReq "Status" "Status" 175
+
+    $lblResumo = New-Object System.Windows.Forms.Label
+    $lblResumo.Location = New-Object System.Drawing.Point(15, 325)
+    $lblResumo.Size = New-Object System.Drawing.Size(605, 40)
+    $lblResumo.Anchor = "Bottom,Left,Right"
+    $lblResumo.Font = New-Object System.Drawing.Font("Segoe UI", 11, [System.Drawing.FontStyle]::Bold)
+    $dlg.Controls.Add($lblResumo)
+
+    $btnFecharCampanha = New-Object System.Windows.Forms.Button
+    $btnFecharCampanha.Text = "Fechar"
+    $btnFecharCampanha.Location = New-Object System.Drawing.Point(535, 355)
+    $btnFecharCampanha.Width = 85
+    $btnFecharCampanha.Height = 28
+    $btnFecharCampanha.Anchor = "Bottom,Right"
+    $dlg.Controls.Add($btnFecharCampanha)
+    $btnFecharCampanha.Add_Click({ $dlg.Close() }.GetNewClosure())
+
+    $atendeTodos = $true
+    foreach ($req in $Campanha.Requisitos) {
+        $instalado = Get-VersaoInstaladaPorNomeSistema -Resultado $Resultado -NomeSistema $req.Sistema
+        $temInstalado = $instalado -and $instalado -ne "-"
+        $instaladoTxt = if ($temInstalado) { $instalado } else { "-" }
+
+        if (-not $temInstalado) {
+            $statusTxt = "Nao instalado"
+            $cor = [System.Drawing.Color]::FromArgb(220, 53, 69)
+            $atendeTodos = $false
+        } else {
+            $cmp = Compare-VersaoSistema -VersaoA $instalado -VersaoB $req.VersaoMinima
+            if ($null -eq $cmp) {
+                $statusTxt = "Versao nao reconhecida"
+                $cor = [System.Drawing.Color]::FromArgb(200, 100, 0)
+                $atendeTodos = $false
+            } elseif ($cmp -ge 0) {
+                $statusTxt = "OK"
+                $cor = [System.Drawing.Color]::FromArgb(0, 128, 0)
+            } else {
+                $statusTxt = "Desatualizado"
+                $cor = [System.Drawing.Color]::FromArgb(220, 53, 69)
+                $atendeTodos = $false
+            }
+        }
+
+        $idxReq = $gridReq.Rows.Add(@($req.Sistema, $req.VersaoMinima, $instaladoTxt, $statusTxt))
+        $rowReq = $gridReq.Rows[$idxReq]
+        $rowReq.Cells["Status"].Style.ForeColor = $cor
+        $rowReq.Cells["Status"].Style.Font = New-Object System.Drawing.Font($gridReq.Font, [System.Drawing.FontStyle]::Bold)
+    }
+
+    if ($atendeTodos) {
+        $lblResumo.Text = "ATENDE aos requisitos da campanha '$($Campanha.Nome)'."
+        $lblResumo.ForeColor = [System.Drawing.Color]::FromArgb(0, 128, 0)
+    } else {
+        $lblResumo.Text = "NAO atende aos requisitos da campanha '$($Campanha.Nome)'."
+        $lblResumo.ForeColor = [System.Drawing.Color]::FromArgb(220, 53, 69)
+    }
+
+    [void]$dlg.ShowDialog($form)
+}
+
+function Update-GridCampanhaZona {
+    <#
+        Preenche $GridZona (grade da janela "Verificar Campanha - Zona")
+        conforme a campanha selecionada em $ComboCampanha, e atualiza o
+        resumo em $LblResumo. Existe como FUNCAO DE NIVEL SUPERIOR (nao
+        aninhada dentro de Show-JanelaVerificarCampanhaZona) recebendo os
+        controles como PARAMETRO, em vez de ler $comboCampanha/$gridZona
+        direto de dentro de um scriptblock .GetNewClosure() - confirmado
+        na pratica (mesmo caso da janela Usuarios da ZE) que uma FUNCAO
+        ANINHADA chamada de dentro de .GetNewClosure() pode nao ser
+        encontrada/nao enxergar o estado certo dependendo de quando o
+        closure foi criado. Funcao de nivel superior + parametros
+        explicitos e o padrao que ja se provou confiavel nesta ferramenta.
+    #>
+    param(
+        [System.Windows.Forms.ComboBox]$ComboCampanha,
+        [System.Windows.Forms.DataGridView]$GridZona,
+        [System.Windows.Forms.Label]$LblResumo
+    )
+    $GridZona.Rows.Clear()
+    if ($ComboCampanha.SelectedIndex -lt 0) { return }
+    $campanha = $script:TabelaCampanhas[$ComboCampanha.SelectedIndex]
+
+    # So maquinas com SIS instalado, dentre as que estao exibidas AGORA
+    # na grade principal (respeita o filtro "so hosts desta zona" que o
+    # usuario ja escolheu, e so as que estao online - nao inclui as
+    # "Possivelmente Desligado" do OCS).
+    $linhasComSis = @($grid.Rows | Where-Object {
+        $rr = $_.Tag
+        $rr -and $rr.VersaoSis -and $rr.VersaoSis -ne "-"
+    })
+
+    $aptas = 0
+    foreach ($linhaGrid in $linhasComSis) {
+        $r = $linhaGrid.Tag
+        $faltando = New-Object System.Collections.Generic.List[string]
+        foreach ($req in $campanha.Requisitos) {
+            $instalado = Get-VersaoInstaladaPorNomeSistema -Resultado $r -NomeSistema $req.Sistema
+            $temInstalado = $instalado -and $instalado -ne "-"
+            if (-not $temInstalado) {
+                $faltando.Add("$($req.Sistema) (nao instalado)")
+                continue
+            }
+            $cmp = Compare-VersaoSistema -VersaoA $instalado -VersaoB $req.VersaoMinima
+            if ($null -eq $cmp -or $cmp -lt 0) {
+                $faltando.Add("$($req.Sistema) ($instalado < $($req.VersaoMinima))")
+            }
+        }
+
+        $apta = $faltando.Count -eq 0
+        if ($apta) { $aptas++ }
+        $statusTxt = if ($apta) { "Apto" } else { "Nao apto" }
+        $modeloTxt = if ($r.Modelo) { $r.Modelo } else { "-" }
+        $idxZona = $GridZona.Rows.Add(@($r.IP, $r.Hostname, $modeloTxt, $statusTxt, ($faltando -join "; ")))
+        $rowZona = $GridZona.Rows[$idxZona]
+        $rowZona.Cells["Status"].Style.Font = New-Object System.Drawing.Font($GridZona.Font, [System.Drawing.FontStyle]::Bold)
+        $rowZona.Cells["Status"].Style.ForeColor = if ($apta) { [System.Drawing.Color]::FromArgb(0, 128, 0) } else { [System.Drawing.Color]::FromArgb(220, 53, 69) }
+    }
+
+    $resolucaoZona = Resolve-RedeDaZona -Zona $script:ZonaAtual
+    $zonaTxt = "{0:D3}" -f $script:ZonaAtual
+    $sedeTxt = if ($resolucaoZona.Sede) { $resolucaoZona.Sede } else { "" }
+    $zonaDescricao = "A zona $zonaTxt $sedeTxt".Trim()
+
+    if ($linhasComSis.Count -eq 0) {
+        $LblResumo.Text = "Nenhuma maquina com SIS encontrada nesta zona (rode a varredura primeiro)."
+        $LblResumo.ForeColor = [System.Drawing.Color]::FromArgb(200, 100, 0)
+    } elseif ($aptas -gt 0) {
+        $LblResumo.Text = "$zonaDescricao TEM $aptas de $($linhasComSis.Count) maquina(s) com SIS pronta(s) para a campanha '$($campanha.Nome)'."
+        $LblResumo.ForeColor = [System.Drawing.Color]::FromArgb(0, 128, 0)
+    } else {
+        $LblResumo.Text = "$zonaDescricao NAO TEM nenhuma maquina pronta (0 de $($linhasComSis.Count) com SIS) para a campanha '$($campanha.Nome)'."
+        $LblResumo.ForeColor = [System.Drawing.Color]::FromArgb(220, 53, 69)
+    }
+}
+
+function Show-JanelaVerificarCampanhaZona {
+    <#
+        Versao "zona inteira" do Verificar Campanha (ver
+        Show-JanelaVerificarCampanha, que confere so 1 maquina de cada
+        vez) - deixa escolher a campanha e mostra, pra TODAS as maquinas
+        com SIS instalado atualmente exibidas na grade principal
+        ($grid, ja filtradas pela zona/checkbox como o usuario esta
+        vendo), quantas estao aptas (atendem TODOS os requisitos) e o
+        que falta em cada uma que nao esta. Nao depende de rede - toda a
+        informacao ja esta em memoria (dados da varredura + planilha de
+        campanhas ja carregada).
+    #>
+    if ($script:TabelaCampanhas.Count -eq 0) {
+        [System.Windows.Forms.MessageBox]::Show("Nenhuma campanha cadastrada ainda (aba CAMPANHAS da planilha).", "Verificar Campanha", "OK", "Information") | Out-Null
+        return
+    }
+
+    $dlg = New-Object System.Windows.Forms.Form
+    $dlg.Text = "Verificar Campanha - Zona $script:ZonaAtual"
+    $dlg.Size = New-Object System.Drawing.Size(900, 560)
+    $dlg.StartPosition = "CenterParent"
+    $dlg.FormBorderStyle = "FixedDialog"
+    $dlg.MaximizeBox = $false
+    $dlg.MinimizeBox = $false
+    $dlg.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+
+    $lblCampanhaSel = New-Object System.Windows.Forms.Label
+    $lblCampanhaSel.Text = "Campanha:"
+    $lblCampanhaSel.Location = New-Object System.Drawing.Point(15, 18)
+    $lblCampanhaSel.AutoSize = $true
+    $dlg.Controls.Add($lblCampanhaSel)
+
+    $comboCampanha = New-Object System.Windows.Forms.ComboBox
+    $comboCampanha.Location = New-Object System.Drawing.Point(90, 15)
+    $comboCampanha.Width = 320
+    $comboCampanha.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
+    foreach ($campanha in $script:TabelaCampanhas) { [void]$comboCampanha.Items.Add($campanha.Nome) }
+    $dlg.Controls.Add($comboCampanha)
+
+    $btnVerificarZonaCampanha = New-Object System.Windows.Forms.Button
+    $btnVerificarZonaCampanha.Text = "Verificar"
+    $btnVerificarZonaCampanha.Location = New-Object System.Drawing.Point(420, 13)
+    $btnVerificarZonaCampanha.Width = 90
+    $btnVerificarZonaCampanha.Height = 26
+    $dlg.Controls.Add($btnVerificarZonaCampanha)
+
+    $lblResumoZona = New-Object System.Windows.Forms.Label
+    $lblResumoZona.Location = New-Object System.Drawing.Point(15, 50)
+    $lblResumoZona.Size = New-Object System.Drawing.Size(855, 24)
+    $lblResumoZona.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+    $dlg.Controls.Add($lblResumoZona)
+
+    $gridZona = New-Object System.Windows.Forms.DataGridView
+    # Location/Size/Anchor (NAO Dock=Fill) de proposito - mesmo motivo ja
+    # confirmado nas outras janelas desta ferramenta.
+    $gridZona.Location = New-Object System.Drawing.Point(15, 80)
+    $gridZona.Size = New-Object System.Drawing.Size(855, 400)
+    $gridZona.Anchor = "Top,Bottom,Left,Right"
+    $gridZona.AllowUserToAddRows = $false
+    $gridZona.AllowUserToDeleteRows = $false
+    $gridZona.ReadOnly = $true
+    $gridZona.RowHeadersVisible = $false
+    $gridZona.SelectionMode = [System.Windows.Forms.DataGridViewSelectionMode]::FullRowSelect
+    $gridZona.MultiSelect = $false
+    $gridZona.AutoSizeColumnsMode = [System.Windows.Forms.DataGridViewAutoSizeColumnsMode]::None
+    $dlg.Controls.Add($gridZona)
+
+    function Add-ColunaGridZonaCampanha {
+        param($Nome, $Titulo, $Largura)
+        $c = New-Object System.Windows.Forms.DataGridViewTextBoxColumn
+        $c.Name = $Nome; $c.HeaderText = $Titulo; $c.Width = $Largura
+        [void]$gridZona.Columns.Add($c)
+    }
+    Add-ColunaGridZonaCampanha "IP" "IP" 110
+    Add-ColunaGridZonaCampanha "Hostname" "Hostname" 220
+    Add-ColunaGridZonaCampanha "Modelo" "Modelo" 130
+    Add-ColunaGridZonaCampanha "Status" "Status" 90
+    Add-ColunaGridZonaCampanha "Faltando" "Requisitos Faltando" 290
+
+    $btnFecharZonaCampanha = New-Object System.Windows.Forms.Button
+    $btnFecharZonaCampanha.Text = "Fechar"
+    $btnFecharZonaCampanha.Location = New-Object System.Drawing.Point(785, 490)
+    $btnFecharZonaCampanha.Width = 85
+    $btnFecharZonaCampanha.Height = 28
+    $btnFecharZonaCampanha.Anchor = "Bottom,Right"
+    $dlg.Controls.Add($btnFecharZonaCampanha)
+    $btnFecharZonaCampanha.Add_Click({ $dlg.Close() }.GetNewClosure())
+
+    $comboCampanha.Add_SelectedIndexChanged({ Update-GridCampanhaZona -ComboCampanha $comboCampanha -GridZona $gridZona -LblResumo $lblResumoZona }.GetNewClosure())
+    $btnVerificarZonaCampanha.Add_Click({ Update-GridCampanhaZona -ComboCampanha $comboCampanha -GridZona $gridZona -LblResumo $lblResumoZona }.GetNewClosure())
+    if ($comboCampanha.Items.Count -gt 0) { $comboCampanha.SelectedIndex = 0 }
+
+    # A troca de SelectedIndex ACIMA acontece antes da janela existir de
+    # verdade (handle nativo do ComboBox so e criado no ShowDialog), e
+    # nesse caso o evento SelectedIndexChanged pode nao disparar - por
+    # isso reforca a populacao no evento Shown tambem, garantindo que
+    # abre ja preenchida (sem precisar clicar em "Verificar" na mao).
+    $dlg.Add_Shown({ Update-GridCampanhaZona -ComboCampanha $comboCampanha -GridZona $gridZona -LblResumo $lblResumoZona }.GetNewClosure())
+
+    [void]$dlg.ShowDialog($form)
 }
 
 function Test-EhImpressoraPantum {
@@ -4349,6 +4772,7 @@ function Atualizar-ResumoStatus {
         $lblStatus.Text += " $desligados possivelmente desligada(s)/desconectada(s) (OCS)."
     }
     $btnExportar.Enabled = ($ativos.Count -gt 0 -or $desligados -gt 0)
+    $btnVerificarCampanhaZona.Enabled = ($ativos.Count -gt 0 -or $desligados -gt 0)
 }
 
 function Reconstruir-Grid {
@@ -4895,6 +5319,7 @@ $btnIniciar.Add_Click({
     $script:Jobs.Clear()
     $script:Concluidos = 0
     $btnExportar.Enabled = $false
+    $btnVerificarCampanhaZona.Enabled = $false
     $numZona.Enabled = $false
 
     $sedeTxt = if ($resolucao.Sede) { $resolucao.Sede } else { "(sede desconhecida)" }
@@ -4947,6 +5372,7 @@ $btnCancelar.Add_Click({
     $numZona.Enabled = $true
     $ativos = $script:Resultados | Where-Object { $_.Online }
     $btnExportar.Enabled = ($ativos.Count -gt 0 -or $script:MaquinasDesligadasOcs.Count -gt 0)
+    $btnVerificarCampanhaZona.Enabled = $btnExportar.Enabled
 })
 
 # ============================================================
@@ -5481,6 +5907,16 @@ $menuContextoGrid.Add_Opening({
             $itemSistemas = $menuContextoGrid.Items.Add("Sistemas Eleitorais...")
             $itemSistemas.Add_Click({ Show-JanelaSistemasEleitorais -Resultado $r }.GetNewClosure())
         }
+        # Submenu com 1 item por campanha cadastrada na aba CAMPANHAS -
+        # so aparece se a maquina tiver SIS instalado e existir pelo
+        # menos 1 campanha configurada (sem isso nao ha o que verificar).
+        if ($temSis -and $script:TabelaCampanhas.Count -gt 0) {
+            $itemCampanhas = $menuContextoGrid.Items.Add("Verificar Campanha")
+            foreach ($campanha in $script:TabelaCampanhas) {
+                $itemCampanha = $itemCampanhas.DropDownItems.Add($campanha.Nome)
+                $itemCampanha.Add_Click({ Show-JanelaVerificarCampanha -Resultado $r -Campanha $campanha }.GetNewClosure())
+            }
+        }
         [void]$menuContextoGrid.Items.Add("-")
         # Reconsulta so esta maquina (VNC/RC/SIS/etc.) e atualiza a linha
         # no lugar - util quando algo mudou no computador (ex: usuario
@@ -5531,6 +5967,14 @@ if (Get-ConfigVersoes) {
     if (Import-TabelaVersoes) {
         Add-Log "Planilha de sistemas eleitorais carregada ($($script:TabelaVersoes.Count) mapeamento(s) de versao, $($script:TabelaPacotes.Count) pacote(s))." "Gray"
     }
+}
+
+# Aba "CAMPANHAS" (mesma planilha de Zonas, buscada pelo nome da aba -
+# nao depende de config separada) - pode nem existir ainda, nesse caso
+# so fica sem nenhuma campanha carregada e o menu de contexto "Verificar
+# Campanha" simplesmente nao aparece, sem quebrar nada.
+if (Import-TabelaCampanhas) {
+    Add-Log "Planilha de campanhas carregada ($($script:TabelaCampanhas.Count) campanha(s))." "Gray"
 }
 
 [void]$form.ShowDialog()
