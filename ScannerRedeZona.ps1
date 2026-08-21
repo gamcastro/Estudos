@@ -263,6 +263,24 @@ $script:UrlPlanilhaCampanhasCSV = "https://docs.google.com/spreadsheets/d/1_2aZh
 $script:ArquivoCampanhasCache   = Join-Path $PSScriptRoot "campanhas_cache.csv"
 $script:TabelaCampanhas         = New-Object System.Collections.Generic.List[object]   # lista de { Nome; Requisitos = lista de { Sistema; VersaoMinima } }
 
+# Config do Web App (Apps Script) que RECEBE o resultado de "Verificar
+# Campanha ZE X" e acrescenta uma linha na aba RESULTADOS-CAMPANHAS da
+# planilha - ver apps_script_registrar_campanha.gs. So pedida na hora (1a
+# vez que clicar em "Enviar Resultado"), mesmo padrao da config de Envio
+# ao Drive/Atualizacao da Planilha de Zonas.
+$script:ArquivoConfigCampanhasWebApp = Join-Path $PSScriptRoot "campanhas_webapp_config.json"
+
+# Leitura (so leitura, sem config nenhuma) da MESMA aba RESULTADOS-
+# CAMPANHAS acima - usada pela janela "Relatorio de Campanhas" pra
+# compilar, por zona, a ultima verificacao enviada de cada campanha.
+$script:UrlPlanilhaResultadosCampanhasCSV = "https://docs.google.com/spreadsheets/d/1_2aZhFgplRqCdPVV_lq4XJT9wgqkfbZpEFZRu1Zu9_I/gviz/tq?tqx=out:csv&sheet=RESULTADOS-CAMPANHAS"
+
+# Brasao oficial pro cabecalho do relatorio em PDF (Show-RelatorioCampanhaHtml)
+# - precisa estar na MESMA pasta do script (copiado junto quando implanta
+# no servidor). Se o arquivo nao existir, o relatorio sai sem a imagem
+# (so o texto), sem quebrar nada.
+$script:ArquivoBrasaoOficial = Join-Path $PSScriptRoot "brasao-oficial-colorido.png"
+
 # --- Planilha SEPARADA de Sistemas Eleitorais (Sistema, Versao,
 # NomeAmigavel, LinkDrive, PastaDestino, Atual) - FONTE UNICA pra dois
 # recursos: (1) mapeia a versao "crua" que o OCS Inventory reporta no
@@ -546,6 +564,14 @@ $btnGerenciarZonas.Height = 28
 $btnGerenciarZonas.Anchor = "Bottom,Left"
 $form.Controls.Add($btnGerenciarZonas)
 
+$btnRelatorioCampanhas = New-Object System.Windows.Forms.Button
+$btnRelatorioCampanhas.Text = "Relatorio de Campanhas..."
+$btnRelatorioCampanhas.Location = New-Object System.Drawing.Point(480, 611)
+$btnRelatorioCampanhas.Width = 190
+$btnRelatorioCampanhas.Height = 28
+$btnRelatorioCampanhas.Anchor = "Bottom,Left"
+$form.Controls.Add($btnRelatorioCampanhas)
+
 $btnUsuariosZona = New-Object System.Windows.Forms.Button
 $btnUsuariosZona.Text = "Usuarios da ZE 1"
 $btnUsuariosZona.Location = New-Object System.Drawing.Point(710, 43)
@@ -569,6 +595,7 @@ $numZona.Add_ValueChanged({
     $btnVerificarCampanhaZona.Enabled = $false
 })
 $btnGerenciarZonas.Add_Click({ Show-GerenciarZonas })
+$btnRelatorioCampanhas.Add_Click({ Show-JanelaRelatorioCampanhas })
 $btnUsuariosZona.Add_Click({ Show-JanelaUsuariosZona -Zona ([int]$numZona.Value) })
 $btnVerificarCampanhaZona.Add_Click({ Show-JanelaVerificarCampanhaZona })
 
@@ -3402,6 +3429,15 @@ function Invoke-AcaoAtualizarHost {
     foreach ($prop in $novoResultado.PSObject.Properties) {
         $Resultado.($prop.Name) = $prop.Value
     }
+
+    # $script:MaquinasLiberadasInstalador so era recarregado no inicio de
+    # uma varredura da zona inteira - se o tecnico mudou o usuario
+    # "instalador" no AD (liberou/bloqueou uma maquina) e so clicou em
+    # "Atualizar Status desta Maquina", a coluna Instalador continuava
+    # mostrando o status ANTIGO ate rodar a zona de novo. Reconsulta o AD
+    # aqui tambem pra essa acao ja refletir o estado atual.
+    $script:MaquinasLiberadasInstalador = Get-MaquinasLiberadasInstalador
+
     Reconstruir-Grid
     Add-Log "Status de '$($Resultado.Hostname)' ($($Resultado.IP)) atualizado." "Green"
 }
@@ -3595,6 +3631,101 @@ function Update-GridCampanhaZona {
     }
 }
 
+function Send-ResultadoCampanhaZona {
+    <#
+        Manda o resultado JA CALCULADO e exibido em $GridZona (pelo botao
+        "Enviar Resultado" da janela "Verificar Campanha ZE X") por HTTP
+        POST ao Web App do Apps Script, que acrescenta uma linha na aba
+        RESULTADOS-CAMPANHAS da planilha (ver
+        apps_script_registrar_campanha.gs) - assim fica um historico
+        centralizado de qual zona esta pronta pra qual campanha, pra
+        futuramente montar um compilado de todas as zonas.
+
+        Le o total/aptas DIRETO das linhas de $GridZona (em vez de
+        recalcular ou depender de uma variavel separada guardada em algum
+        lugar) - GridZona e uma referencia pro MESMO objeto DataGridView
+        que Update-GridCampanhaZona populou, entao sempre reflete o
+        resultado mais recente exibido na tela, sem risco do problema de
+        closure "retrato antigo" ja visto nesta ferramenta.
+    #>
+    param(
+        [System.Windows.Forms.ComboBox]$ComboCampanha,
+        [System.Windows.Forms.DataGridView]$GridZona
+    )
+    if ($ComboCampanha.SelectedIndex -lt 0 -or $GridZona.Rows.Count -eq 0) {
+        [System.Windows.Forms.MessageBox]::Show("Clique em 'Verificar' antes de enviar o resultado.", "Enviar Resultado", "OK", "Warning") | Out-Null
+        return
+    }
+    $campanha = $script:TabelaCampanhas[$ComboCampanha.SelectedIndex]
+    $linhasAptas = @($GridZona.Rows | Where-Object { $_.Cells["Status"].Value -eq "Apto" })
+    $total = $GridZona.Rows.Count
+    $aptas = $linhasAptas.Count
+    $maquinasAptas = ($linhasAptas | ForEach-Object { $_.Cells["Hostname"].Value }) -join "; "
+
+    $cfg = Get-ConfigCampanhasWebApp
+    if (-not $cfg) { $cfg = Read-ConfigCampanhasWebAppInterativo }
+    if (-not $cfg) { return }
+
+    $resolucaoZona = Resolve-RedeDaZona -Zona $script:ZonaAtual
+    $sedeTxt = if ($resolucaoZona.Sede) { $resolucaoZona.Sede } else { "" }
+    $zonaPad = "{0:D3}" -f $script:ZonaAtual
+
+    try {
+        $corpo = @{
+            token         = $cfg.Token
+            zona          = $zonaPad
+            sede          = $sedeTxt
+            campanha      = $campanha.Nome
+            total         = $total
+            aptas         = $aptas
+            tecnico       = $env:USERNAME
+            maquinasAptas = $maquinasAptas
+        } | ConvertTo-Json -Compress
+        # 60s (nao 20s) de proposito - a PRIMEIRA chamada a um Web App do
+        # Apps Script recem-implantado pode demorar bem mais que o normal
+        # pro Google "esquentar" o ambiente de execucao (confirmado na
+        # pratica: timeout de 20s estourou no 1o envio). Chamadas
+        # seguintes costumam ser rapidas (poucos segundos).
+        #
+        # -Body recebe os BYTES UTF-8 prontos (nao a string $corpo direto)
+        # de proposito - confirmado na pratica que o PowerShell 5.1, ao
+        # converter uma string com acento pro corpo da requisicao sozinho,
+        # NAO usa UTF-8 (da nome/sede com acento corrompido do outro lado,
+        # tipo "SÃ?O" em vez de "SÃO"). Gerando os bytes UTF-8 na mao (e
+        # declarando charset=utf-8 no Content-Type) esse problema some.
+        $corpoBytesUtf8 = [System.Text.Encoding]::UTF8.GetBytes($corpo)
+        $resp = Invoke-RestMethod -Uri $cfg.UrlWebApp -Method Post -Body $corpoBytesUtf8 -ContentType "application/json; charset=utf-8" -TimeoutSec 60
+    } catch {
+        # Mesmo caso ja visto na atualizacao da planilha de Zonas: o POST
+        # pode estourar timeout/erro HTTP do lado do cliente MESMO quando
+        # o doPost la no Apps Script terminou e gravou certinho (comum
+        # logo apos implantar um Web App novo). Antes de considerar falha
+        # de verdade, confere se a linha foi gravada mesmo assim.
+        Add-Log "[AVISO] Erro/timeout ao enviar resultado da campanha '$($campanha.Nome)' (zona $zonaPad): $($_.Exception.Message) - conferindo se foi gravado mesmo assim..." "Yellow"
+        $todosVerificacao = Get-ResultadosCampanhas
+        $gravouMesmoAssim = $todosVerificacao | Where-Object {
+            $_.Zona -eq $zonaPad -and $_.Campanha -eq $campanha.Nome -and $_.Total -eq $total -and $_.Aptas -eq $aptas -and $_.Tecnico -eq $env:USERNAME
+        } | Select-Object -Last 1
+        if ($gravouMesmoAssim) {
+            Add-Log "Confirmado: resultado da campanha '$($campanha.Nome)' (zona $zonaPad) foi gravado apesar do erro (falso alarme conhecido do Apps Script)." "Cyan"
+            [System.Windows.Forms.MessageBox]::Show("Resultado enviado com sucesso (o aviso de erro foi um falso alarme - conferido na planilha).", "Enviar Resultado", "OK", "Information") | Out-Null
+            return
+        }
+        Add-Log "[ERRO] Falha ao enviar resultado da campanha '$($campanha.Nome)' (zona $zonaPad): $($_.Exception.Message)" "OrangeRed"
+        [System.Windows.Forms.MessageBox]::Show("Falha ao enviar resultado:`r`n$($_.Exception.Message)", "Erro", "OK", "Error") | Out-Null
+        return
+    }
+
+    if (-not $resp.ok) {
+        Add-Log "[ERRO] Planilha recusou o resultado da campanha '$($campanha.Nome)' (zona $zonaPad): $($resp.erro)" "OrangeRed"
+        [System.Windows.Forms.MessageBox]::Show("Falha ao enviar resultado:`r`n$($resp.erro)", "Erro", "OK", "Error") | Out-Null
+        return
+    }
+
+    Add-Log "Resultado da campanha '$($campanha.Nome)' (zona $zonaPad - $sedeTxt, $aptas de $total aptas) enviado para a planilha." "Cyan"
+    [System.Windows.Forms.MessageBox]::Show("Resultado enviado com sucesso.", "Enviar Resultado", "OK", "Information") | Out-Null
+}
+
 function Show-JanelaVerificarCampanhaZona {
     <#
         Versao "zona inteira" do Verificar Campanha (ver
@@ -3683,6 +3814,15 @@ function Show-JanelaVerificarCampanhaZona {
     $dlg.Controls.Add($btnFecharZonaCampanha)
     $btnFecharZonaCampanha.Add_Click({ $dlg.Close() }.GetNewClosure())
 
+    $btnEnviarResultado = New-Object System.Windows.Forms.Button
+    $btnEnviarResultado.Text = "Enviar Resultado..."
+    $btnEnviarResultado.Location = New-Object System.Drawing.Point(645, 490)
+    $btnEnviarResultado.Width = 130
+    $btnEnviarResultado.Height = 28
+    $btnEnviarResultado.Anchor = "Bottom,Right"
+    $dlg.Controls.Add($btnEnviarResultado)
+    $btnEnviarResultado.Add_Click({ Send-ResultadoCampanhaZona -ComboCampanha $comboCampanha -GridZona $gridZona }.GetNewClosure())
+
     $comboCampanha.Add_SelectedIndexChanged({ Update-GridCampanhaZona -ComboCampanha $comboCampanha -GridZona $gridZona -LblResumo $lblResumoZona }.GetNewClosure())
     $btnVerificarZonaCampanha.Add_Click({ Update-GridCampanhaZona -ComboCampanha $comboCampanha -GridZona $gridZona -LblResumo $lblResumoZona }.GetNewClosure())
     if ($comboCampanha.Items.Count -gt 0) { $comboCampanha.SelectedIndex = 0 }
@@ -3693,6 +3833,416 @@ function Show-JanelaVerificarCampanhaZona {
     # isso reforca a populacao no evento Shown tambem, garantindo que
     # abre ja preenchida (sem precisar clicar em "Verificar" na mao).
     $dlg.Add_Shown({ Update-GridCampanhaZona -ComboCampanha $comboCampanha -GridZona $gridZona -LblResumo $lblResumoZona }.GetNewClosure())
+
+    [void]$dlg.ShowDialog($form)
+}
+
+function Get-ResultadosCampanhas {
+    <#
+        Busca a aba RESULTADOS-CAMPANHAS (mesma planilha de Zonas, pelo
+        nome da aba - so leitura, sem config nenhuma) com o HISTORICO
+        completo de envios de "Verificar Campanha ZE X" > "Enviar
+        Resultado..." (ver apps_script_registrar_campanha.gs). Cada linha
+        e um envio - pode ter varias por Zona+Campanha ao longo do tempo,
+        quem usa decide como agregar (ver Update-GridRelatorioCampanhas,
+        que pega so a mais recente de cada zona). Devolve array (vazio se
+        a aba ainda nao tiver nenhum envio) ou $null se a busca falhou.
+    #>
+    try {
+        $resp = Invoke-WebRequest -Uri $script:UrlPlanilhaResultadosCampanhasCSV -TimeoutSec 10 -UseBasicParsing
+        $bytesResposta = $resp.RawContentStream.ToArray()
+        $textoUtf8 = [System.Text.Encoding]::UTF8.GetString($bytesResposta)
+        $linhas = $textoUtf8 | ConvertFrom-Csv
+        if (-not $linhas) { return @() }
+
+        $resultado = New-Object System.Collections.Generic.List[object]
+        foreach ($l in $linhas) {
+            if (-not $l.Zona -or -not $l.Campanha) { continue }
+            $totalNum = 0; [void][int]::TryParse($l.Total, [ref]$totalNum)
+            $aptasNum = 0; [void][int]::TryParse($l.Aptas, [ref]$aptasNum)
+            $resultado.Add([PSCustomObject]@{
+                DataHora      = $l.DataHora
+                Zona          = $l.Zona.Trim()
+                Sede          = $l.Sede
+                Campanha      = $l.Campanha.Trim()
+                Total         = $totalNum
+                Aptas         = $aptasNum
+                Tecnico       = $l.Tecnico
+                MaquinasAptas = $l.MaquinasAptas
+            })
+        }
+        return $resultado
+    } catch {
+        Add-Log "[ERRO] Falha ao buscar resultados de campanhas: $($_.Exception.Message)" "OrangeRed"
+        return $null
+    }
+}
+
+function Import-ResultadosCampanhasNaJanela {
+    <#
+        Busca os resultados NA REDE (Get-ResultadosCampanhas) e recarrega
+        a janela "Relatorio de Campanhas" do zero: guarda os dados crus em
+        $GridRel.Tag (pra Update-GridRelatorioCampanhas reaproveitar sem
+        precisar buscar de novo a cada troca de campanha no combo) e
+        repopula a lista de campanhas do combo com os nomes que realmente
+        tem envio registrado, preservando a selecao atual se ela ainda
+        existir na lista nova.
+    #>
+    param(
+        [System.Windows.Forms.ComboBox]$ComboCampanha,
+        [System.Windows.Forms.DataGridView]$GridRel,
+        [System.Windows.Forms.Label]$LblStatus,
+        [string]$Filtro = "Todas"
+    )
+    $LblStatus.Text = "Buscando resultados..."
+    $LblStatus.ForeColor = [System.Drawing.Color]::Gray
+    [System.Windows.Forms.Application]::DoEvents()
+
+    $todos = Get-ResultadosCampanhas
+    $GridRel.Tag = $todos
+
+    if ($null -eq $todos) {
+        $GridRel.Rows.Clear()
+        $LblStatus.Text = "Falha ao buscar resultados (ver log da janela principal)."
+        $LblStatus.ForeColor = [System.Drawing.Color]::Firebrick
+        return
+    }
+
+    $selecaoAtual = $ComboCampanha.SelectedItem
+    $nomes = @($todos | Select-Object -ExpandProperty Campanha -Unique | Sort-Object)
+    $ComboCampanha.Items.Clear()
+    foreach ($nome in $nomes) { [void]$ComboCampanha.Items.Add($nome) }
+
+    if ($nomes.Count -eq 0) {
+        $GridRel.Rows.Clear()
+        $LblStatus.Text = "Nenhum resultado de campanha enviado ainda (use 'Enviar Resultado...' na janela Verificar Campanha)."
+        $LblStatus.ForeColor = [System.Drawing.Color]::FromArgb(200, 100, 0)
+        return
+    }
+
+    if ($selecaoAtual -and $nomes -contains $selecaoAtual) {
+        $ComboCampanha.SelectedItem = $selecaoAtual
+    } else {
+        $ComboCampanha.SelectedIndex = 0
+    }
+    Update-GridRelatorioCampanhas -ComboCampanha $ComboCampanha -GridRel $GridRel -LblStatus $LblStatus -Filtro $Filtro
+}
+
+function Get-FiltroRelatorioCampanhas {
+    <#
+        Le qual dos 3 RadioButtons "Todas as Zonas"/"Aptas"/"Nao Aptas" da
+        janela "Relatorio de Campanhas" esta marcado agora, e devolve o
+        valor de -Filtro correspondente pra Update-GridRelatorioCampanhas.
+    #>
+    param(
+        [System.Windows.Forms.RadioButton]$RadioAptas,
+        [System.Windows.Forms.RadioButton]$RadioNaoAptas
+    )
+    if ($RadioAptas.Checked) { return "Aptas" }
+    if ($RadioNaoAptas.Checked) { return "NaoAptas" }
+    return "Todas"
+}
+
+function Update-GridRelatorioCampanhas {
+    <#
+        Filtra $GridRel.Tag (ja buscado antes por
+        Import-ResultadosCampanhasNaJanela) pra campanha selecionada no
+        combo, pega SO A ULTIMA linha de cada zona (a lista original vem
+        em ordem cronologica - Apps Script so acrescenta no fim - entao a
+        ultima ocorrencia de cada zona no array E a mais recente, sem
+        precisar comparar data) e popula a grade + o resumo. NAO busca
+        nada na rede - so reprocessa o que ja esta em memoria, por isso
+        pode ser chamada toda vez que o combo muda sem demora nenhuma.
+    #>
+    param(
+        [System.Windows.Forms.ComboBox]$ComboCampanha,
+        [System.Windows.Forms.DataGridView]$GridRel,
+        [System.Windows.Forms.Label]$LblStatus,
+        [string]$Filtro = "Todas"
+    )
+    $GridRel.Rows.Clear()
+    $todos = $GridRel.Tag
+    if (-not $todos -or $ComboCampanha.SelectedIndex -lt 0) { return }
+    $campanhaNome = $ComboCampanha.SelectedItem
+
+    $ultimaPorZona = [ordered]@{}
+    foreach ($linha in $todos) {
+        if ($linha.Campanha -ne $campanhaNome) { continue }
+        $ultimaPorZona[$linha.Zona] = $linha
+    }
+
+    # $prontas/$linhasOrdenadas.Count sempre contam TODAS as zonas
+    # verificadas (o resumo no topo reflete o estado real, independente
+    # do filtro) - $Filtro so decide quais linhas aparecem NA GRADE.
+    $linhasOrdenadas = @($ultimaPorZona.Values | Sort-Object { $zn = 0; [void][int]::TryParse($_.Zona, [ref]$zn); $zn })
+    $prontas = 0
+    foreach ($linha in $linhasOrdenadas) {
+        # "Apta" basta ter PELO MENOS 1 maquina pronta na zona - nao
+        # precisa ser todas (a zona ja consegue atender a campanha com 1
+        # maquina funcionando, nao precisa de 100% do parque).
+        $statusTxt = if ($linha.Total -le 0) { "Sem maquina com SIS" } elseif ($linha.Aptas -gt 0) { "Apta" } else { "Nenhuma apta" }
+        if ($statusTxt -eq "Apta") { $prontas++ }
+
+        if ($Filtro -eq "Aptas" -and $statusTxt -ne "Apta") { continue }
+        if ($Filtro -eq "NaoAptas" -and $statusTxt -eq "Apta") { continue }
+
+        $maquinasAptasTxt = if ($linha.MaquinasAptas) { $linha.MaquinasAptas } else { "-" }
+        $idx = $GridRel.Rows.Add(@($linha.Zona, $linha.Sede, $linha.Total, $linha.Aptas, $statusTxt, $maquinasAptasTxt, $linha.DataHora, $linha.Tecnico))
+        $row = $GridRel.Rows[$idx]
+        $row.Cells["Status"].Style.Font = New-Object System.Drawing.Font($GridRel.Font, [System.Drawing.FontStyle]::Bold)
+        $row.Cells["Status"].Style.ForeColor = switch ($statusTxt) {
+            "Apta" { [System.Drawing.Color]::FromArgb(0, 128, 0) }
+            default { [System.Drawing.Color]::FromArgb(220, 53, 69) }
+        }
+    }
+
+    $LblStatus.Text = "$prontas de $($linhasOrdenadas.Count) zona(s) verificada(s) com pelo menos 1 maquina pronta para a campanha '$campanhaNome'."
+    $LblStatus.ForeColor = if ($linhasOrdenadas.Count -gt 0 -and $prontas -eq $linhasOrdenadas.Count) { [System.Drawing.Color]::FromArgb(0, 128, 0) } else { [System.Drawing.Color]::FromArgb(0, 90, 158) }
+}
+
+function Show-RelatorioCampanhaHtml {
+    <#
+        Monta um relatorio em HTML (formatado pra impressao, A4) com o
+        que esta exibido AGORA em $GridRel, e abre no navegador padrao -
+        de la o usuario aperta Ctrl+P e escolhe "Salvar como PDF" (recurso
+        nativo de qualquer navegador, sem depender de nada instalado no
+        servidor). Le as linhas DIRETO da grade (nao recalcula nada), pra
+        o PDF bater exatamente com o que a pessoa esta vendo na tela.
+    #>
+    param(
+        [System.Windows.Forms.ComboBox]$ComboCampanha,
+        [System.Windows.Forms.DataGridView]$GridRel
+    )
+    if ($ComboCampanha.SelectedIndex -lt 0 -or $GridRel.Rows.Count -eq 0) {
+        [System.Windows.Forms.MessageBox]::Show("Nao ha resultados pra gerar relatorio - escolha uma campanha com pelo menos 1 zona verificada.", "Relatorio de Campanhas", "OK", "Warning") | Out-Null
+        return
+    }
+    $campanhaNome = $ComboCampanha.SelectedItem
+
+    $linhasHtml = New-Object System.Collections.Generic.List[string]
+    $prontas = 0
+    $totalMaquinasAptas = 0
+    $totalMaquinasComSis = 0
+    foreach ($row in $GridRel.Rows) {
+        $zona = [System.Net.WebUtility]::HtmlEncode("$($row.Cells['Zona'].Value)")
+        $sede = [System.Net.WebUtility]::HtmlEncode("$($row.Cells['Sede'].Value)")
+        $total = [int]$row.Cells["Total"].Value
+        $aptas = [int]$row.Cells["Aptas"].Value
+        $status = [System.Net.WebUtility]::HtmlEncode("$($row.Cells['Status'].Value)")
+        $maquinasAptas = [System.Net.WebUtility]::HtmlEncode("$($row.Cells['MaquinasAptas'].Value)")
+        $dataHora = [System.Net.WebUtility]::HtmlEncode("$($row.Cells['UltimaVerificacao'].Value)")
+        $tecnico = [System.Net.WebUtility]::HtmlEncode("$($row.Cells['Tecnico'].Value)")
+        $totalMaquinasComSis += $total
+        $totalMaquinasAptas += $aptas
+        if ($status -eq "Apta") { $prontas++ }
+        $corClasse = switch ($status) { "Apta" { "ok" }; default { "ruim" } }
+        $linhasHtml.Add("<tr><td>$zona</td><td>$sede</td><td class=`"num`">$total</td><td class=`"num`">$aptas</td><td class=`"$corClasse`">$status</td><td>$maquinasAptas</td><td>$dataHora</td><td>$tecnico</td></tr>")
+    }
+
+    $campanhaEnc = [System.Net.WebUtility]::HtmlEncode($campanhaNome)
+    $geradoEm = Get-Date -Format "dd/MM/yyyy"
+    $horaGerado = Get-Date -Format "HH:mm:ss"
+    $totalZonas = $GridRel.Rows.Count
+
+    # Brasao oficial embutido como base64 (arquivo local, PNG) - deixa o
+    # HTML AUTOSSUFICIENTE (sem depender de achar o arquivo de novo se o
+    # relatorio for movido/copiado pra outro lugar). Sem a imagem, o
+    # cabecalho sai so com o texto, sem quebrar nada.
+    $brasaoImgTag = ""
+    if (Test-Path $script:ArquivoBrasaoOficial) {
+        try {
+            $bytesBrasao = [System.IO.File]::ReadAllBytes($script:ArquivoBrasaoOficial)
+            $base64Brasao = [System.Convert]::ToBase64String($bytesBrasao)
+            $brasaoImgTag = "<img src=`"data:image/png;base64,$base64Brasao`" class=`"brasao`" alt=`"Brasao da Republica`">"
+        } catch {}
+    }
+
+    $html = @"
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<title>Relatorio de Campanha - $campanhaEnc</title>
+<style>
+  @page { size: A4; margin: 15mm; }
+  body { font-family: 'Segoe UI', Arial, sans-serif; color: #222; margin: 0; }
+  .cabecalho { display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 2px solid #005a9e; padding-bottom: 10px; margin-bottom: 16px; }
+  .cabecalho-esq { display: flex; align-items: center; gap: 14px; }
+  .brasao { width: 95px; height: 95px; object-fit: contain; }
+  .cabecalho-texto p { margin: 0; line-height: 1.35; font-size: 13px; }
+  .cabecalho-texto p.titulo { font-size: 15px; font-weight: bold; }
+  .cabecalho-texto p.campanha { font-size: 15px; font-weight: bold; text-transform: uppercase; color: #005a9e; }
+  .cabecalho-dir { text-align: right; font-size: 12px; color: #444; white-space: nowrap; }
+  .resumo { background: #f2f2f2; border-radius: 6px; padding: 10px 14px; margin-bottom: 16px; font-size: 13px; }
+  .resumo b { color: #005a9e; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th, td { border: 1px solid #ccc; padding: 6px 8px; text-align: left; }
+  th { background: #005a9e; color: #fff; }
+  td.num { text-align: center; }
+  td.ok { color: #007f00; font-weight: bold; }
+  td.ruim { color: #dc3545; font-weight: bold; }
+  .rodape { margin-top: 14px; font-size: 10px; color: #888; }
+  @media print { .rodape { position: fixed; bottom: 0; } }
+</style>
+</head>
+<body>
+  <div class="cabecalho">
+    <div class="cabecalho-esq">
+      $brasaoImgTag
+      <div class="cabecalho-texto">
+        <p class="titulo">Justica Eleitoral</p>
+        <p>TRE-MA / SEASU-COINF-STIC</p>
+        <p>Relatorio de Verificacao de Campanha</p>
+        <p class="campanha">$campanhaEnc</p>
+      </div>
+    </div>
+    <div class="cabecalho-dir">
+      $geradoEm<br>$horaGerado
+    </div>
+  </div>
+  <div class="resumo">
+    <b>$prontas</b> de <b>$totalZonas</b> zona(s) verificada(s) com pelo menos 1 maquina pronta para esta campanha.
+    Total de <b>$totalMaquinasAptas</b> maquina(s) apta(s) de <b>$totalMaquinasComSis</b> com SIS instalado nas zonas listadas.
+  </div>
+  <table>
+    <thead>
+      <tr><th>Zona</th><th>Sede</th><th>Total c/ SIS</th><th>Aptas</th><th>Status</th><th>Maquinas Aptas</th><th>Ultima Verificacao</th><th>Tecnico</th></tr>
+    </thead>
+    <tbody>
+      $($linhasHtml -join "`r`n      ")
+    </tbody>
+  </table>
+  <div class="rodape">Gerado pelo Scanner de Rede por Zona Eleitoral - TRE-MA em $geradoEm $horaGerado.</div>
+</body>
+</html>
+"@
+
+    $pastaRelatorios = Join-Path $env:TEMP "ScannerRedeZona_Relatorios"
+    if (-not (Test-Path $pastaRelatorios)) { New-Item -ItemType Directory -Path $pastaRelatorios -Force | Out-Null }
+    $nomeArquivoSeguro = ($campanhaNome -replace '[\\/:*?"<>|]', '_')
+    $caminhoHtml = Join-Path $pastaRelatorios "Relatorio_${nomeArquivoSeguro}_$(Get-Date -Format 'yyyyMMdd_HHmmss').html"
+    Set-Content -Path $caminhoHtml -Value $html -Encoding UTF8
+
+    Start-Process $caminhoHtml
+    Add-Log "Relatorio da campanha '$campanhaNome' aberto no navegador ($caminhoHtml) - use Ctrl+P > Salvar como PDF." "Cyan"
+}
+
+function Show-JanelaRelatorioCampanhas {
+    $dlg = New-Object System.Windows.Forms.Form
+    $dlg.Text = "Relatorio de Campanhas"
+    $dlg.Size = New-Object System.Drawing.Size(1170, 580)
+    $dlg.StartPosition = "CenterParent"
+    $dlg.FormBorderStyle = "FixedDialog"
+    $dlg.MaximizeBox = $false
+    $dlg.MinimizeBox = $false
+    $dlg.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+
+    $lblCampanhaRel = New-Object System.Windows.Forms.Label
+    $lblCampanhaRel.Text = "Campanha:"
+    $lblCampanhaRel.Location = New-Object System.Drawing.Point(15, 18)
+    $lblCampanhaRel.AutoSize = $true
+    $dlg.Controls.Add($lblCampanhaRel)
+
+    $comboCampanhaRel = New-Object System.Windows.Forms.ComboBox
+    $comboCampanhaRel.Location = New-Object System.Drawing.Point(90, 15)
+    $comboCampanhaRel.Width = 320
+    $comboCampanhaRel.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
+    $dlg.Controls.Add($comboCampanhaRel)
+
+    $btnAtualizarRel = New-Object System.Windows.Forms.Button
+    $btnAtualizarRel.Text = "Atualizar"
+    $btnAtualizarRel.Location = New-Object System.Drawing.Point(420, 13)
+    $btnAtualizarRel.Width = 90
+    $btnAtualizarRel.Height = 26
+    $dlg.Controls.Add($btnAtualizarRel)
+
+    $lblFiltroRel = New-Object System.Windows.Forms.Label
+    $lblFiltroRel.Text = "Filtro:"
+    $lblFiltroRel.Location = New-Object System.Drawing.Point(530, 18)
+    $lblFiltroRel.AutoSize = $true
+    $dlg.Controls.Add($lblFiltroRel)
+
+    $radioTodasRel = New-Object System.Windows.Forms.RadioButton
+    $radioTodasRel.Text = "Todas as Zonas"
+    $radioTodasRel.Location = New-Object System.Drawing.Point(580, 16)
+    $radioTodasRel.AutoSize = $true
+    $radioTodasRel.Checked = $true
+    $dlg.Controls.Add($radioTodasRel)
+
+    $radioAptasRel = New-Object System.Windows.Forms.RadioButton
+    $radioAptasRel.Text = "Aptas"
+    $radioAptasRel.Location = New-Object System.Drawing.Point(710, 16)
+    $radioAptasRel.AutoSize = $true
+    $dlg.Controls.Add($radioAptasRel)
+
+    $radioNaoAptasRel = New-Object System.Windows.Forms.RadioButton
+    $radioNaoAptasRel.Text = "Nao Aptas"
+    $radioNaoAptasRel.Location = New-Object System.Drawing.Point(790, 16)
+    $radioNaoAptasRel.AutoSize = $true
+    $dlg.Controls.Add($radioNaoAptasRel)
+
+    $lblStatusRel = New-Object System.Windows.Forms.Label
+    $lblStatusRel.Location = New-Object System.Drawing.Point(15, 50)
+    $lblStatusRel.Size = New-Object System.Drawing.Size(1125, 24)
+    $lblStatusRel.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+    $dlg.Controls.Add($lblStatusRel)
+
+    $gridRel = New-Object System.Windows.Forms.DataGridView
+    # Location/Size/Anchor (NAO Dock=Fill) de proposito - mesmo motivo ja
+    # confirmado nas outras janelas desta ferramenta.
+    $gridRel.Location = New-Object System.Drawing.Point(15, 80)
+    $gridRel.Size = New-Object System.Drawing.Size(1125, 420)
+    $gridRel.Anchor = "Top,Bottom,Left,Right"
+    $gridRel.AllowUserToAddRows = $false
+    $gridRel.AllowUserToDeleteRows = $false
+    $gridRel.ReadOnly = $true
+    $gridRel.RowHeadersVisible = $false
+    $gridRel.SelectionMode = [System.Windows.Forms.DataGridViewSelectionMode]::FullRowSelect
+    $gridRel.MultiSelect = $false
+    $gridRel.AutoSizeColumnsMode = [System.Windows.Forms.DataGridViewAutoSizeColumnsMode]::None
+    $dlg.Controls.Add($gridRel)
+
+    function Add-ColunaGridRel {
+        param($Nome, $Titulo, $Largura)
+        $c = New-Object System.Windows.Forms.DataGridViewTextBoxColumn
+        $c.Name = $Nome; $c.HeaderText = $Titulo; $c.Width = $Largura
+        [void]$gridRel.Columns.Add($c)
+    }
+    Add-ColunaGridRel "Zona" "Zona" 55
+    Add-ColunaGridRel "Sede" "Sede" 170
+    Add-ColunaGridRel "Total" "Total c/ SIS" 85
+    Add-ColunaGridRel "Aptas" "Aptas" 60
+    Add-ColunaGridRel "Status" "Status" 110
+    Add-ColunaGridRel "MaquinasAptas" "Maquinas Aptas" 280
+    Add-ColunaGridRel "UltimaVerificacao" "Ultima Verificacao" 140
+    Add-ColunaGridRel "Tecnico" "Tecnico" 120
+
+    $btnFecharRel = New-Object System.Windows.Forms.Button
+    $btnFecharRel.Text = "Fechar"
+    $btnFecharRel.Location = New-Object System.Drawing.Point(1055, 510)
+    $btnFecharRel.Width = 85
+    $btnFecharRel.Height = 28
+    $btnFecharRel.Anchor = "Bottom,Right"
+    $dlg.Controls.Add($btnFecharRel)
+    $btnFecharRel.Add_Click({ $dlg.Close() }.GetNewClosure())
+
+    $btnPdfRel = New-Object System.Windows.Forms.Button
+    $btnPdfRel.Text = "Gerar Relatorio PDF..."
+    $btnPdfRel.Location = New-Object System.Drawing.Point(885, 510)
+    $btnPdfRel.Width = 155
+    $btnPdfRel.Height = 28
+    $btnPdfRel.Anchor = "Bottom,Right"
+    $dlg.Controls.Add($btnPdfRel)
+    $btnPdfRel.Add_Click({ Show-RelatorioCampanhaHtml -ComboCampanha $comboCampanhaRel -GridRel $gridRel }.GetNewClosure())
+
+    $comboCampanhaRel.Add_SelectedIndexChanged({ Update-GridRelatorioCampanhas -ComboCampanha $comboCampanhaRel -GridRel $gridRel -LblStatus $lblStatusRel -Filtro (Get-FiltroRelatorioCampanhas -RadioAptas $radioAptasRel -RadioNaoAptas $radioNaoAptasRel) }.GetNewClosure())
+    $btnAtualizarRel.Add_Click({ Import-ResultadosCampanhasNaJanela -ComboCampanha $comboCampanhaRel -GridRel $gridRel -LblStatus $lblStatusRel -Filtro (Get-FiltroRelatorioCampanhas -RadioAptas $radioAptasRel -RadioNaoAptas $radioNaoAptasRel) }.GetNewClosure())
+    $dlg.Add_Shown({ Import-ResultadosCampanhasNaJanela -ComboCampanha $comboCampanhaRel -GridRel $gridRel -LblStatus $lblStatusRel -Filtro (Get-FiltroRelatorioCampanhas -RadioAptas $radioAptasRel -RadioNaoAptas $radioNaoAptasRel) }.GetNewClosure())
+
+    $atualizarFiltroRel = { Update-GridRelatorioCampanhas -ComboCampanha $comboCampanhaRel -GridRel $gridRel -LblStatus $lblStatusRel -Filtro (Get-FiltroRelatorioCampanhas -RadioAptas $radioAptasRel -RadioNaoAptas $radioNaoAptasRel) }.GetNewClosure()
+    $radioTodasRel.Add_CheckedChanged($atualizarFiltroRel)
+    $radioAptasRel.Add_CheckedChanged($atualizarFiltroRel)
+    $radioNaoAptasRel.Add_CheckedChanged($atualizarFiltroRel)
 
     [void]$dlg.ShowDialog($form)
 }
@@ -3858,6 +4408,52 @@ function Read-ConfigZonasWebAppInterativo {
     return (Get-ConfigZonasWebApp)
 }
 
+# ============================================================
+# CONFIGURACAO DE ENVIO DE RESULTADO DE CAMPANHA (Web App do Apps Script)
+# ============================================================
+function Get-ConfigCampanhasWebApp {
+    if (-not (Test-Path $script:ArquivoConfigCampanhasWebApp)) { return $null }
+    try {
+        $cfg = Get-Content -Path $script:ArquivoConfigCampanhasWebApp -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($cfg.UrlWebApp -and $cfg.Token) { return $cfg }
+    } catch {}
+    return $null
+}
+
+function Set-ConfigCampanhasWebApp {
+    param([string]$UrlWebApp, [string]$Token)
+    [PSCustomObject]@{ UrlWebApp = $UrlWebApp; Token = $Token } |
+        ConvertTo-Json | Set-Content -Path $script:ArquivoConfigCampanhasWebApp -Encoding UTF8
+}
+
+function Read-ConfigCampanhasWebAppInterativo {
+    <#
+        Pede a URL do Web App (Apps Script) que registra o resultado de
+        "Verificar Campanha" e o token combinado, pre-preenchendo com o
+        que ja estiver salvo (se houver). Devolve $null se o usuario
+        cancelar.
+    #>
+    $atual = Get-ConfigCampanhasWebApp
+
+    $url = [Microsoft.VisualBasic.Interaction]::InputBox(
+        "URL do Web App do Google Apps Script para REGISTRAR o resultado de campanhas (Implantar > Nova implantacao > Aplicativo da web), termina em /exec:`r`n`r`nVer instrucoes em apps_script_registrar_campanha.gs.",
+        "Configurar Envio de Resultado de Campanha - URL",
+        $(if ($atual) { $atual.UrlWebApp } else { "" })
+    )
+    if (-not $url) { return $null }
+
+    $token = [Microsoft.VisualBasic.Interaction]::InputBox(
+        "Token combinado com o script (mesmo valor da constante TOKEN no Apps Script):",
+        "Configurar Envio de Resultado de Campanha - Token",
+        $(if ($atual) { $atual.Token } else { "" })
+    )
+    if (-not $token) { return $null }
+
+    Set-ConfigCampanhasWebApp -UrlWebApp $url.Trim() -Token $token.Trim()
+    Add-Log "Configuracao de envio de resultado de campanha salva." "Cyan"
+    return (Get-ConfigCampanhasWebApp)
+}
+
 function Send-AtualizacaoZonaViaAppsScript {
     <#
         Manda a Substituta/Observacao de uma zona por HTTP POST ao Web App
@@ -3871,7 +4467,11 @@ function Send-AtualizacaoZonaViaAppsScript {
     $zonaPad = "{0:D3}" -f $Zona
     try {
         $corpo = @{ token = $Config.Token; zona = $zonaPad; rede = $Substituta; observacao = $Observacao } | ConvertTo-Json -Compress
-        $resp = Invoke-RestMethod -Uri $Config.UrlWebApp -Method Post -Body $corpo -ContentType "application/json" -TimeoutSec 20
+        # Bytes UTF-8 explicitos (nao a string direto) - o PowerShell 5.1
+        # nao usa UTF-8 sozinho pra converter uma string com acento pro
+        # corpo da requisicao, corrompendo Observacao com acento.
+        $corpoBytesUtf8 = [System.Text.Encoding]::UTF8.GetBytes($corpo)
+        $resp = Invoke-RestMethod -Uri $Config.UrlWebApp -Method Post -Body $corpoBytesUtf8 -ContentType "application/json; charset=utf-8" -TimeoutSec 20
     } catch {
         # O Web App do Apps Script as vezes devolve erro HTTP (ex: 404) no
         # redirecionamento interno da resposta (script.google.com ->
@@ -3918,8 +4518,12 @@ function Send-ArquivoParaGoogleDriveViaAppsScript {
         $bytes = [System.IO.File]::ReadAllBytes($Arquivo.FullName)
         $base64 = [System.Convert]::ToBase64String($bytes)
         $corpo = @{ token = $cfg.Token; nomeArquivo = $Arquivo.Name; conteudoBase64 = $base64 } | ConvertTo-Json -Compress
+        # Bytes UTF-8 explicitos (nao a string direto) - o PowerShell 5.1
+        # nao usa UTF-8 sozinho pra converter uma string com acento pro
+        # corpo da requisicao, corrompendo nomeArquivo com acento.
+        $corpoBytesUtf8 = [System.Text.Encoding]::UTF8.GetBytes($corpo)
 
-        $resp = Invoke-RestMethod -Uri $cfg.UrlWebApp -Method Post -Body $corpo -ContentType "application/json" -TimeoutSec $TimeoutSec
+        $resp = Invoke-RestMethod -Uri $cfg.UrlWebApp -Method Post -Body $corpoBytesUtf8 -ContentType "application/json; charset=utf-8" -TimeoutSec $TimeoutSec
     } catch {
         Add-Log "[ERRO] Falha ao enviar '$($Arquivo.Name)' via Apps Script: $($_.Exception.Message)" "OrangeRed"
         return $null
