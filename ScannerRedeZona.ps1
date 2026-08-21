@@ -395,12 +395,14 @@ $scriptBlock = {
             }
 
             if ($consultarOcs) {
+                $encontradoNoOcs = $false
                 $nomeCurto = ($resultado.Hostname -split '\.')[0]
                 foreach ($chaveParam in @("NAME", "name")) {
                     try {
                         $urlBusca = "$urlOcsApiBase/computers/search?start=0&limit=5&$chaveParam=$nomeCurto"
                         $respBusca = Invoke-RestMethod -Uri $urlBusca -TimeoutSec 5
                         if (@($respBusca).Count -gt 0) {
+                            $encontradoNoOcs = $true
                             $hwId = @($respBusca)[0].ID
 
                             try {
@@ -439,6 +441,9 @@ $scriptBlock = {
                             break
                         }
                     } catch {}
+                }
+                if (-not $encontradoNoOcs) {
+                    $resultado.Modelo = "Nao encontrado no OCS"
                 }
             }
         }
@@ -1421,6 +1426,26 @@ function Move-ArquivoRenomeandoComDoEvents {
     }
 }
 
+function Format-DuracaoLegivel {
+    <#
+        Converte segundos corridos pra um texto curto em horas/minutos/
+        segundos (ex: 45 -> "45s", 264 -> "4min 24s", 3725 -> "1h 02min 05s")
+        - so mostra a unidade maior quando ela realmente entra (nao mostra
+        "0h" pra copias rapidas). Usado no status de copia via robocopy, que
+        pode passar de varios minutos em link lento e ficar ilegivel so em
+        segundos corridos.
+    #>
+    param([double]$TotalSegundos)
+    $ts = [TimeSpan]::FromSeconds([Math]::Max([Math]::Round($TotalSegundos), 0))
+    if ($ts.TotalHours -ge 1) {
+        return "{0}h {1:D2}min {2:D2}s" -f [int]$ts.TotalHours, $ts.Minutes, $ts.Seconds
+    } elseif ($ts.TotalMinutes -ge 1) {
+        return "{0}min {1:D2}s" -f [int]$ts.TotalMinutes, $ts.Seconds
+    } else {
+        return "{0}s" -f $ts.Seconds
+    }
+}
+
 function Copy-ArquivoComRobocopy {
     <#
         Copia um arquivo local pro destino (UNC do InstSeg) usando o
@@ -1506,7 +1531,7 @@ function Copy-ArquivoComRobocopy {
         $mbTotal = [Math]::Round($totalBytes / 1MB, 1)
         $cronometro = [System.Diagnostics.Stopwatch]::StartNew()
         $proximaAtualizacao = [System.Diagnostics.Stopwatch]::StartNew()
-        $textoStatus = "Copiando '$NomePacote' (robocopy, $mbTotal MB) ha 0s..."
+        $textoStatus = "Copiando '$NomePacote' (robocopy, $mbTotal MB) ha $(Format-DuracaoLegivel 0)..."
         Update-StatusPacoteAtivo -Texto $textoStatus -GridStatus $GridStatus -LinhaIndice $LinhaIndice
         Add-Log $textoStatus "Gray"
         while (-not $processo.HasExited) {
@@ -1515,8 +1540,7 @@ function Copy-ArquivoComRobocopy {
 
             if ($proximaAtualizacao.Elapsed.TotalSeconds -ge 3) {
                 $proximaAtualizacao.Restart()
-                $segundosDecorridos = [Math]::Round($cronometro.Elapsed.TotalSeconds)
-                $textoStatus = "Copiando '$NomePacote' (robocopy, $mbTotal MB) ha ${segundosDecorridos}s..."
+                $textoStatus = "Copiando '$NomePacote' (robocopy, $mbTotal MB) ha $(Format-DuracaoLegivel $cronometro.Elapsed.TotalSeconds)..."
                 Update-StatusPacoteAtivo -Texto $textoStatus -GridStatus $GridStatus -LinhaIndice $LinhaIndice
                 Add-Log $textoStatus "Gray"
             }
@@ -1543,7 +1567,7 @@ function Copy-ArquivoComRobocopy {
         }
     }
 
-    $textoConcluido = "Copiando '$NomePacote' (robocopy, $mbTotal MB) concluido em $([Math]::Round($cronometro.Elapsed.TotalSeconds, 1))s."
+    $textoConcluido = "Copiando '$NomePacote' (robocopy, $mbTotal MB) concluido em $(Format-DuracaoLegivel $cronometro.Elapsed.TotalSeconds)."
     Add-Log $textoConcluido "Gray"
     Update-StatusPacoteAtivo -Texto $textoConcluido -GridStatus $GridStatus -LinhaIndice $LinhaIndice
     if ($AoAtualizarProgresso) { & $AoAtualizarProgresso 100 $textoConcluido }
@@ -3687,7 +3711,8 @@ function Show-JanelaSistemasEleitorais {
             }
             $row.Cells["Copiar"].Value = "Copiar Novamente"
         } else {
-            $row.Cells["StatusPacote"].Value = "Nao copiado ainda"
+            $tamanhoEsperadoTxt = if ($Item.Pacote.TamanhoEsperado) { " ($([Math]::Round($Item.Pacote.TamanhoEsperado / 1MB, 1)) MB)" } else { "" }
+            $row.Cells["StatusPacote"].Value = "Nao copiado ainda$tamanhoEsperadoTxt"
             $row.Cells["StatusPacote"].Style.ForeColor = [System.Drawing.Color]::FromArgb(110, 110, 110)
             $row.Cells["Copiar"].Value = "Baixar e Copiar"
         }
@@ -4095,18 +4120,33 @@ function Add-LinhaGrid {
     # mostra so a versao crua como sempre mostrou. So se aplica a colunas
     # com ComNomeAmigavel = $true (GEDAI, HOLOCRON, PADA-UE, FBR) - SIS e
     # BitLocker nao tem nome de praia, entao sempre mostram a versao crua.
-    # $colunasDesatualizadas guarda quais celulas precisam ser destacadas
-    # (versao instalada != versao marcada "Atual" na planilha).
+    #
+    # $colunasAtualizadas/$colunasDesatualizadas guardam quais celulas
+    # precisam ser destacadas (verde = versao instalada bate com a marcada
+    # "Atual" na planilha pra aquele sistema; vermelho = nao bate). Usa
+    # $script:VersaoAtualPorSistema DIRETO (mesma fonte da janela "Verificar
+    # Sistemas Eleitorais") em vez de Resolve-NomeAmigavelVersao/EhAtual -
+    # assim vale pra QUALQUER sistema com "Atual" marcado na planilha,
+    # independente de ComNomeAmigavel (cobre SIS/Bitlocker/Transportador,
+    # que antes nunca ganhavam destaque nenhum).
+    $colunasAtualizadas = @()
     $colunasDesatualizadas = @()
     $sisTxt = if ($Resultado.VersaoSis) { $Resultado.VersaoSis } else { "-" }
+    if ($sisTxt -ne "-") {
+        $versaoAtualSis = $script:VersaoAtualPorSistema["SIS"]
+        if ($versaoAtualSis) {
+            if ($sisTxt.Trim() -eq $versaoAtualSis.Trim()) { $colunasAtualizadas += "Sis" } else { $colunasDesatualizadas += "Sis" }
+        }
+    }
 
     # Status Instalador: compara o hostname (sem sufixo de dominio, ex.
     # "ZMA053WKS71099.tre-ma.gov.br" -> "ZMA053WKS71099") contra a lista de
     # maquinas liberadas pro usuario "instalador" no AD (consultada uma vez
-    # por varredura). "-" quando nao ha hostname resolvido ou a consulta ao
-    # AD falhou (sem como saber o status real nesses casos).
+    # por varredura). So faz sentido pra maquina com SIS instalado (estacao
+    # eleitoral de verdade) - "-" pra tudo mais (impressora, sem SIS, sem
+    # hostname resolvido, ou se a consulta ao AD falhou).
     $instaladorTxt = "-"
-    if ($temNomeResolvido -and $null -ne $script:MaquinasLiberadasInstalador) {
+    if ($sisTxt -ne "-" -and $temNomeResolvido -and -not $Resultado.PossivelImpressora -and $null -ne $script:MaquinasLiberadasInstalador) {
         $hostnameCurto = ($Resultado.Hostname -split '\.')[0]
         if ($script:MaquinasLiberadasInstalador.Count -eq 0 -or $script:MaquinasLiberadasInstalador -contains $hostnameCurto) {
             $instaladorTxt = "Liberado"
@@ -4115,13 +4155,27 @@ function Add-LinhaGrid {
         }
     }
 
-    $valoresLinha = @($Resultado.IP, $tipo, $Resultado.Hostname, $modeloTxt, $tempoTxt, $Resultado.DetectadoPor, $vncTxt, $rcTxt, $sisTxt, $instaladorTxt)
+    # Impressora com IP reaproveitado costuma herdar no DNS reverso o nome
+    # da maquina antiga que usava aquele IP antes (PTR desatualizado no
+    # servidor de DNS - confirmado na pratica: console web da impressora
+    # mostra um IP, mas "ping -a" no mesmo IP resolve pra hostname de PC).
+    # Como esse hostname nao tem nenhuma relacao com a impressora de
+    # verdade, so confunde - a coluna Hostname fica em branco pra impressora.
+    $hostnameExibido = if ($Resultado.PossivelImpressora) { "-" } else { $Resultado.Hostname }
+
+    $valoresLinha = @($Resultado.IP, $tipo, $hostnameExibido, $modeloTxt, $tempoTxt, $Resultado.DetectadoPor, $vncTxt, $rcTxt, $sisTxt, $instaladorTxt)
     foreach ($sis in $script:SistemasEleitoraisExtra) {
         if (-not $sis.NaGradePrincipal) { continue }
         $valorExtra = $Resultado.($sis.Propriedade)
         $infoExtra = if ($sis.ComNomeAmigavel) { Resolve-NomeAmigavelVersao -Sistema $sis.NomeVersaoAtual -Versao $valorExtra } else { $null }
         $valoresLinha += $(if ($infoExtra) { "$($infoExtra.NomeAmigavel) ($valorExtra)" } elseif ($valorExtra) { $valorExtra } else { "-" })
-        if ($infoExtra -and $infoExtra.EhAtual -eq $false) { $colunasDesatualizadas += $sis.Coluna }
+
+        if ($valorExtra -and $valorExtra -ne "-") {
+            $versaoAtualSistema = $script:VersaoAtualPorSistema[$sis.NomeVersaoAtual]
+            if ($versaoAtualSistema) {
+                if ($valorExtra.Trim() -eq $versaoAtualSistema.Trim()) { $colunasAtualizadas += $sis.Coluna } else { $colunasDesatualizadas += $sis.Coluna }
+            }
+        }
     }
     $valoresLinha += @("", "", "")
 
@@ -4129,8 +4183,13 @@ function Add-LinhaGrid {
     $row = $grid.Rows[$rowIndex]
     $row.Tag = $Resultado
 
+    foreach ($nomeColuna in $colunasAtualizadas) {
+        $row.Cells[$nomeColuna].Style.ForeColor = [System.Drawing.Color]::FromArgb(0, 128, 0)
+        $row.Cells[$nomeColuna].Style.Font = New-Object System.Drawing.Font($grid.Font, [System.Drawing.FontStyle]::Bold)
+        $row.Cells[$nomeColuna].ToolTipText = "Versao atualizada"
+    }
     foreach ($nomeColuna in $colunasDesatualizadas) {
-        $row.Cells[$nomeColuna].Style.ForeColor = [System.Drawing.Color]::FromArgb(200, 100, 0)
+        $row.Cells[$nomeColuna].Style.ForeColor = [System.Drawing.Color]::FromArgb(220, 53, 69)
         $row.Cells[$nomeColuna].Style.Font = New-Object System.Drawing.Font($grid.Font, [System.Drawing.FontStyle]::Bold)
         $row.Cells[$nomeColuna].ToolTipText = "Versao desatualizada"
     }
@@ -4249,19 +4308,19 @@ $timer.Add_Tick({
                 $script:Resultados.Add($resultado)
 
                 if ($resultado.Online) {
-                    # A convencao ".70 = gateway" e ".10/.11 = nobreak central"
-                    # vale tanto no padrao do interior (10.198.zona.X, uma rede
-                    # por zona) quanto numa rede COMPARTILHADA (10.11.81.X de
-                    # Sao Luis, um predio inteiro): numa rede compartilhada so
-                    # existe 1 gateway e 1 nobreak central fisico pra TODAS as
-                    # zonas daquele predio, entao o mesmo IP fixo continua
-                    # valendo - por isso essas duas classificacoes NAO dependem
-                    # de RedeCompartilhada. Ja ".190-.195 = telefone VOIP" e um
-                    # padrao POR ZONA (cada zona tem seus proprios ramais) que
-                    # nao faz sentido numa rede compartilhada por varias zonas
-                    # ao mesmo tempo, entao esse continua desativado la.
+                    # A convencao ".70 = gateway" e um padrao POR ZONA (rede
+                    # 10.198.zona.X, uma rede/roteador por zona no interior) -
+                    # confirmado NA PRATICA que nao vale em rede COMPARTILHADA
+                    # entre varias zonas (ex: 10.11.81.X, predio do Forum de
+                    # Sao Luis): la nao existe um roteador fixo em .70 pra
+                    # "zona", e um IP qualquer como outro qualquer, entao essa
+                    # classificacao fica desativada quando RedeCompartilhada.
+                    # ".10/.11 = nobreak central" continua valendo mesmo em
+                    # rede compartilhada (1 nobreak fisico pro predio inteiro).
+                    # Ja ".190-.195 = telefone VOIP" e por zona (cada zona tem
+                    # seus proprios ramais), tambem desativado em compartilhada.
                     $ultimoOcteto = [int]($resultado.IP -split '\.')[3]
-                    $ehGateway = $resultado.IP.EndsWith(".70")
+                    $ehGateway = (-not $script:RedeCompartilhada) -and $resultado.IP.EndsWith(".70")
                     $ehNobreakCentral = ($ultimoOcteto -eq 10 -or $ultimoOcteto -eq 11)
                     $ehTelefoneVoip = (-not $script:RedeCompartilhada) -and ($ultimoOcteto -ge 190 -and $ultimoOcteto -le 195)
 
@@ -4337,10 +4396,18 @@ $timer.Add_Tick({
         # como "Possivelmente Desligado" de uma vez). Roda depois de
         # Invoke-BuscarDesligadosOcs (que limpa $script:MaquinasDesligadasOcs)
         # e insere na frente pra ficar bem visivel.
+        # So faz sentido numa rede POR ZONA (10.198.zona.0/24, um roteador
+        # fixo por zona) - numa rede COMPARTILHADA entre varias zonas (ex:
+        # predio do Forum de Sao Luis, 10.11.81.0/24) nao existe essa
+        # convencao de gateway fixo em .70 pra "a zona", entao a deteccao
+        # fica desativada (senao gera falso positivo reclassificando o
+        # predio inteiro como sem link so por causa de um IP qualquer).
         $resolucaoZonaAtual = Resolve-RedeDaZona -Zona $script:ZonaAtual
         $ipGateway = "$($resolucaoZonaAtual.Prefixo)70"
         $gatewayRespondeu = $script:Resultados | Where-Object { $_.IP -eq $ipGateway -and $_.Online } | Select-Object -First 1
-        if (-not $gatewayRespondeu) {
+        if ($script:RedeCompartilhada) {
+            # nada a fazer - convencao de gateway por zona nao se aplica aqui
+        } elseif (-not $gatewayRespondeu) {
             Add-Log "[AVISO] Gateway ($ipGateway) nao respondeu na varredura - possivel falta de link de comunicacao com a zona inteira (as maquinas podem aparecer como desligadas so por causa disso, nao por estarem realmente desligadas)." "OrangeRed"
             $pseudoSemLink = [PSCustomObject]@{
                 IP                     = $ipGateway
