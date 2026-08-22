@@ -138,6 +138,7 @@ $script:PortasImpressora = @(9100, 515, 631)   # RAW/AppSocket, LPR, IPP
 $script:PortaVnc         = 5900
 $script:PortaRcIvanti    = 9535   # Ivanti/LANDesk Remote Control legado (RCViewer.exe)
 $script:UrlOcsApiBase    = "http://inventario.tre-ma.jus.br/ocsapi/v1"
+$script:MesesParaCandidatoExclusaoOcs = 6   # ultimo contato ha mais de X meses = candidata a exclusao no OCS
 
 $script:MapaModelos = @{
     "C4400"                            = "Mini-Positivo"
@@ -1533,4 +1534,422 @@ function Send-ArquivoParaGoogleDriveViaAppsScript {
     }
 
     return [PSCustomObject]@{ Ok = $true; Mensagem = "Arquivo '$NomeArquivo' enviado ao Google Drive."; Url = $resp.url }
+}
+
+# ============================================================
+# FASE B: maquinas "possivelmente desligadas" via OCS Inventory +
+# Wake-on-LAN. Ambos rodam aqui no servidor porque nao esbarram no
+# duplo-salto de Kerberos (sao chamadas de API HTTP/UDP pro OCS
+# Inventory e pra rede da zona, nao SMB/autenticacao Windows contra
+# uma terceira maquina) - o mesmo padrao ja usado pelo $script:
+# scriptBlock da varredura, que ja consulta o OCS Inventory direto
+# daqui. Wake-on-LAN especificamente FAZ SENTIDO ficar centralizado
+# aqui pelo MESMO motivo que centralizou a varredura desde o inicio:
+# o magic packet e mandado como BROADCAST UDP, exatamente o tipo de
+# trafego que a Secao de Seguranca Cibernetica pediu pra concentrar
+# numa unica maquina confiavel.
+# ============================================================
+
+function Resolve-ModeloAmigavel {
+    param([string]$ModeloOriginal)
+    if (-not $ModeloOriginal) { return $null }
+    if ($script:MapaModelos.ContainsKey($ModeloOriginal)) { return $script:MapaModelos[$ModeloOriginal] }
+    return $ModeloOriginal
+}
+
+function Get-OcsComputadoresPorIp {
+    <#
+        Acha as maquinas do OCS Inventory cadastradas numa rede /24 fazendo
+        uma busca EXATA por IP (coluna "IPADDR" da tabela hardware) pra
+        cada um dos 254 enderecos, em paralelo - confirmado na pratica que
+        /computers/search aceita IPADDR como :searchCriteria.
+
+        Como a busca e por IP (nao por padrao de nome), dispensa
+        Test-HostnamePertenceZona pra decidir se uma maquina "e desta
+        zona" - o ULTIMO IP CONHECIDO (hardware.IPADDR) ja fica dentro da
+        rede fisica da propria zona/predio, mesmo em rede compartilhada
+        entre varias zonas.
+
+        Relocada do ScannerRedeZona.ps1 original sem mudanca de logica -
+        so perdeu o polling com DoEvents (nao ha thread de UI aqui pra
+        proteger) e o Add-Log de aviso de erro parcial (quem chama decide
+        o que fazer com uma lista eventualmente incompleta).
+    #>
+    param([string]$PrefixoRede, [int]$TimeoutSec = 8, [int]$Paralelismo = 40)
+
+    $scriptBlockPorIp = {
+        param($UrlBase, $Ip, $TimeoutSec)
+        try {
+            $urlBusca = "$UrlBase/computers/search?start=0&limit=5&IPADDR=$Ip"
+            $respBusca = Invoke-RestMethod -Uri $urlBusca -TimeoutSec $TimeoutSec
+            $ids = @($respBusca) | Where-Object { $_.ID } | Select-Object -ExpandProperty ID -Unique
+            if (@($ids).Count -eq 0) { return [PSCustomObject]@{ Comps = @(); Erro = $null } }
+
+            $comps = New-Object System.Collections.Generic.List[object]
+            $erroDetalhe = $null
+            foreach ($id in $ids) {
+                try {
+                    $respHw = Invoke-RestMethod -Uri "$UrlBase/computer/$id/hardware" -TimeoutSec $TimeoutSec
+                    $hw = $respHw."$id".hardware
+                    if (-not $hw -or -not $hw.NAME) { continue }
+
+                    $bios = $null
+                    try {
+                        $respBios = Invoke-RestMethod -Uri "$UrlBase/computer/$id/bios" -TimeoutSec $TimeoutSec
+                        $bios = $respBios."$id".bios
+                    } catch {}
+
+                    $registry = $null
+                    try {
+                        $respReg = Invoke-RestMethod -Uri "$UrlBase/computer/$id/registry" -TimeoutSec $TimeoutSec
+                        $registry = $respReg."$id".registry
+                    } catch {}
+
+                    $comps.Add([PSCustomObject]@{ hardware = $hw; bios = $bios; registry = $registry })
+                } catch {
+                    $erroDetalhe = $_.Exception.Message
+                }
+            }
+            return [PSCustomObject]@{ Comps = $comps; Erro = $erroDetalhe }
+        } catch {
+            return [PSCustomObject]@{ Comps = @(); Erro = $_.Exception.Message }
+        }
+    }
+
+    $sessionState = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
+    $pool = [runspacefactory]::CreateRunspacePool(1, $Paralelismo, $sessionState, $Host)
+    $pool.Open()
+
+    $encontrados = New-Object System.Collections.Generic.List[object]
+    try {
+        $jobs = New-Object System.Collections.Generic.List[object]
+        for ($i = 1; $i -le 254; $i++) {
+            $ip = "$PrefixoRede$i"
+            $ps = [powershell]::Create()
+            $ps.RunspacePool = $pool
+            [void]$ps.AddScript($scriptBlockPorIp).AddArgument($script:UrlOcsApiBase).AddArgument($ip).AddArgument($TimeoutSec)
+            $jobs.Add([PSCustomObject]@{ Pipe = $ps; Handle = $ps.BeginInvoke() })
+        }
+
+        while ($jobs | Where-Object { -not $_.Handle.IsCompleted }) {
+            Start-Sleep -Milliseconds 50
+        }
+
+        foreach ($job in $jobs) {
+            $r = $job.Pipe.EndInvoke($job.Handle)
+            $job.Pipe.Dispose()
+            if ($r.Erro) { continue }
+            foreach ($comp in $r.Comps) { $encontrados.Add($comp) }
+        }
+    } finally {
+        $pool.Close()
+        $pool.Dispose()
+    }
+
+    return $encontrados
+}
+
+function Get-MaquinasDesligadasOcs {
+    <#
+        Compara o cadastro do OCS Inventory pra rede da zona com o que a
+        varredura ja encontrou online, pra achar maquinas cadastradas que
+        nao responderam (candidatas a "desligada/desconectada") - e de
+        quebra corrige o Hostname de maquinas que responderam mas o DNS
+        reverso/NetBIOS nao resolveram (cruzando pelo ultimo IP conhecido
+        no OCS).
+
+        Reestruturada em relacao ao Invoke-BuscarDesligadosOcs original:
+        recebe $ResultadosOnline (so as entradas Online=true da varredura
+        ja feita, mandadas pelo cliente) em vez de ler $script:Resultados
+        direto (que so existe do lado cliente agora) - e devolve as
+        CORRECOES e as DESLIGADAS pro cliente aplicar na propria copia
+        local, em vez de mutar `$script:Resultados`/`$script:
+        MaquinasDesligadasOcs` e chamar `Reconstruir-Grid` (que so
+        existem do lado cliente). STRING JSON no retorno pelo motivo de
+        sempre (Correcoes/Desligadas sao listas de PSCustomObject).
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [int]$Zona,
+        [bool]$RedeCompartilhada = $false,
+        [Parameter(Mandatory)]
+        [object[]]$ResultadosOnline
+    )
+
+    $zonaPad = "{0:D3}" -f $Zona
+    $padroes = @("ZMA$zonaPad", "CMA$zonaPad", "ZE-$zonaPad", "ZE$zonaPad")
+    $resolucaoAtual = Resolve-RedeDaZona -Zona $Zona
+
+    $comps = Get-OcsComputadoresPorIp -PrefixoRede $resolucaoAtual.Prefixo
+
+    # Corrige o Hostname (e Modelo/VersaoSis/sistemas extra, se ainda "-")
+    # de quem respondeu a varredura mas ficou sem nome resolvido - cruza
+    # pelo ULTIMO IP CONHECIDO no OCS. Precisa rodar ANTES de montar
+    # $nomesOnline logo abaixo, senao essas maquinas (agora com nome
+    # conhecido) seriam contadas de novo como "possivelmente desligadas"
+    # por engano.
+    $correcoes = New-Object System.Collections.Generic.List[object]
+    $resultadosCorrigidos = New-Object System.Collections.Generic.List[object]
+    foreach ($cand in $ResultadosOnline) {
+        if (-not $cand.Online -or ($cand.Hostname -and $cand.Hostname -ne "(sem resolucao de nome)")) {
+            $resultadosCorrigidos.Add($cand)
+            continue
+        }
+
+        $compAchado = $null
+        foreach ($comp in $comps) {
+            if ($comp.hardware.IPADDR -eq $cand.IP -and $comp.hardware.NAME) { $compAchado = $comp; break }
+        }
+        if (-not $compAchado) { $resultadosCorrigidos.Add($cand); continue }
+        $hwComp = $compAchado.hardware
+
+        $modeloNovo = $cand.Modelo
+        $biosComp = @($compAchado.bios) | Select-Object -First 1
+        if ($biosComp -and $biosComp.SMODEL -and $modeloNovo -eq "-") {
+            $modeloNovo = Resolve-ModeloAmigavel -ModeloOriginal $biosComp.SMODEL
+        }
+        $versaoSisNovo = $cand.VersaoSis
+        $registryComp = @($compAchado.registry)
+        $entradaSisComp = @($registryComp) | Where-Object { $_.NAME -eq "VERSAO_SIS" } | Select-Object -First 1
+        if ($entradaSisComp -and $entradaSisComp.REGVALUE -and $versaoSisNovo -eq "-") {
+            $versaoSisNovo = $entradaSisComp.REGVALUE
+        }
+        $pertenceZonaNovo = $cand.PertenceZonaAtual
+        if ($RedeCompartilhada) {
+            $pertenceZonaNovo = Test-HostnamePertenceZona -Hostname $hwComp.NAME -Zona $Zona
+        }
+
+        $copia = [PSCustomObject]@{
+            IP                 = $cand.IP
+            Online             = $cand.Online
+            Hostname           = $hwComp.NAME
+            TempoMs            = $cand.TempoMs
+            PossivelImpressora = $cand.PossivelImpressora
+            PortasAbertas      = $cand.PortasAbertas
+            DetectadoPor       = "$($cand.DetectadoPor) (nome via OCS Inventory)"
+            VncAtivo           = $cand.VncAtivo
+            RcIvantiAtivo      = $cand.RcIvantiAtivo
+            VersaoSis          = $versaoSisNovo
+            Modelo             = $modeloNovo
+            EhGateway          = $cand.EhGateway
+            EhNobreakCentral   = $cand.EhNobreakCentral
+            EhTelefoneVoip     = $cand.EhTelefoneVoip
+            PertenceZonaAtual  = $pertenceZonaNovo
+        }
+        foreach ($sisExtra in $script:SistemasEleitoraisExtra) {
+            $valorExtraNovo = $cand.($sisExtra.Propriedade)
+            $entradaExtraComp = @($registryComp) | Where-Object { $_.NAME -eq $sisExtra.Chave } | Select-Object -First 1
+            if ($entradaExtraComp -and $entradaExtraComp.REGVALUE -and $valorExtraNovo -eq "-") {
+                $valorExtraNovo = $entradaExtraComp.REGVALUE
+            }
+            $copia | Add-Member -NotePropertyName $sisExtra.Propriedade -NotePropertyValue $valorExtraNovo
+        }
+        $correcoes.Add($copia)
+        $resultadosCorrigidos.Add($copia)
+    }
+
+    $nomesOnline = @{}
+    foreach ($r in $resultadosCorrigidos) {
+        if ($r.Online -and $r.Hostname -and $r.Hostname -ne "(sem resolucao de nome)") {
+            $nomesOnline[(($r.Hostname -split '\.')[0]).ToUpper()] = $true
+        }
+    }
+
+    $desligadas = New-Object System.Collections.Generic.List[object]
+    $nomesJaAdicionados = @{}
+    foreach ($comp in $comps) {
+        $hw = $comp.hardware
+        # Registro incompleto/orfao no proprio OCS (sem nome, sem IP) -
+        # nao da pra mostrar como "possivelmente desligado" util, pula.
+        if (-not $hw -or -not $hw.NAME) { continue }
+        $nomeOcs = $hw.NAME
+        $nomeCurto = ($nomeOcs -split '\.')[0]
+
+        # Rede compartilhada entre varias zonas - so o padrao de nome
+        # (ZMA075 etc) separa qual maquina e desta zona especifica.
+        if ($RedeCompartilhada) {
+            $nomeUpper = if ($nomeOcs) { $nomeOcs.ToUpper() } else { "" }
+            $bateNome = $false
+            foreach ($padrao in $padroes) {
+                if ($nomeUpper.Contains($padrao)) { $bateNome = $true; break }
+            }
+            if (-not $bateNome) { continue }
+        }
+
+        if ($nomesOnline.ContainsKey($nomeCurto.ToUpper())) { continue }
+        if ($nomesJaAdicionados.ContainsKey($nomeCurto.ToUpper())) { continue }
+        $nomesJaAdicionados[$nomeCurto.ToUpper()] = $true
+
+        $bios = @($comp.bios) | Select-Object -First 1
+        $modeloOriginal = if ($bios) { $bios.SMODEL } else { $null }
+        $registry = @($comp.registry)
+        $versaoSis = (@($registry) | Where-Object { $_.NAME -eq "VERSAO_SIS" } | Select-Object -First 1).REGVALUE
+
+        $ultimoContatoBruto = if ($hw.LASTDATE) { $hw.LASTDATE } elseif ($hw.LASTCOME) { $hw.LASTCOME } else { $null }
+        $ultimoContato = $null
+        $candidatoExclusaoOcs = $false
+        if ($ultimoContatoBruto) {
+            $dataParseada = [DateTime]::MinValue
+            if ([DateTime]::TryParseExact($ultimoContatoBruto, "yyyy-MM-dd HH:mm:ss", [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::None, [ref]$dataParseada)) {
+                $ultimoContato = $dataParseada.ToString("dd/MM/yy HH:mm:ss")
+                $candidatoExclusaoOcs = $dataParseada -lt (Get-Date).AddMonths(-$script:MesesParaCandidatoExclusaoOcs)
+            } else {
+                $ultimoContato = $ultimoContatoBruto
+            }
+        }
+        $detectadoPor = if ($ultimoContato) { "OCS Inventory - ultimo contato $ultimoContato" } else { "OCS Inventory (sem resposta na varredura)" }
+        if ($candidatoExclusaoOcs) { $detectadoPor += " (candidata a exclusao - +$($script:MesesParaCandidatoExclusaoOcs)m sem contato)" }
+
+        $pseudo = [PSCustomObject]@{
+            IP                     = if ($hw.IPADDR) { $hw.IPADDR } else { "-" }
+            Online                 = $false
+            Hostname               = $nomeOcs
+            TempoMs                = $null
+            PossivelImpressora     = $false
+            PortasAbertas          = ""
+            DetectadoPor           = $detectadoPor
+            VncAtivo               = $false
+            RcIvantiAtivo          = $false
+            VersaoSis              = if ($versaoSis) { $versaoSis } else { "-" }
+            Modelo                 = if ($modeloOriginal) { Resolve-ModeloAmigavel -ModeloOriginal $modeloOriginal } else { "-" }
+            EhGateway              = $false
+            EhNobreakCentral       = $false
+            EhTelefoneVoip         = $false
+            PertenceZonaAtual      = if ($RedeCompartilhada) { Test-HostnamePertenceZona -Hostname $nomeOcs -Zona $Zona } else { $true }
+            PossivelmenteDesligado = $true
+            HardwareId             = $hw.ID
+            CandidatoExclusaoOcs   = $candidatoExclusaoOcs
+            SemLinkComunicacao     = $false
+        }
+        foreach ($sisExtra in $script:SistemasEleitoraisExtra) {
+            $entradaExtra = @($registry) | Where-Object { $_.NAME -eq $sisExtra.Chave } | Select-Object -First 1
+            $valorExtra = if ($entradaExtra -and $entradaExtra.REGVALUE) { $entradaExtra.REGVALUE } else { "-" }
+            $pseudo | Add-Member -NotePropertyName $sisExtra.Propriedade -NotePropertyValue $valorExtra
+        }
+        $desligadas.Add($pseudo)
+    }
+
+    return ([PSCustomObject]@{
+        Ok                          = $true
+        Correcoes                   = $correcoes
+        Desligadas                  = $desligadas
+        TotalNoOcs                  = $comps.Count
+        MesesParaCandidatoExclusao  = $script:MesesParaCandidatoExclusaoOcs
+    } | ConvertTo-Json -Depth 6 -Compress)
+}
+
+function Get-MacAddressOcs {
+    <#
+        Busca o endereco MAC de uma maquina no OCS Inventory (secao
+        "networks" do /computer/:id). Se a maquina tiver mais de uma
+        interface de rede, prioriza a que bate com o ultimo IP conhecido
+        ($IpConhecido); senao usa a primeira interface com MAC
+        preenchido. Devolve $null se nao achar.
+    #>
+    param([int]$HardwareId, [string]$IpConhecido = $null)
+    if (-not $HardwareId) { return $null }
+
+    try {
+        $url = "$($script:UrlOcsApiBase)/computer/$HardwareId/networks"
+        $resp = Invoke-RestMethod -Uri $url -TimeoutSec 8
+        $secaoRedes = $null
+        try { $secaoRedes = $resp."$HardwareId".networks } catch {}
+        $redes = @($secaoRedes)
+        if ($redes.Count -eq 0) { return $null }
+
+        $candidatosMac = @("MACADDR", "MACADDRESS", "MAC")
+        $candidatosIp  = @("IPADDRESS", "IPADDR", "IP")
+
+        $redeEscolhida = $null
+        if ($IpConhecido) {
+            foreach ($campoIp in $candidatosIp) {
+                $redeEscolhida = $redes | Where-Object { $_.$campoIp -eq $IpConhecido } | Select-Object -First 1
+                if ($redeEscolhida) { break }
+            }
+        }
+        if (-not $redeEscolhida) { $redeEscolhida = $redes | Select-Object -First 1 }
+
+        foreach ($campoMac in $candidatosMac) {
+            if ($redeEscolhida.$campoMac) { return $redeEscolhida.$campoMac }
+        }
+        return $null
+    } catch {
+        return $null
+    }
+}
+
+function Send-MagicPacketWol {
+    <#
+        Monta e manda o "magic packet" padrao de Wake-on-LAN (6 bytes
+        0xFF seguidos do MAC repetido 16x) por UDP broadcast, nas portas
+        7 e 9 (as duas convencoes mais comuns).
+    #>
+    param([string]$MacAddress, [string]$IpBroadcast)
+
+    $macLimpo = ($MacAddress -replace "[^0-9A-Fa-f]", "")
+    if ($macLimpo.Length -ne 12) { throw "Endereco MAC invalido: '$MacAddress'" }
+
+    $bytesMac = New-Object byte[] 6
+    for ($i = 0; $i -lt 6; $i++) {
+        $bytesMac[$i] = [Convert]::ToByte($macLimpo.Substring($i * 2, 2), 16)
+    }
+
+    $pacote = New-Object byte[] 102
+    for ($i = 0; $i -lt 6; $i++) { $pacote[$i] = 0xFF }
+    for ($rep = 0; $rep -lt 16; $rep++) {
+        [Array]::Copy($bytesMac, 0, $pacote, 6 + ($rep * 6), 6)
+    }
+
+    $udp = New-Object System.Net.Sockets.UdpClient
+    try {
+        $udp.EnableBroadcast = $true
+        foreach ($porta in @(9, 7)) {
+            [void]$udp.Send($pacote, $pacote.Length, $IpBroadcast, $porta)
+        }
+    } finally {
+        $udp.Close()
+    }
+}
+
+function Invoke-AcaoLigarWol {
+    <#
+        Wake-on-LAN pra uma maquina "Possivelmente Desligado": busca o
+        MAC no OCS Inventory e manda o magic packet pro broadcast
+        direcionado da rede da zona (assume /24 - ex: IP 10.198.72.145
+        -> broadcast 10.198.72.255).
+
+        AVISO IMPORTANTE (preservado do original): so funciona se os
+        roteadores entre o POLICY-SERVER e a rede da zona permitirem
+        encaminhar broadcast direcionado ate aquele segmento - por
+        padrao de seguranca (mitigar ataque smurf), a maioria dos
+        roteadores bloqueia isso, sem como confirmar por aqui se vai
+        funcionar.
+
+        Reestruturada: recebia $Resultado (objeto de linha da grade) no
+        original - agora recebe HardwareId/Ip ja extraidos, e devolve
+        [PSCustomObject]@{ Ok; Mensagem } em vez de Add-Log/MessageBox.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [int]$HardwareId,
+        [string]$Ip
+    )
+
+    $mac = Get-MacAddressOcs -HardwareId $HardwareId -IpConhecido $Ip
+    if (-not $mac) {
+        return [PSCustomObject]@{ Ok = $false; Mensagem = "Nao foi possivel obter o endereco MAC no OCS Inventory (ID $HardwareId)." }
+    }
+    if (-not $Ip -or $Ip -eq "-") {
+        return [PSCustomObject]@{ Ok = $false; Mensagem = "Sem IP conhecido - nao da pra calcular o broadcast da rede." }
+    }
+
+    $partesIp = $Ip -split "\."
+    $ipBroadcast = "$($partesIp[0]).$($partesIp[1]).$($partesIp[2]).255"
+
+    try {
+        Send-MagicPacketWol -MacAddress $mac -IpBroadcast $ipBroadcast
+        return [PSCustomObject]@{ Ok = $true; Mensagem = "Pacote Wake-on-LAN enviado (MAC $mac) via broadcast $ipBroadcast, portas 7 e 9. So funciona se a rede permitir broadcast ate essa zona - sem garantia. Aguarde uns 30-60s e varra de novo pra conferir." }
+    } catch {
+        return [PSCustomObject]@{ Ok = $false; Mensagem = "Falha ao enviar o pacote Wake-on-LAN: $($_.Exception.Message)" }
+    }
 }

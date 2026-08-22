@@ -365,7 +365,36 @@ function Send-ArquivoParaGoogleDriveRemoto {
     Invoke-ComandoRemoto -ScriptBlock { param($n, $c, $t) Send-ArquivoParaGoogleDriveViaAppsScript -NomeArquivo $n -ConteudoBase64 $c -TimeoutSec $t } -ArgumentList @($NomeArquivo, $ConteudoBase64, $TimeoutSec)
 }
 
-Export-ModuleMember -Function Connect-ServidorVisao, Disconnect-ServidorVisao, Invoke-ComandoRemoto, Get-IdSessaoAtualVisao, Get-ZonasRemoto, Get-GruposSistemasRemoto, Get-CampanhasRemoto, Get-ResultadosCampanhasRemoto, Resolve-RedeDaZonaRemoto, Test-RedeEhCompartilhadaRemoto, Start-VarreduraRemota, Get-VarreduraNovosResultadosRemoto, Get-VersoesRemoto, Get-SistemasEleitoraisExtraRemoto, Start-BaixarPacoteRemoto, Get-StatusPacoteRemoto, Send-AtualizacaoZonaRemoto, Send-ResultadoCampanhaZonaRemoto, Send-ArquivoParaGoogleDriveRemoto
+# ============================================================
+# FASE B: maquinas desligadas via OCS + Wake-on-LAN - request/resposta
+# unico, sem polling.
+# ============================================================
+function Get-MaquinasDesligadasOcsRemoto {
+    <#
+        $ResultadosOnline vai como ARGUMENTO de entrada (nao retorno) -
+        confirmado ao vivo que array de PSCustomObject como parametro de
+        Invoke-Command atravessa sem o contorno JSON (o bug conhecido e
+        so em VALOR DE RETORNO). Ja a resposta do servidor (Correcoes/
+        Desligadas) usa o contorno JSON de sempre, por ser retorno.
+    #>
+    param(
+        [Parameter(Mandatory)][int]$Zona,
+        [bool]$RedeCompartilhada = $false,
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$ResultadosOnline
+    )
+    $json = Invoke-ComandoRemoto -ScriptBlock { param($z, $rc, $r) Get-MaquinasDesligadasOcs -Zona $z -RedeCompartilhada $rc -ResultadosOnline $r } -ArgumentList @($Zona, $RedeCompartilhada, $ResultadosOnline)
+    return ($json | ConvertFrom-Json)
+}
+
+function Invoke-LigarWolRemoto {
+    param(
+        [Parameter(Mandatory)][int]$HardwareId,
+        [string]$Ip
+    )
+    Invoke-ComandoRemoto -ScriptBlock { param($hid, $ip) Invoke-AcaoLigarWol -HardwareId $hid -Ip $ip } -ArgumentList @($HardwareId, $Ip)
+}
+
+Export-ModuleMember -Function Connect-ServidorVisao, Disconnect-ServidorVisao, Invoke-ComandoRemoto, Get-IdSessaoAtualVisao, Get-ZonasRemoto, Get-GruposSistemasRemoto, Get-CampanhasRemoto, Get-ResultadosCampanhasRemoto, Resolve-RedeDaZonaRemoto, Test-RedeEhCompartilhadaRemoto, Start-VarreduraRemota, Get-VarreduraNovosResultadosRemoto, Get-VersoesRemoto, Get-SistemasEleitoraisExtraRemoto, Start-BaixarPacoteRemoto, Get-StatusPacoteRemoto, Send-AtualizacaoZonaRemoto, Send-ResultadoCampanhaZonaRemoto, Send-ArquivoParaGoogleDriveRemoto, Get-MaquinasDesligadasOcsRemoto, Invoke-LigarWolRemoto
 
 # NOTA: as consultas ao AD (Usuarios da ZE, status do Instalador) NAO
 # passam por aqui - ver VisaoAD.psm1. Nao sao trafego de varredura, e

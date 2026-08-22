@@ -8,15 +8,17 @@
     o plano da construcao desta tela em
     C:\Users\029342881104\.claude\plans\splendid-enchanting-mochi.md.
 
-    FASE A (deste plano): janela principal completa - grade de
-    varredura, menu de contexto basico (Ping/Atualizar/VNC/RC), exportar
-    CSV. AINDA NAO tem: maquinas "possivelmente desligadas" via OCS,
-    Wake-on-LAN, Info de Impressora (Fase B); janela de Sistemas
-    Eleitorais/Pacotes + envio de CVC (Fase C); janelas de Campanha
-    (Fase D); Usuarios da ZE + Gerenciar Zonas (Fase E); Configuracoes
-    (Fase F) - os botoes dessas janelas ja existem no layout (mesma
-    posicao/texto do ScannerRedeZona.ps1 original) mas mostram um aviso
-    "ainda nao implementado nesta fase" ate a fase correspondente entrar.
+    FASE A: janela principal completa - grade de varredura, menu de
+    contexto basico (Ping/Atualizar/VNC/RC), exportar CSV.
+    FASE B: maquinas "possivelmente desligadas" via OCS Inventory (com
+    correcao de hostname), Wake-on-LAN, Info de Impressora (SNMP/console
+    web Pantum).
+    AINDA NAO tem: janela de Sistemas Eleitorais/Pacotes + envio de CVC
+    (Fase C); janelas de Campanha (Fase D); Usuarios da ZE + Gerenciar
+    Zonas (Fase E); Configuracoes (Fase F) - os botoes dessas janelas ja
+    existem no layout (mesma posicao/texto do ScannerRedeZona.ps1
+    original) mas mostram um aviso "ainda nao implementado nesta fase"
+    ate a fase correspondente entrar.
 
     ScannerRedeZona.ps1 (a versao antiga, via RDP) continua sendo a
     versao de producao ate esta tela estar completa e madura.
@@ -462,6 +464,53 @@ function Reconstruir-Grid {
 
 $chkFiltrarZona.Add_CheckedChanged({ Reconstruir-Grid }.GetNewClosure())
 
+function Invoke-BuscarDesligadosOcs {
+    <#
+        Compara o cadastro do OCS Inventory da rede da zona com o que a
+        varredura ja encontrou online, pra achar maquinas cadastradas que
+        nao responderam ("possivelmente desligadas") - e corrige o
+        Hostname de quem respondeu mas ficou sem nome resolvido. Ver
+        Get-MaquinasDesligadasOcsRemoto/Get-MaquinasDesligadasOcs
+        (servidor) - a comparacao em si roda la (nao esbarra no duplo-
+        salto de Kerberos, e uma chamada de API HTTP, mesmo padrao do
+        scriptBlock de varredura).
+    #>
+    if ($script:Resultados.Count -eq 0) { return }
+
+    Add-Log "=== Buscando no OCS Inventory maquinas da Zona $($script:Estado.ZonaAtual) sem resposta na varredura ===" "Yellow"
+    $grid.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
+    try {
+        $online = @($script:Resultados | Where-Object { $_.Online })
+        $resposta = Get-MaquinasDesligadasOcsRemoto -Zona $script:Estado.ZonaAtual -RedeCompartilhada $script:Estado.RedeCompartilhada -ResultadosOnline $online
+    } catch {
+        Add-Log "[AVISO] Falha ao consultar o OCS Inventory: $($_.Exception.Message)" "Yellow"
+        return
+    } finally {
+        $grid.Cursor = [System.Windows.Forms.Cursors]::Default
+    }
+
+    if (-not $resposta.Ok) {
+        Add-Log "[AVISO] Consulta ao OCS Inventory nao retornou dados validos." "Yellow"
+        return
+    }
+
+    foreach ($correcao in $resposta.Correcoes) {
+        for ($i = 0; $i -lt $script:Resultados.Count; $i++) {
+            if ($script:Resultados[$i].IP -eq $correcao.IP) { $script:Resultados[$i] = $correcao; break }
+        }
+    }
+    if ($resposta.Correcoes.Count -gt 0) {
+        Add-Log "$($resposta.Correcoes.Count) hostname(s) resolvido(s) via OCS Inventory (por ultimo IP conhecido) - DNS reverso/NetBIOS nao encontraram esses." "Cyan"
+    }
+
+    $script:MaquinasDesligadasOcs.Clear()
+    foreach ($m in $resposta.Desligadas) { $script:MaquinasDesligadasOcs.Add($m) }
+
+    Reconstruir-Grid
+    $qtdCandidatas = @($resposta.Desligadas | Where-Object { $_.CandidatoExclusaoOcs }).Count
+    Add-Log "=== $($resposta.Desligadas.Count) maquina(s) da Zona $($script:Estado.ZonaAtual) parecem desligadas/desconectadas (cadastradas no OCS, sem resposta na varredura) - $qtdCandidatas com mais de $($resposta.MesesParaCandidatoExclusao) meses sem contato ===" "OrangeRed"
+}
+
 function Update-LabelSedeInfo {
     $zona = [int]$numZona.Value
     try {
@@ -469,11 +518,6 @@ function Update-LabelSedeInfo {
     } catch {
         $lblSedeInfo.Text = "Sede: -    Rede a varrer: (erro ao consultar o servidor)"
         $lblSedeInfo.ForeColor = [System.Drawing.Color]::FromArgb(220, 53, 69)
-        # DIAGNOSTICO TEMPORARIO (Fase A - remover depois de descobrir a
-        # causa do "nada acontece" relatado ao vivo) - mostra o erro
-        # REAL de forma impossivel de passar despercebido, em vez de so
-        # log/label que podem nao estar renderizando por outro motivo.
-        [System.Windows.Forms.MessageBox]::Show("DIAGNOSTICO Update-LabelSedeInfo`r`n`r`nTipo: $($_.Exception.GetType().FullName)`r`nMensagem: $($_.Exception.Message)`r`n`r`nStack:`r`n$($_.ScriptStackTrace)", "Diagnostico temporario", "OK", "Error") | Out-Null
         return
     }
     $zonaTxt = "{0:D3}" -f $zona
@@ -574,7 +618,8 @@ $timer.Add_Tick({
         $impressoras = @($ativos | Where-Object { $_.PossivelImpressora })
         $vncs = @($ativos | Where-Object { $_.VncAtivo })
         Add-Log "=== Varredura concluida: $($ativos.Count) ativo(s) / $($impressoras.Count) impressora(s) / $($vncs.Count) com VNC ===" "Cyan"
-        Add-Log "(Maquinas 'possivelmente desligadas' via OCS Inventory e o aviso de gateway sem resposta entram na Fase B - ainda nao disponivel nesta versao.)" "Gray"
+
+        Invoke-BuscarDesligadosOcs
 
         $btnIniciar.Enabled = $true
         $btnCancelar.Enabled = $false
@@ -799,6 +844,12 @@ $menuContextoGrid.Add_Opening({
     $itemPing = $menuContextoGrid.Items.Add("Ping")
     $itemPing.Add_Click({ Start-PingContinuo -IP $r.IP }.GetNewClosure())
 
+    if ($r.PossivelImpressora) {
+        [void]$menuContextoGrid.Items.Add("-")
+        $itemInfoImpressora = $menuContextoGrid.Items.Add("Info Impressora")
+        $itemInfoImpressora.Add_Click({ Invoke-AcaoInfoImpressoraNaLinha -Resultado $r -Linha $linha }.GetNewClosure())
+    }
+
     $ehHostPc = $r.Hostname -and $r.Hostname -ne "(sem resolucao de nome)" -and -not $r.PossivelImpressora -and -not $r.EhGateway -and -not $r.EhNobreakCentral -and -not $r.EhTelefoneVoip -and -not $r.PossivelmenteDesligado
 
     if ($ehHostPc) {
@@ -822,20 +873,69 @@ $menuContextoGrid.Add_Opening({
         [void]$menuContextoGrid.Items.Add("-")
         $itemAtualizar = $menuContextoGrid.Items.Add("Atualizar Status desta Maquina")
         $itemAtualizar.Add_Click({ Invoke-AcaoAtualizarHost -Resultado $r }.GetNewClosure())
+    } elseif ($r.PossivelmenteDesligado -and $r.HardwareId) {
+        [void]$menuContextoGrid.Items.Add("-")
+
+        $itemWol = $menuContextoGrid.Items.Add("Ligar Computador (Wake-on-LAN)")
+        $itemWol.Add_Click({
+            Add-Log "Buscando endereco MAC de '$($r.Hostname)' no OCS Inventory (ID $($r.HardwareId))..." "Gray"
+            try {
+                $resultadoAcao = Invoke-LigarWolRemoto -HardwareId $r.HardwareId -Ip $r.IP
+                if ($resultadoAcao.Ok) {
+                    Add-Log $resultadoAcao.Mensagem "Cyan"
+                    [System.Windows.Forms.MessageBox]::Show($resultadoAcao.Mensagem, "Wake-on-LAN enviado", "OK", "Information") | Out-Null
+                } else {
+                    Add-Log "[ERRO] $($resultadoAcao.Mensagem)" "OrangeRed"
+                    [System.Windows.Forms.MessageBox]::Show($resultadoAcao.Mensagem, "Erro", "OK", "Error") | Out-Null
+                }
+            } catch {
+                Add-Log "[ERRO] Falha ao enviar Wake-on-LAN: $($_.Exception.Message)" "OrangeRed"
+            }
+        }.GetNewClosure())
+
+        $itemExcluirOcs = $menuContextoGrid.Items.Add("Abrir para Excluir no OCS Inventory...")
+        $itemExcluirOcs.Add_Click({
+            $resultadoAcao = Open-ExclusaoOcs -HardwareId $r.HardwareId
+            if ($resultadoAcao.Sucesso) { Add-Log $resultadoAcao.Mensagem "Cyan" } else { Add-Log "[ERRO] $($resultadoAcao.Mensagem)" "OrangeRed" }
+        }.GetNewClosure())
     }
 
     if ($menuContextoGrid.Items.Count -eq 0) { $e.Cancel = $true }
 }.GetNewClosure())
 
+function Invoke-AcaoInfoImpressoraNaLinha {
+    <#
+        Chama Invoke-AcaoInfoImpressora (VisaoAcoesLocais.psm1, roda
+        local) e, se confirmar Pantum, atualiza a celula "Tipo" da linha
+        na grade - a funcao do modulo nao conhece a grade principal (so
+        devolve EhPantum), quem decide atualizar a UI e este chamador.
+    #>
+    param($Resultado, $Linha)
+
+    $grid.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
+    try {
+        $resultadoAcao = Invoke-AcaoInfoImpressora -Resultado $Resultado
+    } finally {
+        $grid.Cursor = [System.Windows.Forms.Cursors]::Default
+    }
+    foreach ($aviso in $resultadoAcao.Avisos) { Add-Log $aviso "Gray" }
+    if ($resultadoAcao.EhPantum -and $Linha -and $Linha.Cells["Tipo"]) {
+        $Linha.Cells["Tipo"].Value = "Impressora Pantum"
+    }
+}
+
 $grid.Add_CellDoubleClick({
     param($sender, $e)
     if ($e.RowIndex -lt 0) { return }
-    $r = $grid.Rows[$e.RowIndex].Tag
+    $linhaAtual = $grid.Rows[$e.RowIndex]
+    $r = $linhaAtual.Tag
     if (-not $r) { return }
-    if ($r.VncAtivo -and -not $r.PossivelImpressora) {
+    if ($r.PossivelImpressora) {
+        Invoke-AcaoInfoImpressoraNaLinha -Resultado $r -Linha $linhaAtual
+    } elseif ($r.VncAtivo) {
         $resultadoAcao = Open-VncViewer -IP $r.IP
         if ($resultadoAcao.Sucesso) { Add-Log $resultadoAcao.Mensagem "Cyan" } else { Add-Log "[ERRO] $($resultadoAcao.Mensagem)" "OrangeRed" }
-    } elseif ($r.RcIvantiAtivo -and -not $r.PossivelImpressora) {
+    } elseif ($r.RcIvantiAtivo) {
         $resultadoAcao = Open-RcViewer -IP $r.IP
         if ($resultadoAcao.Sucesso) { Add-Log $resultadoAcao.Mensagem "Cyan" } else { Add-Log "[ERRO] $($resultadoAcao.Mensagem)" "OrangeRed" }
     }
