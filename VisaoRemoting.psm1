@@ -178,6 +178,17 @@ function Get-VersoesRemoto {
     return ($json | ConvertFrom-Json)
 }
 
+function Get-SistemasEleitoraisExtraRemoto {
+    <#
+        Get-SistemasEleitoraisExtra do lado servidor devolve uma STRING
+        JSON (array de PSCustomObject). Aqui desserializa de volta -
+        schema das colunas dinamicas da grade principal (Bitlocker/
+        Gedai/Holocron/etc), buscado uma vez na conexao.
+    #>
+    $json = Invoke-ComandoRemoto -ScriptBlock { Get-SistemasEleitoraisExtra }
+    return @($json | ConvertFrom-Json)
+}
+
 # NOTA: nao existe "Get-StatusPacoteNoDestinoRemoto" nem
 # "Start-BaixarECopiarPacoteRemoto" (a copia INTEIRA, incluindo a
 # checagem "ja esta copiado?") - ver VisaoPacotes.psm1: acesso a
@@ -354,7 +365,7 @@ function Send-ArquivoParaGoogleDriveRemoto {
     Invoke-ComandoRemoto -ScriptBlock { param($n, $c, $t) Send-ArquivoParaGoogleDriveViaAppsScript -NomeArquivo $n -ConteudoBase64 $c -TimeoutSec $t } -ArgumentList @($NomeArquivo, $ConteudoBase64, $TimeoutSec)
 }
 
-Export-ModuleMember -Function Connect-ServidorVisao, Disconnect-ServidorVisao, Invoke-ComandoRemoto, Get-IdSessaoAtualVisao, Get-ZonasRemoto, Get-GruposSistemasRemoto, Get-CampanhasRemoto, Get-ResultadosCampanhasRemoto, Resolve-RedeDaZonaRemoto, Test-RedeEhCompartilhadaRemoto, Start-VarreduraRemota, Get-VarreduraNovosResultadosRemoto, Get-VersoesRemoto, Start-BaixarPacoteRemoto, Get-StatusPacoteRemoto, Send-AtualizacaoZonaRemoto, Send-ResultadoCampanhaZonaRemoto, Send-ArquivoParaGoogleDriveRemoto
+Export-ModuleMember -Function Connect-ServidorVisao, Disconnect-ServidorVisao, Invoke-ComandoRemoto, Get-IdSessaoAtualVisao, Get-ZonasRemoto, Get-GruposSistemasRemoto, Get-CampanhasRemoto, Get-ResultadosCampanhasRemoto, Resolve-RedeDaZonaRemoto, Test-RedeEhCompartilhadaRemoto, Start-VarreduraRemota, Get-VarreduraNovosResultadosRemoto, Get-VersoesRemoto, Get-SistemasEleitoraisExtraRemoto, Start-BaixarPacoteRemoto, Get-StatusPacoteRemoto, Send-AtualizacaoZonaRemoto, Send-ResultadoCampanhaZonaRemoto, Send-ArquivoParaGoogleDriveRemoto
 
 # NOTA: as consultas ao AD (Usuarios da ZE, status do Instalador) NAO
 # passam por aqui - ver VisaoAD.psm1. Nao sao trafego de varredura, e

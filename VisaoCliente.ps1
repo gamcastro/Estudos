@@ -1,465 +1,909 @@
 <#
     VisaoCliente.ps1
 
-    FASE 0 da migracao pra arquitetura cliente-servidor (ver plano em
-    C:\Users\029342881104\.claude\plans\splendid-enchanting-mochi.md) -
-    ainda NAO e a tela completa da Visao. E so o arnes de teste da
-    infraestrutura de conexao (VisaoRemoting.psm1 + VisaoServidor.ps1):
-    conectar no POLICY-SERVER na abertura, provar que uma chamada remota
-    de verdade executa do OUTRO lado, e provar que a reconexao automatica
-    funciona quando a sessao cai no meio do uso.
+    Tela de PRODUCAO da "Visao" - roda LOCAL na estacao do tecnico, sem
+    RDP, sem se autoelevar (nao precisa mais: varredura/robocopy/APIs do
+    Google rodam no POLICY-SERVER via PowerShell Remoting; acesso a
+    \\IP\InstSeg de maquinas de zona e AD rodam local, sem elevacao). Ver
+    o plano da construcao desta tela em
+    C:\Users\029342881104\.claude\plans\splendid-enchanting-mochi.md.
 
-    A tela WinForms completa (grade de zonas, varredura etc.) so entra
-    aqui a partir da Fase 2+ do plano, conforme as funcoes reais forem
-    migradas do ScannerRedeZona.ps1 - que continua sendo a versao de
-    producao (via RDP) ate essa migracao estar madura.
+    FASE A (deste plano): janela principal completa - grade de
+    varredura, menu de contexto basico (Ping/Atualizar/VNC/RC), exportar
+    CSV. AINDA NAO tem: maquinas "possivelmente desligadas" via OCS,
+    Wake-on-LAN, Info de Impressora (Fase B); janela de Sistemas
+    Eleitorais/Pacotes + envio de CVC (Fase C); janelas de Campanha
+    (Fase D); Usuarios da ZE + Gerenciar Zonas (Fase E); Configuracoes
+    (Fase F) - os botoes dessas janelas ja existem no layout (mesma
+    posicao/texto do ScannerRedeZona.ps1 original) mas mostram um aviso
+    "ainda nao implementado nesta fase" ate a fase correspondente entrar.
+
+    ScannerRedeZona.ps1 (a versao antiga, via RDP) continua sendo a
+    versao de producao ate esta tela estar completa e madura.
 #>
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
+Add-Type -AssemblyName Microsoft.VisualBasic
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
 Import-Module (Join-Path $PSScriptRoot "VisaoRemoting.psm1") -Force
 Import-Module (Join-Path $PSScriptRoot "VisaoAD.psm1") -Force
 Import-Module (Join-Path $PSScriptRoot "VisaoPacotes.psm1") -Force
+Import-Module (Join-Path $PSScriptRoot "VisaoAcoesLocais.psm1") -Force
 
-$form = New-Object System.Windows.Forms.Form
-$form.Text = "Visao - Teste de Conexao Remota (Fase 0)"
-$form.Size = New-Object System.Drawing.Size(560, 600)
-$form.StartPosition = "CenterScreen"
-$form.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+$script:NomeFerramenta = "Visao"
+$script:VersaoFerramenta = "2.0"
 
-$lblStatusConexao = New-Object System.Windows.Forms.Label
-$lblStatusConexao.Text = "Conectando ao POLICY-SERVER..."
-$lblStatusConexao.Location = New-Object System.Drawing.Point(15, 15)
-$lblStatusConexao.Size = New-Object System.Drawing.Size(520, 24)
-$lblStatusConexao.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
-$lblStatusConexao.ForeColor = [System.Drawing.Color]::Gray
-$form.Controls.Add($lblStatusConexao)
+# ============================================================
+# ESTADO GLOBAL (client-side) - equivalente ao topo do
+# ScannerRedeZona.ps1 original, so a parte que ainda faz sentido do lado
+# cliente (a maior parte do estado de varredura/config agora vive no
+# servidor, ver VisaoServidor.ps1).
+# ============================================================
+$script:Resultados            = New-Object System.Collections.Generic.List[object]
+$script:MaquinasDesligadasOcs = New-Object System.Collections.Generic.List[object]   # populado na Fase B
 
-$btnTestarChamada = New-Object System.Windows.Forms.Button
-$btnTestarChamada.Text = "Chamar Get-TesteConexaoServidor"
-$btnTestarChamada.Location = New-Object System.Drawing.Point(15, 50)
-$btnTestarChamada.Width = 250
-$btnTestarChamada.Height = 28
-$btnTestarChamada.Enabled = $false
-$form.Controls.Add($btnTestarChamada)
-
-$btnDerrubarSessao = New-Object System.Windows.Forms.Button
-$btnDerrubarSessao.Text = "Simular Queda da Sessao"
-$btnDerrubarSessao.Location = New-Object System.Drawing.Point(275, 50)
-$btnDerrubarSessao.Width = 220
-$btnDerrubarSessao.Height = 28
-$btnDerrubarSessao.Enabled = $false
-$form.Controls.Add($btnDerrubarSessao)
-
-$btnTestarFase1 = New-Object System.Windows.Forms.Button
-$btnTestarFase1.Text = "Testar Fase 1 (Zonas/Grupos/Campanhas/Resultados)"
-$btnTestarFase1.Location = New-Object System.Drawing.Point(15, 85)
-$btnTestarFase1.Width = 480
-$btnTestarFase1.Height = 28
-$btnTestarFase1.Enabled = $false
-$form.Controls.Add($btnTestarFase1)
-
-$numZonaTesteAd = New-Object System.Windows.Forms.NumericUpDown
-$numZonaTesteAd.Location = New-Object System.Drawing.Point(15, 120)
-$numZonaTesteAd.Width = 60
-$numZonaTesteAd.Minimum = 1
-$numZonaTesteAd.Maximum = 253
-$numZonaTesteAd.Value = 72
-$form.Controls.Add($numZonaTesteAd)
-
-$btnTestarFase2 = New-Object System.Windows.Forms.Button
-$btnTestarFase2.Text = "Testar Fase 2 (AD local - Usuarios da ZE)"
-$btnTestarFase2.Location = New-Object System.Drawing.Point(80, 118)
-$btnTestarFase2.Width = 300
-$btnTestarFase2.Height = 28
-$form.Controls.Add($btnTestarFase2)
-
-$txtIpTesteVarredura = New-Object System.Windows.Forms.TextBox
-$txtIpTesteVarredura.Location = New-Object System.Drawing.Point(15, 153)
-$txtIpTesteVarredura.Width = 110
-$txtIpTesteVarredura.Text = ""
-$form.Controls.Add($txtIpTesteVarredura)
-
-$chkRedeCompartilhadaTeste = New-Object System.Windows.Forms.CheckBox
-$chkRedeCompartilhadaTeste.Text = "Rede compartilhada"
-$chkRedeCompartilhadaTeste.Location = New-Object System.Drawing.Point(135, 155)
-$chkRedeCompartilhadaTeste.Width = 140
-$form.Controls.Add($chkRedeCompartilhadaTeste)
-
-$btnTestarFase4 = New-Object System.Windows.Forms.Button
-$btnTestarFase4.Text = "Testar Fase 4 (Varredura remota - 1 IP)"
-$btnTestarFase4.Location = New-Object System.Drawing.Point(280, 152)
-$btnTestarFase4.Width = 255
-$btnTestarFase4.Height = 28
-$btnTestarFase4.Enabled = $false
-$form.Controls.Add($btnTestarFase4)
-
-$btnTestarFase5 = New-Object System.Windows.Forms.Button
-$btnTestarFase5.Text = "Testar Fase 5 (Varredura completa da zona acima)"
-$btnTestarFase5.Location = New-Object System.Drawing.Point(15, 188)
-$btnTestarFase5.Width = 520
-$btnTestarFase5.Height = 28
-$btnTestarFase5.Enabled = $false
-$form.Controls.Add($btnTestarFase5)
-
-$txtPacoteTeste = New-Object System.Windows.Forms.TextBox
-$txtPacoteTeste.Location = New-Object System.Drawing.Point(15, 223)
-$txtPacoteTeste.Width = 150
-$txtPacoteTeste.Text = "CRIPTOSIS"
-$form.Controls.Add($txtPacoteTeste)
-
-$btnTestarFase6 = New-Object System.Windows.Forms.Button
-$btnTestarFase6.Text = "Testar Fase 6 (Baixar+Copiar pro IP acima)"
-$btnTestarFase6.Location = New-Object System.Drawing.Point(175, 221)
-$btnTestarFase6.Width = 360
-$btnTestarFase6.Height = 28
-$btnTestarFase6.Enabled = $false
-$form.Controls.Add($btnTestarFase6)
-
-$btnTestarFase7 = New-Object System.Windows.Forms.Button
-$btnTestarFase7.Text = "Testar Fase 7 (Resultado de campanha TESTE + arquivo TESTE ao Drive)"
-$btnTestarFase7.Location = New-Object System.Drawing.Point(15, 256)
-$btnTestarFase7.Width = 520
-$btnTestarFase7.Height = 28
-$btnTestarFase7.Enabled = $false
-$form.Controls.Add($btnTestarFase7)
-
-$txtLog = New-Object System.Windows.Forms.TextBox
-$txtLog.Location = New-Object System.Drawing.Point(15, 291)
-$txtLog.Size = New-Object System.Drawing.Size(520, 250)
-$txtLog.Multiline = $true
-$txtLog.ScrollBars = "Vertical"
-$txtLog.ReadOnly = $true
-$txtLog.Font = New-Object System.Drawing.Font("Consolas", 9)
-$form.Controls.Add($txtLog)
-
-function Add-LinhaLog {
-    param([string]$Texto)
-    $txtLog.AppendText("[$(Get-Date -Format 'HH:mm:ss')] $Texto`r`n")
+# Estado compartilhado entre os handlers de evento (botoes/timer) - UM hashtable
+# so, criado UMA VEZ aqui embaixo, SEMPRE MUTADO (nunca reatribuido por
+# inteiro depois disso). Motivo: confirmado ao vivo (reproduzido em
+# isolado varias vezes) que cada `.GetNewClosure()` cria uma copia
+# PROPRIA e ISOLADA do escopo $script: - reatribuir uma variavel $script:
+# ESCALAR (ou ate substituir uma variavel de referencia inteira, tipo
+# "$script:Foo = @{...}") DENTRO de um closure NAO se propaga pra fora
+# dele: nem pra OUTRO closure, nem pra uma FUNCAO comum chamada de
+# dentro do mesmo closure, nem pro escopo do script depois que o
+# ShowDialog retorna. So MUTACAO de um objeto que ja existia ANTES de
+# qualquer closure ser criado (ex: $script:Estado.Chave = valor, ou
+# $script:Resultados.Add(...)) atravessa essa fronteira corretamente,
+# porque todo mundo aponta pra o MESMO objeto por referencia. Por isso
+# $script:Estado precisa ser criado bem aqui no topo, antes de QUALQUER
+# Add_Click/Add_Tick ser registrado.
+$script:Estado = @{
+    ZonaAtual                    = $null
+    RedeCompartilhada            = $false
+    MaquinasLiberadasInstalador  = $null
+    IdSessaoVarredura            = $null   # GUID devolvido por Start-VarreduraRemota - ver comentario em Get-VarreduraNovosResultadosRemoto sobre deteccao de sessao perdida
+    SistemasEleitoraisExtra      = @()     # preenchido na conexao via Get-SistemasEleitoraisExtraRemoto
+    TabelaVersoes                = @{}     # preenchido via Get-VersoesRemoto (hashtable "SISTEMA|VERSAO" -> {NomeAmigavel})
+    VersaoAtualPorSistema        = @{}     # preenchido via Get-VersoesRemoto (hashtable "SISTEMA" -> versao)
+    LinhaContextoAtual           = $null   # linha do grid selecionada pro menu de contexto (setada no MouseDown, lida no Add_Opening - dois closures separados)
 }
 
-$btnTestarChamada.Add_Click({
-    try {
-        $resultado = Invoke-ComandoRemoto -ScriptBlock { Get-TesteConexaoServidor }
-        Add-LinhaLog "OK - executado em '$($resultado.Hostname)' como '$($resultado.Usuario)' (PID remoto $($resultado.PID_Processo)), hora UTC do servidor: $($resultado.DataHoraUtc)"
-    } catch {
-        Add-LinhaLog "ERRO: $($_.Exception.Message)"
+function ConvertTo-HashtableLocal {
+    <#
+        Converte um PSCustomObject (o formato que ConvertFrom-Json
+        sempre devolve) de volta pra Hashtable normal, restaurando a
+        indexacao por chave ($h["Chave"]) que o resto do codigo (portado
+        quase sem mudanca do ScannerRedeZona.ps1 original) espera.
+    #>
+    param($PSObject)
+    $h = @{}
+    if ($PSObject) {
+        foreach ($p in $PSObject.PSObject.Properties) { $h[$p.Name] = $p.Value }
     }
-}.GetNewClosure())
+    return $h
+}
 
-$btnDerrubarSessao.Add_Click({
-    Add-LinhaLog "Derrubando a sessao de proposito (Disconnect-ServidorVisao)..."
-    Disconnect-ServidorVisao
-    Add-LinhaLog "Sessao derrubada. Clique em 'Chamar Get-TesteConexaoServidor' de novo - deve reconectar sozinho."
-}.GetNewClosure())
+function Resolve-NomeAmigavelVersao {
+    <#
+        Relocada quase sem mudanca do ScannerRedeZona.ps1 original - so
+        $script:Estado.TabelaVersoes/$script:Estado.VersaoAtualPorSistema agora vem do
+        servidor (Get-VersoesRemoto) em vez de ler a planilha direto.
+    #>
+    param([string]$Sistema, [string]$Versao)
+    if (-not $Versao -or $Versao -eq "-") { return $null }
 
-$btnTestarFase1.Add_Click({
-    try {
-        $z = Get-ZonasRemoto
-        Add-LinhaLog "Zonas: Ok=$($z.Ok) Origem=$($z.Origem) Contagem=$($z.Contagem)"
+    $sistemaUpper = $Sistema.ToUpper()
+    $chave = "$sistemaUpper|$($Versao.Trim())"
+    if (-not $script:Estado.TabelaVersoes.ContainsKey($chave)) { return $null }
 
-        $g = Get-GruposSistemasRemoto
-        Add-LinhaLog "Grupos-Sistemas: Ok=$($g.Ok) Origem=$($g.Origem) Contagem=$($g.Contagem)"
+    $versaoAtual = $script:Estado.VersaoAtualPorSistema[$sistemaUpper]
+    return [PSCustomObject]@{
+        NomeAmigavel = $script:Estado.TabelaVersoes[$chave].NomeAmigavel
+        EhAtual      = if ($versaoAtual) { $versaoAtual -eq $Versao.Trim() } else { $null }
+    }
+}
 
-        $c = Get-CampanhasRemoto
-        Add-LinhaLog "Campanhas: Ok=$($c.Ok) Origem=$($c.Origem) Contagem=$($c.Contagem)"
+function Show-AindaNaoImplementado {
+    param([string]$Recurso, [string]$Fase)
+    [System.Windows.Forms.MessageBox]::Show(
+        "'$Recurso' ainda nao foi migrado pra esta versao da Visao (entra na $Fase da reconstrucao da tela).`r`n`r`nUse o ScannerRedeZona.ps1 (versao antiga, via RDP) por enquanto pra essa funcionalidade especifica.",
+        "Ainda nao implementado", "OK", "Information") | Out-Null
+}
 
-        $rc = Get-ResultadosCampanhasRemoto
-        Add-LinhaLog "Resultados-Campanhas: Ok=$($rc.Ok) Contagem=$($rc.Contagem)"
-        foreach ($linha in $rc.Dados) {
-            Add-LinhaLog "  Zona $($linha.Zona) ($($linha.Sede)): $($linha.Aptas)/$($linha.Total) aptas - $($linha.Campanha)"
+# ============================================================
+# JANELA PRINCIPAL - layout
+# ============================================================
+$form = New-Object System.Windows.Forms.Form
+$form.Text = "$($script:NomeFerramenta) $($script:VersaoFerramenta) - TRE-MA / SEASU-COINF-STIC"
+$form.Size = New-Object System.Drawing.Size(1385, 706)
+$form.StartPosition = "CenterScreen"
+$form.MinimumSize = $form.Size
+$form.WindowState = [System.Windows.Forms.FormWindowState]::Maximized
+$form.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+
+$lblZona = New-Object System.Windows.Forms.Label
+$lblZona.Text = "Numero da Zona:"
+$lblZona.Location = New-Object System.Drawing.Point(15, 18)
+$lblZona.AutoSize = $true
+$form.Controls.Add($lblZona)
+
+$numZona = New-Object System.Windows.Forms.NumericUpDown
+$numZona.Location = New-Object System.Drawing.Point(140, 15)
+$numZona.Width = 70
+$numZona.Minimum = 1
+$numZona.Maximum = 253
+$numZona.Value = 1
+$numZona.Enabled = $false
+$form.Controls.Add($numZona)
+
+$chkFiltrarZona = New-Object System.Windows.Forms.CheckBox
+$chkFiltrarZona.Text = "Mostrar so hosts desta zona (rede compartilhada entre zonas, ex: mesmo predio)"
+$chkFiltrarZona.Location = New-Object System.Drawing.Point(230, 17)
+$chkFiltrarZona.AutoSize = $true
+$chkFiltrarZona.Checked = $true
+$form.Controls.Add($chkFiltrarZona)
+
+$btnIniciar = New-Object System.Windows.Forms.Button
+$btnIniciar.Text = "Iniciar Varredura"
+$btnIniciar.Location = New-Object System.Drawing.Point(710, 13)
+$btnIniciar.Width = 110
+$btnIniciar.Height = 26
+$btnIniciar.BackColor = [System.Drawing.Color]::FromArgb(46, 125, 50)
+$btnIniciar.ForeColor = [System.Drawing.Color]::White
+$btnIniciar.Enabled = $false
+$form.Controls.Add($btnIniciar)
+
+$btnCancelar = New-Object System.Windows.Forms.Button
+$btnCancelar.Text = "Cancelar"
+$btnCancelar.Location = New-Object System.Drawing.Point(825, 13)
+$btnCancelar.Width = 105
+$btnCancelar.Height = 26
+$btnCancelar.Enabled = $false
+$form.Controls.Add($btnCancelar)
+
+$lblSedeInfo = New-Object System.Windows.Forms.Label
+$lblSedeInfo.Text = "Sede: -    Rede a varrer: -"
+$lblSedeInfo.Location = New-Object System.Drawing.Point(15, 46)
+$lblSedeInfo.AutoSize = $true
+$lblSedeInfo.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Italic)
+$lblSedeInfo.ForeColor = [System.Drawing.Color]::FromArgb(0, 90, 158)
+$form.Controls.Add($lblSedeInfo)
+
+$btnGerenciarZonas = New-Object System.Windows.Forms.Button
+$btnGerenciarZonas.Text = "Gerenciar Redes Zonas"
+$btnGerenciarZonas.Location = New-Object System.Drawing.Point(305, 611)
+$btnGerenciarZonas.Width = 165
+$btnGerenciarZonas.Height = 28
+$btnGerenciarZonas.Anchor = "Bottom,Left"
+$form.Controls.Add($btnGerenciarZonas)
+
+$btnRelatorioCampanhas = New-Object System.Windows.Forms.Button
+$btnRelatorioCampanhas.Text = "Relatorio de Campanhas..."
+$btnRelatorioCampanhas.Location = New-Object System.Drawing.Point(480, 611)
+$btnRelatorioCampanhas.Width = 190
+$btnRelatorioCampanhas.Height = 28
+$btnRelatorioCampanhas.Anchor = "Bottom,Left"
+$form.Controls.Add($btnRelatorioCampanhas)
+
+$btnUsuariosZona = New-Object System.Windows.Forms.Button
+$btnUsuariosZona.Text = "Usuarios da ZE 1"
+$btnUsuariosZona.Location = New-Object System.Drawing.Point(710, 43)
+$btnUsuariosZona.Width = 150
+$btnUsuariosZona.Height = 24
+$form.Controls.Add($btnUsuariosZona)
+
+$btnVerificarCampanhaZona = New-Object System.Windows.Forms.Button
+$btnVerificarCampanhaZona.Text = "Verificar Campanha ZE 1"
+$btnVerificarCampanhaZona.Location = New-Object System.Drawing.Point(870, 43)
+$btnVerificarCampanhaZona.Width = 190
+$btnVerificarCampanhaZona.Height = 24
+$btnVerificarCampanhaZona.Enabled = $false
+$form.Controls.Add($btnVerificarCampanhaZona)
+
+$progressBar = New-Object System.Windows.Forms.ProgressBar
+$progressBar.Location = New-Object System.Drawing.Point(15, 76)
+$progressBar.Width = 1350
+$progressBar.Height = 18
+$form.Controls.Add($progressBar)
+
+$lblStatus = New-Object System.Windows.Forms.Label
+$lblStatus.Text = "Conectando ao POLICY-SERVER..."
+$lblStatus.Location = New-Object System.Drawing.Point(15, 98)
+$lblStatus.AutoSize = $true
+$form.Controls.Add($lblStatus)
+
+$grid = New-Object System.Windows.Forms.DataGridView
+$grid.Location = New-Object System.Drawing.Point(15, 124)
+$grid.Size = New-Object System.Drawing.Size(1350, 320)
+$grid.Anchor = "Top,Bottom,Left,Right"
+$grid.AllowUserToAddRows = $false
+$grid.AllowUserToDeleteRows = $false
+$grid.AllowUserToResizeRows = $false
+$grid.ReadOnly = $true
+$grid.RowHeadersVisible = $false
+$grid.SelectionMode = [System.Windows.Forms.DataGridViewSelectionMode]::FullRowSelect
+$grid.MultiSelect = $false
+$grid.AutoSizeColumnsMode = [System.Windows.Forms.DataGridViewAutoSizeColumnsMode]::None
+$grid.AllowUserToOrderColumns = $false
+
+function Add-ColunaGrid {
+    param($Nome, $Titulo, $Largura)
+    $col = New-Object System.Windows.Forms.DataGridViewTextBoxColumn
+    $col.Name = $Nome
+    $col.HeaderText = $Titulo
+    $col.Width = $Largura
+    [void]$grid.Columns.Add($col)
+}
+Add-ColunaGrid "IP" "IP" 110
+Add-ColunaGrid "Tipo" "Tipo" 150
+Add-ColunaGrid "Hostname" "Hostname" 250
+Add-ColunaGrid "Modelo" "Modelo" 190
+Add-ColunaGrid "Tempo" "Tempo (ms)" 75
+Add-ColunaGrid "Detectado" "Detectado Por" 270
+Add-ColunaGrid "Vnc" "VNC" 85
+Add-ColunaGrid "Rc" "RC Ivanti" 90
+Add-ColunaGrid "Sis" "SIS" 70
+Add-ColunaGrid "Instalador" "Instalador" 130
+# Colunas dinamicas de sistemas eleitorais extra so entram depois da
+# conexao (Get-SistemasEleitoraisExtraRemoto, em $form.Add_Shown) - o
+# schema delas vive no servidor, nao aqui.
+
+$form.Controls.Add($grid)
+
+$lblLog = New-Object System.Windows.Forms.Label
+$lblLog.Text = "Log:"
+$lblLog.Location = New-Object System.Drawing.Point(15, 451)
+$lblLog.AutoSize = $true
+$lblLog.Anchor = "Bottom,Left"
+$form.Controls.Add($lblLog)
+
+$rtbLog = New-Object System.Windows.Forms.RichTextBox
+$rtbLog.Location = New-Object System.Drawing.Point(15, 471)
+$rtbLog.Size = New-Object System.Drawing.Size(1350, 130)
+$rtbLog.Anchor = "Bottom,Left,Right"
+$rtbLog.ReadOnly = $true
+$rtbLog.BackColor = [System.Drawing.Color]::Black
+$rtbLog.Font = New-Object System.Drawing.Font("Consolas", 9)
+$form.Controls.Add($rtbLog)
+
+function Add-Log {
+    param([string]$Texto, [string]$Cor = "White")
+    $rtbLog.SelectionStart = $rtbLog.TextLength
+    $rtbLog.SelectionLength = 0
+    $rtbLog.SelectionColor = [System.Drawing.Color]::$Cor
+    $rtbLog.AppendText("$Texto`r`n")
+    $rtbLog.ScrollToCaret()
+}
+
+$btnExportar = New-Object System.Windows.Forms.Button
+$btnExportar.Text = "Exportar CSV"
+$btnExportar.Location = New-Object System.Drawing.Point(15, 611)
+$btnExportar.Width = 120
+$btnExportar.Height = 28
+$btnExportar.Anchor = "Bottom,Left"
+$btnExportar.Enabled = $false
+$form.Controls.Add($btnExportar)
+
+$btnConfiguracoes = New-Object System.Windows.Forms.Button
+$btnConfiguracoes.Text = "Configuracoes..."
+$btnConfiguracoes.Location = New-Object System.Drawing.Point(145, 611)
+$btnConfiguracoes.Width = 150
+$btnConfiguracoes.Height = 28
+$btnConfiguracoes.Anchor = "Bottom,Left"
+$form.Controls.Add($btnConfiguracoes)
+
+$btnFechar = New-Object System.Windows.Forms.Button
+$btnFechar.Text = "Fechar"
+$btnFechar.Location = New-Object System.Drawing.Point(1285, 611)
+$btnFechar.Width = 80
+$btnFechar.Height = 28
+$btnFechar.Anchor = "Bottom,Right"
+$form.Controls.Add($btnFechar)
+
+# ============================================================
+# EXIBICAO DA GRADE (Add-LinhaGrid/Reconstruir-Grid/Atualizar-ResumoStatus)
+#
+# Relocadas do ScannerRedeZona.ps1 original PRATICAMENTE sem mudanca -
+# dependem so do objeto $Resultado ja resolvido, que a varredura nova
+# ja entrega com EhGateway/EhNobreakCentral/EhTelefoneVoip/
+# PertenceZonaAtual prontos (migrado na Fase 5 da migracao de
+# remoting) - exatamente como o timer antigo calculava antes de chamar
+# Add-LinhaGrid.
+# ============================================================
+function Add-LinhaGrid {
+    param($Resultado)
+
+    $temNomeResolvido = $Resultado.Hostname -and $Resultado.Hostname -ne "(sem resolucao de nome)"
+    $tipo =
+        if ($Resultado.SemLinkComunicacao) { "Sem Link de Comunicacao" }
+        elseif ($Resultado.PossivelmenteDesligado -and $Resultado.CandidatoExclusaoOcs) { "Desligado - candidata a exclusao" }
+        elseif ($Resultado.PossivelmenteDesligado) { "Possivelmente Desligado" }
+        elseif ($Resultado.EhGateway) { "Gateway / Roteador" }
+        elseif ($Resultado.PossivelImpressora) { "Impressora Pantum?" }
+        elseif ($Resultado.EhNobreakCentral) { "Nobreak Central" }
+        elseif ($Resultado.EhTelefoneVoip) { "Telefone VOIP" }
+        elseif ($temNomeResolvido) { "Host / PC" }
+        else { "Tipo Desconhecido" }
+    $tempoTxt = if ($Resultado.TempoMs) { "$($Resultado.TempoMs)" } else { "-" }
+    $vncTxt = if ($Resultado.VncAtivo) { "Ativo (5900)" } else { "-" }
+    $rcTxt = if ($Resultado.RcIvantiAtivo) { "Ativo (9535)" } else { "-" }
+    $modeloTxt = if ($Resultado.Modelo) { $Resultado.Modelo } else { "-" }
+
+    $colunasAtualizadas = @()
+    $colunasDesatualizadas = @()
+    $sisTxt = if ($Resultado.VersaoSis) { $Resultado.VersaoSis } else { "-" }
+    if ($sisTxt -ne "-") {
+        $versaoAtualSis = $script:Estado.VersaoAtualPorSistema["SIS"]
+        if ($versaoAtualSis) {
+            if ($sisTxt.Trim() -eq $versaoAtualSis.Trim()) { $colunasAtualizadas += "Sis" } else { $colunasDesatualizadas += "Sis" }
         }
-    } catch {
-        Add-LinhaLog "ERRO: $($_.Exception.Message)"
-    }
-}.GetNewClosure())
-
-$btnTestarFase2.Add_Click({
-    # SEM Invoke-ComandoRemoto de proposito - roda local, direto na
-    # estacao (ver VisaoAD.psm1: nao passa pelo servidor).
-    $zona = [int]$numZonaTesteAd.Value
-    try {
-        $usuarios = Get-UsuariosDaZona -Zona $zona
-        Add-LinhaLog "AD local (zona $zona): $($usuarios.Count) usuario(s) encontrado(s)."
-        foreach ($u in $usuarios) {
-            $situacao = if ($u.ContaDesabilitada) { " [DESABILITADA]" } elseif ($u.ContaBloqueada) { " [BLOQUEADA]" } else { "" }
-            Add-LinhaLog "  $($u.Nome) ($($u.Login)) - $($u.Lotacao) - $($u.Grupos.Count) grupo(s)$situacao"
-        }
-    } catch {
-        Add-LinhaLog "ERRO AD: $($_.Exception.Message)"
     }
 
-    try {
-        $maquinas = Get-MaquinasLiberadasInstalador
-        if ($null -eq $maquinas) {
-            Add-LinhaLog "Instalador: consulta falhou (usuario nao encontrado ou AD inacessivel)."
+    $instaladorTxt = "-"
+    if ($sisTxt -ne "-" -and $temNomeResolvido -and -not $Resultado.PossivelImpressora -and $null -ne $script:Estado.MaquinasLiberadasInstalador) {
+        $hostnameCurto = ($Resultado.Hostname -split '\.')[0]
+        if ($script:Estado.MaquinasLiberadasInstalador.Count -eq 0 -or $script:Estado.MaquinasLiberadasInstalador -contains $hostnameCurto) {
+            $instaladorTxt = "Liberado"
         } else {
-            Add-LinhaLog "Instalador: liberado em $($maquinas.Count) maquina(s)."
+            $instaladorTxt = "Bloqueado"
         }
-    } catch {
-        Add-LinhaLog "ERRO Instalador: $($_.Exception.Message)"
     }
-}.GetNewClosure())
 
-$btnTestarFase4.Add_Click({
-    $ip = $txtIpTesteVarredura.Text.Trim()
-    if (-not $ip) {
-        Add-LinhaLog "Informe um IP pra testar a varredura remota."
-        return
-    }
-    $zona = [int]$numZonaTesteAd.Value
-    $redeCompartilhada = $chkRedeCompartilhadaTeste.Checked
+    $hostnameExibido = if ($Resultado.PossivelImpressora) { "-" } else { $Resultado.Hostname }
 
-    try {
-        Add-LinhaLog "Disparando varredura remota de '$ip' (zona $zona, rede compartilhada=$redeCompartilhada)..."
-        $idSessao = Start-VarreduraRemota -Ips @($ip) -Zona $zona -RedeCompartilhada $redeCompartilhada
+    $valoresLinha = @($Resultado.IP, $tipo, $hostnameExibido, $modeloTxt, $tempoTxt, $Resultado.DetectadoPor, $vncTxt, $rcTxt, $sisTxt, $instaladorTxt)
+    foreach ($sis in $script:Estado.SistemasEleitoraisExtra) {
+        if (-not $sis.NaGradePrincipal) { continue }
+        $valorExtra = $Resultado.($sis.Propriedade)
+        $infoExtra = if ($sis.ComNomeAmigavel) { Resolve-NomeAmigavelVersao -Sistema $sis.NomeVersaoAtual -Versao $valorExtra } else { $null }
+        $valoresLinha += $(if ($infoExtra) { "$($infoExtra.NomeAmigavel) ($valorExtra)" } elseif ($valorExtra) { $valorExtra } else { "-" })
 
-        # Loop de polling simples pra esta tela de teste (a tela real vai
-        # usar um Timer, ver "Redesenho do progresso ao vivo" no plano) -
-        # DoEvents mantem a janela respondendo enquanto espera. Teto de 60
-        # iteracoes (~30s) cobre o pior caso (2 chamadas OCS de 5s cada +
-        # checagens de porta) sem travar pra sempre se algo ficar preso.
-        $iteracoes = 0
-        do {
-            Start-Sleep -Milliseconds 500
-            [System.Windows.Forms.Application]::DoEvents()
-            $resposta = Get-VarreduraNovosResultadosRemoto -IdSessaoEsperado $idSessao
-            if ($resposta.SessaoPerdida) { break }
-            foreach ($item in $resposta.Novos) {
-                Add-LinhaLog "  IP $($item.IP): Online=$($item.Online) Hostname='$($item.Hostname)' DetectadoPor='$($item.DetectadoPor)' VersaoSis=$($item.VersaoSis) Modelo=$($item.Modelo)"
+        if ($valorExtra -and $valorExtra -ne "-") {
+            $versaoAtualSistema = $script:Estado.VersaoAtualPorSistema[$sis.NomeVersaoAtual]
+            if ($versaoAtualSistema) {
+                if ($valorExtra.Trim() -eq $versaoAtualSistema.Trim()) { $colunasAtualizadas += $sis.Coluna } else { $colunasDesatualizadas += $sis.Coluna }
             }
-            $iteracoes++
-        } while ($resposta.EmAndamento -and $iteracoes -lt 60)
-
-        if ($resposta.SessaoPerdida) {
-            Add-LinhaLog "Conexao com o POLICY-SERVER foi perdida durante a varredura - incompleta, inicie de novo."
-        } elseif ($resposta.EmAndamento) {
-            Add-LinhaLog "Tempo limite de teste atingido (30s) com a varredura ainda em andamento no servidor."
-        } else {
-            Add-LinhaLog "Varredura concluida: $($resposta.Concluidos)/$($resposta.Total)."
         }
-    } catch {
-        Add-LinhaLog "ERRO na varredura: $($_.Exception.Message)"
     }
-}.GetNewClosure())
 
-# ============================================================
-# FASE 5: varredura completa da zona (254 IPs) - reproduz
-# $btnIniciar.Add_Click/$timer.Add_Tick do ScannerRedeZona.ps1 original,
-# mas com um Timer de VERDADE fazendo polling (750ms, dentro da faixa
-# 500-1000ms do plano) em vez do loop com DoEvents usado no teste da
-# Fase 4 (aceitavel la por ser 1 IP so, mas nao pra 254). A classificacao
-# (impressora/gateway/nobreak/voip/pertence-a-zona) ja vem PRONTA do
-# servidor (Get-VarreduraNovosResultados) - ver comentario em
-# VisaoServidor.ps1 sobre essa mudanca em relacao ao original (la
-# acontecia aqui no cliente, dentro do proprio $timer.Add_Tick).
-# ============================================================
-$script:TimerVarreduraFase5 = New-Object System.Windows.Forms.Timer
-$script:TimerVarreduraFase5.Interval = 750
-$script:EstadoTesteFase5 = $null
+    $rowIndex = $grid.Rows.Add($valoresLinha)
+    $row = $grid.Rows[$rowIndex]
+    $row.Tag = $Resultado
 
-$btnTestarFase5.Add_Click({
-    $zona = [int]$numZonaTesteAd.Value
-    $btnTestarFase5.Enabled = $false
+    foreach ($nomeColuna in $colunasAtualizadas) {
+        $row.Cells[$nomeColuna].Style.ForeColor = [System.Drawing.Color]::FromArgb(0, 128, 0)
+        $row.Cells[$nomeColuna].Style.Font = New-Object System.Drawing.Font($grid.Font, [System.Drawing.FontStyle]::Bold)
+        $row.Cells[$nomeColuna].ToolTipText = "Versao atualizada"
+    }
+    foreach ($nomeColuna in $colunasDesatualizadas) {
+        $row.Cells[$nomeColuna].Style.ForeColor = [System.Drawing.Color]::FromArgb(220, 53, 69)
+        $row.Cells[$nomeColuna].Style.Font = New-Object System.Drawing.Font($grid.Font, [System.Drawing.FontStyle]::Bold)
+        $row.Cells[$nomeColuna].ToolTipText = "Versao desatualizada"
+    }
+
+    if ($Resultado.SemLinkComunicacao) {
+        $row.DefaultCellStyle.BackColor = [System.Drawing.Color]::FromArgb(220, 53, 69)
+        $row.DefaultCellStyle.ForeColor = [System.Drawing.Color]::White
+        $row.DefaultCellStyle.Font = New-Object System.Drawing.Font($grid.Font, [System.Drawing.FontStyle]::Bold)
+    } elseif ($Resultado.PossivelmenteDesligado -and $Resultado.CandidatoExclusaoOcs) {
+        $row.DefaultCellStyle.BackColor = [System.Drawing.Color]::FromArgb(255, 220, 200)
+        $row.DefaultCellStyle.ForeColor = [System.Drawing.Color]::FromArgb(150, 60, 0)
+        $row.DefaultCellStyle.Font = New-Object System.Drawing.Font($grid.Font, [System.Drawing.FontStyle]::Bold)
+    } elseif ($Resultado.PossivelmenteDesligado) {
+        $row.DefaultCellStyle.BackColor = [System.Drawing.Color]::FromArgb(230, 230, 230)
+        $row.DefaultCellStyle.ForeColor = [System.Drawing.Color]::FromArgb(110, 110, 110)
+    } elseif ($Resultado.PossivelImpressora) {
+        $row.DefaultCellStyle.BackColor = [System.Drawing.Color]::FromArgb(255, 235, 245)
+    } elseif ($Resultado.EhGateway) {
+        $row.DefaultCellStyle.BackColor = [System.Drawing.Color]::FromArgb(225, 240, 255)
+    } elseif ($Resultado.EhNobreakCentral) {
+        $row.DefaultCellStyle.BackColor = [System.Drawing.Color]::FromArgb(255, 245, 210)
+    } elseif ($Resultado.EhTelefoneVoip) {
+        $row.DefaultCellStyle.BackColor = [System.Drawing.Color]::FromArgb(220, 245, 235)
+    } elseif (-not $temNomeResolvido) {
+        $row.DefaultCellStyle.BackColor = [System.Drawing.Color]::FromArgb(240, 240, 240)
+    }
+
+    $vncDisponivel = $Resultado.VncAtivo -and -not $Resultado.PossivelImpressora
+    if ($vncDisponivel) {
+        $row.Cells["Vnc"].Style.ForeColor = [System.Drawing.Color]::FromArgb(0, 128, 0)
+        $row.Cells["Vnc"].Style.Font = New-Object System.Drawing.Font($grid.Font, [System.Drawing.FontStyle]::Bold)
+    }
+
+    $rcDisponivel = $Resultado.RcIvantiAtivo -and -not $Resultado.PossivelImpressora
+    if ($rcDisponivel) {
+        $row.Cells["Rc"].Style.ForeColor = [System.Drawing.Color]::FromArgb(0, 128, 0)
+        $row.Cells["Rc"].Style.Font = New-Object System.Drawing.Font($grid.Font, [System.Drawing.FontStyle]::Bold)
+    }
+
+    if ($instaladorTxt -eq "Liberado") {
+        $row.Cells["Instalador"].Style.ForeColor = [System.Drawing.Color]::FromArgb(0, 128, 0)
+        $row.Cells["Instalador"].Style.Font = New-Object System.Drawing.Font($grid.Font, [System.Drawing.FontStyle]::Bold)
+    } elseif ($instaladorTxt -eq "Bloqueado") {
+        $row.Cells["Instalador"].Style.ForeColor = [System.Drawing.Color]::FromArgb(220, 53, 69)
+        $row.Cells["Instalador"].Style.Font = New-Object System.Drawing.Font($grid.Font, [System.Drawing.FontStyle]::Bold)
+    }
+}
+
+function Atualizar-ResumoStatus {
+    $ativos = @($script:Resultados | Where-Object { $_.Online })
+    $exibidos = $grid.Rows.Count
+    $impressorasExibidas = @($grid.Rows | Where-Object { $_.Tag.PossivelImpressora }).Count
+    $vncsExibidos = @($grid.Rows | Where-Object { $_.Tag.VncAtivo }).Count
+    $desligados = $script:MaquinasDesligadasOcs.Count
+
+    if ($script:Estado.RedeCompartilhada -and $chkFiltrarZona.Checked) {
+        $lblStatus.Text = "Concluido: $exibidos de $($ativos.Count) ativo(s) na rede pertencem a esta zona. $impressorasExibidas impressora(s), $vncsExibidos com VNC."
+    } else {
+        $lblStatus.Text = "Concluido: $($ativos.Count) ativo(s), $impressorasExibidas impressora(s), $vncsExibidos com VNC ativo."
+    }
+    if ($desligados -gt 0) {
+        $lblStatus.Text += " $desligados possivelmente desligada(s)/desconectada(s) (OCS)."
+    }
+    $btnExportar.Enabled = ($ativos.Count -gt 0 -or $desligados -gt 0)
+    $btnVerificarCampanhaZona.Enabled = ($ativos.Count -gt 0 -or $desligados -gt 0)
+}
+
+function Reconstruir-Grid {
+    $grid.Rows.Clear()
+    foreach ($r in $script:Resultados) {
+        if (-not $r.Online) { continue }
+        if (-not $script:Estado.RedeCompartilhada -or -not $chkFiltrarZona.Checked -or $r.PertenceZonaAtual -or $r.PossivelImpressora -or $r.EhGateway -or $r.EhNobreakCentral) {
+            Add-LinhaGrid -Resultado $r
+        }
+    }
+    foreach ($r in $script:MaquinasDesligadasOcs) {
+        Add-LinhaGrid -Resultado $r
+    }
+    Atualizar-ResumoStatus
+}
+
+$chkFiltrarZona.Add_CheckedChanged({ Reconstruir-Grid }.GetNewClosure())
+
+function Update-LabelSedeInfo {
+    $zona = [int]$numZona.Value
     try {
         $resolucao = Resolve-RedeDaZonaRemoto -Zona $zona
-        $baseIP = $resolucao.Prefixo
-        if (-not $baseIP) {
-            Add-LinhaLog "Nao foi possivel resolver a rede da zona $zona."
-            $btnTestarFase5.Enabled = $true
-            return
-        }
-        $redeCompartilhada = Test-RedeEhCompartilhadaRemoto -Prefixo $baseIP
-        $sedeTxt = if ($resolucao.Sede) { $resolucao.Sede } else { "(sede desconhecida)" }
-        Add-LinhaLog "=== Zona $zona - $sedeTxt ($($baseIP)0/24) - rede determinada por: $($resolucao.Origem) - compartilhada=$redeCompartilhada ==="
-
-        $ips = 1..254 | ForEach-Object { "$baseIP$_" }
-        $idSessao = Start-VarreduraRemota -Ips $ips -Zona $zona -RedeCompartilhada $redeCompartilhada
-
-        $script:EstadoTesteFase5 = @{
-            IdSessao       = $idSessao
-            Online         = 0
-            Impressoras    = 0
-            Gateway        = 0
-            NobreakCentral = 0
-            Voip           = 0
-            Cronometro     = [System.Diagnostics.Stopwatch]::StartNew()
-        }
-        $script:TimerVarreduraFase5.Start()
     } catch {
-        Add-LinhaLog "ERRO ao iniciar varredura da zona: $($_.Exception.Message)"
-        $btnTestarFase5.Enabled = $true
+        $lblSedeInfo.Text = "Sede: -    Rede a varrer: (erro ao consultar o servidor)"
+        $lblSedeInfo.ForeColor = [System.Drawing.Color]::FromArgb(220, 53, 69)
+        # DIAGNOSTICO TEMPORARIO (Fase A - remover depois de descobrir a
+        # causa do "nada acontece" relatado ao vivo) - mostra o erro
+        # REAL de forma impossivel de passar despercebido, em vez de so
+        # log/label que podem nao estar renderizando por outro motivo.
+        [System.Windows.Forms.MessageBox]::Show("DIAGNOSTICO Update-LabelSedeInfo`r`n`r`nTipo: $($_.Exception.GetType().FullName)`r`nMensagem: $($_.Exception.Message)`r`n`r`nStack:`r`n$($_.ScriptStackTrace)", "Diagnostico temporario", "OK", "Error") | Out-Null
+        return
     }
+    $zonaTxt = "{0:D3}" -f $zona
+    $sedeTxt = if ($resolucao.Sede) { $resolucao.Sede } else { "(nao encontrada na planilha)" }
+
+    $texto = "ZE $zonaTxt $sedeTxt   Rede a varrer: $($resolucao.Prefixo)0/24"
+    if ($resolucao.EhSubstituta) {
+        $texto += "   (SUBSTITUTA)"
+        if ($resolucao.Observacao) { $texto += " - $($resolucao.Observacao)" }
+    }
+    $lblSedeInfo.Text = $texto
+
+    if ($resolucao.EhSubstituta) {
+        $lblSedeInfo.ForeColor = [System.Drawing.Color]::FromArgb(200, 120, 0)
+    } elseif (-not $resolucao.Sede) {
+        $lblSedeInfo.ForeColor = [System.Drawing.Color]::Gray
+    } else {
+        $lblSedeInfo.ForeColor = [System.Drawing.Color]::FromArgb(0, 90, 158)
+    }
+
+    $btnUsuariosZona.Text = "Usuarios da ZE $zona"
+    $btnVerificarCampanhaZona.Text = "Verificar Campanha ZE $zona"
+}
+
+$numZona.Add_ValueChanged({
+    Update-LabelSedeInfo
+    $btnVerificarCampanhaZona.Enabled = $false
 }.GetNewClosure())
 
-$script:TimerVarreduraFase5.Add_Tick({
-    if (-not $script:EstadoTesteFase5) { $script:TimerVarreduraFase5.Stop(); return }
+# ============================================================
+# VARREDURA - Timer de polling (750ms, ver Fase 5 da migracao de
+# remoting) sobre Start-VarreduraRemota/Get-VarreduraNovosResultadosRemoto
+# ============================================================
+$timer = New-Object System.Windows.Forms.Timer
+$timer.Interval = 750
 
+$timer.Add_Tick({
     try {
-        $resposta = Get-VarreduraNovosResultadosRemoto -IdSessaoEsperado $script:EstadoTesteFase5.IdSessao
+        $resposta = Get-VarreduraNovosResultadosRemoto -IdSessaoEsperado $script:Estado.IdSessaoVarredura
     } catch {
-        $script:TimerVarreduraFase5.Stop()
-        Add-LinhaLog "ERRO no polling da varredura: $($_.Exception.Message)"
-        $btnTestarFase5.Enabled = $true
-        $script:EstadoTesteFase5 = $null
+        $timer.Stop()
+        Add-Log "[ERRO] Falha ao consultar progresso da varredura: $($_.Exception.Message)" "OrangeRed"
+        $btnIniciar.Enabled = $true
+        $btnCancelar.Enabled = $false
+        $numZona.Enabled = $true
         return
     }
 
     if ($resposta.SessaoPerdida) {
-        $script:TimerVarreduraFase5.Stop()
-        Add-LinhaLog "Conexao com o POLICY-SERVER foi perdida durante a varredura - incompleta, inicie de novo."
-        $btnTestarFase5.Enabled = $true
-        $script:EstadoTesteFase5 = $null
+        $timer.Stop()
+        Add-Log "[ERRO] Conexao com o POLICY-SERVER foi perdida durante a varredura - incompleta, inicie de novo." "OrangeRed"
+        $btnIniciar.Enabled = $true
+        $btnCancelar.Enabled = $false
+        $numZona.Enabled = $true
         return
     }
 
-    foreach ($item in $resposta.Novos) {
-        if (-not $item.Online) { continue }
-        $script:EstadoTesteFase5.Online++
-        if ($item.PossivelImpressora) { $script:EstadoTesteFase5.Impressoras++ }
-        if ($item.EhGateway) { $script:EstadoTesteFase5.Gateway++ }
-        if ($item.EhNobreakCentral) { $script:EstadoTesteFase5.NobreakCentral++ }
-        if ($item.EhTelefoneVoip) { $script:EstadoTesteFase5.Voip++ }
-        $tag = if ($item.PossivelImpressora) { "IMPRESSORA" } elseif ($item.EhGateway) { "GATEWAY" } elseif ($item.EhNobreakCentral) { "NOBREAK" } elseif ($item.EhTelefoneVoip) { "VOIP" } else { "HOST" }
-        Add-LinhaLog "  [$tag] $($item.IP)  $($item.Hostname)"
+    foreach ($resultado in $resposta.Novos) {
+        $script:Resultados.Add($resultado)
+        if ($resultado.Online) {
+            if ($resultado.PossivelImpressora) {
+                Add-Log "[IMPRESSORA] $($resultado.IP)  $($resultado.Hostname)  portas: $($resultado.PortasAbertas)" "DeepPink"
+            } elseif ($resultado.EhGateway) {
+                Add-Log "[GATEWAY]    $($resultado.IP)  $($resultado.Hostname)" "Cyan"
+            } elseif ($resultado.EhNobreakCentral) {
+                Add-Log "[NOBREAK]    $($resultado.IP)  $($resultado.Hostname)" "Yellow"
+            } elseif ($resultado.EhTelefoneVoip) {
+                Add-Log "[VOIP]       $($resultado.IP)  $($resultado.Hostname)" "Yellow"
+            } else {
+                Add-Log "[HOST]       $($resultado.IP)  $($resultado.Hostname)" "LightGreen"
+            }
+            if ($resultado.VncAtivo -and -not $resultado.PossivelImpressora) {
+                Add-Log "  -> VNC ativo em $($resultado.IP)" "SkyBlue"
+            }
+            if ($resultado.RcIvantiAtivo -and -not $resultado.PossivelImpressora) {
+                Add-Log "  -> RC Ivanti ativo em $($resultado.IP)" "SkyBlue"
+            }
+
+            if (-not $script:Estado.RedeCompartilhada -or -not $chkFiltrarZona.Checked -or $resultado.PertenceZonaAtual -or $resultado.PossivelImpressora -or $resultado.EhGateway -or $resultado.EhNobreakCentral) {
+                Add-LinhaGrid -Resultado $resultado
+            }
+        }
     }
+
+    $progressBar.Value = [Math]::Min($resposta.Concluidos, $progressBar.Maximum)
+    $lblStatus.Text = "Verificando... $($resposta.Concluidos) de $($resposta.Total) enderecos analisados."
 
     if (-not $resposta.EmAndamento) {
-        $script:TimerVarreduraFase5.Stop()
-        $script:EstadoTesteFase5.Cronometro.Stop()
-        $seg = [math]::Round($script:EstadoTesteFase5.Cronometro.Elapsed.TotalSeconds, 1)
-        Add-LinhaLog "=== Varredura concluida: $($resposta.Concluidos)/$($resposta.Total) IPs - $($script:EstadoTesteFase5.Online) online ($($script:EstadoTesteFase5.Impressoras) impressora(s), $($script:EstadoTesteFase5.Gateway) gateway, $($script:EstadoTesteFase5.NobreakCentral) nobreak, $($script:EstadoTesteFase5.Voip) voip) em $($seg)s ==="
-        $btnTestarFase5.Enabled = $true
-        $script:EstadoTesteFase5 = $null
+        $timer.Stop()
+
+        Atualizar-ResumoStatus
+        # @(...) forcando contexto de array e de proposito - sem isso,
+        # Where-Object devolve um objeto SOLTO (nao array) quando ha
+        # exatamente 1 resultado, e ".Count" nesse caso fica vazio em vez
+        # de "1" (confirmado ao vivo: "1 impressora(s)" apareceu em
+        # branco na varredura da zona 34).
+        $ativos = @($script:Resultados | Where-Object { $_.Online })
+        $impressoras = @($ativos | Where-Object { $_.PossivelImpressora })
+        $vncs = @($ativos | Where-Object { $_.VncAtivo })
+        Add-Log "=== Varredura concluida: $($ativos.Count) ativo(s) / $($impressoras.Count) impressora(s) / $($vncs.Count) com VNC ===" "Cyan"
+        Add-Log "(Maquinas 'possivelmente desligadas' via OCS Inventory e o aviso de gateway sem resposta entram na Fase B - ainda nao disponivel nesta versao.)" "Gray"
+
+        $btnIniciar.Enabled = $true
+        $btnCancelar.Enabled = $false
+        $numZona.Enabled = $true
     }
 }.GetNewClosure())
 
 # ============================================================
-# FASE 6: baixar (no servidor, cache compartilhado) + copiar (na propria
-# estacao, via robocopy - ver VisaoPacotes.psm1) um pacote de instalacao
-# real pro \\IP\InstSeg da maquina de teste. Reusa o campo de IP da
-# Fase 4/5 ($txtIpTesteVarredura) - so precisa de um IP, nao de zona.
+# EVENTO: Iniciar Varredura
 # ============================================================
-$btnTestarFase6.Add_Click({
-    $ip = $txtIpTesteVarredura.Text.Trim()
-    $nomePacote = $txtPacoteTeste.Text.Trim()
-    if (-not $ip) { Add-LinhaLog "Informe um IP (campo da Fase 4/5) pra testar a copia de pacote."; return }
-    if (-not $nomePacote) { Add-LinhaLog "Informe o nome do pacote (coluna Pacote da planilha, ex: CRIPTOSIS)."; return }
+$btnIniciar.Add_Click({
+    $zona = [int]$numZona.Value
 
-    $btnTestarFase6.Enabled = $false
+    # Feedback IMEDIATO - Resolve-RedeDaZonaRemoto/Start-VarreduraRemota
+    # logo abaixo sao chamadas de rede SINCRONAS (sem DoEvents no meio,
+    # de proposito - mesma disciplina do resto desta ferramenta), podem
+    # levar alguns segundos e travam a repintura da janela nesse meio
+    # tempo. Sem isto aqui, o clique parece "nao fez nada" ate a
+    # primeira chamada terminar.
+    $btnIniciar.Enabled = $false
+    $lblStatus.Text = "Iniciando varredura..."
+    [System.Windows.Forms.Application]::DoEvents()
+
     try {
-        Add-LinhaLog "Buscando pacote '$nomePacote' na planilha de Versoes..."
-        $v = Get-VersoesRemoto
-        if (-not $v.Ok) { Add-LinhaLog "ERRO ao carregar planilha de versoes: $($v.Erro)"; return }
-        $pacote = $v.Pacotes | Where-Object { $_.Pacote -eq $nomePacote -or $_.Sistema -eq $nomePacote } | Select-Object -First 1
-        if (-not $pacote) { Add-LinhaLog "Pacote '$nomePacote' nao encontrado (disponiveis: $(($v.Pacotes.Pacote) -join ', '))."; return }
+        $resolucao = Resolve-RedeDaZonaRemoto -Zona $zona
+    } catch {
+        [System.Windows.Forms.MessageBox]::Show("Falha ao resolver a rede da zona: $($_.Exception.Message)", "Erro", "OK", "Error") | Out-Null
+        $btnIniciar.Enabled = $true
+        return
+    }
+    $baseIP = $resolucao.Prefixo
+    if (-not $baseIP) {
+        [System.Windows.Forms.MessageBox]::Show("Nao foi possivel determinar a rede da zona $zona.", "Erro", "OK", "Error") | Out-Null
+        $btnIniciar.Enabled = $true
+        return
+    }
 
-        Add-LinhaLog "Pacote encontrado: $($pacote.Pacote) v$($pacote.Versao) ($([math]::Round($pacote.TamanhoEsperado / 1MB, 1)) MB esperados)."
-        $resultado = [PSCustomObject]@{ IP = $ip }
-
-        Add-LinhaLog "Verificando se ja esta copiado em $ip antes de baixar..."
-        $statusAntes = Get-StatusPacoteNoDestino -Resultado $resultado -Pacote $pacote
-        Add-LinhaLog "  Existe=$($statusAntes.Existe) TamanhoConfere=$($statusAntes.TamanhoConfere) ArquivoDestino=$($statusAntes.ArquivoDestino)"
-
-        Add-LinhaLog "Disparando download no servidor (cache compartilhado entre tecnicos)..."
-        $jobId = Start-BaixarPacoteRemoto -Pacote $pacote
-        $iteracoes = 0
-        do {
-            Start-Sleep -Milliseconds 750
-            [System.Windows.Forms.Application]::DoEvents()
-            $status = Get-StatusPacoteRemoto -JobId $jobId
-            $iteracoes++
-        } while (-not $status.Concluido -and $iteracoes -lt 400)
-        Add-LinhaLog "  [servidor] $($status.Texto)"
-        foreach ($aviso in $status.Avisos) { Add-LinhaLog "  [AVISO] $aviso" }
-
-        if (-not $status.Concluido) {
-            Add-LinhaLog "Tempo limite de teste atingido esperando o download no servidor."
-            return
-        }
-        if (-not $status.Sucesso) {
-            Add-LinhaLog "ERRO no download: $($status.Erro)"
-            return
-        }
-
-        Add-LinhaLog "Download OK ($($status.ArquivoCacheUnc)) - copiando pra $ip via robocopy (roda aqui, na propria estacao, sem passar pelo servidor)..."
-        $callback = { param($texto) Add-LinhaLog "  [copia] $texto" }.GetNewClosure()
-        $resultadoCopia = Invoke-AcaoCopiarPacoteJaBaixado -Resultado $resultado -Pacote $pacote -ArquivoCacheUnc $status.ArquivoCacheUnc -NomeArquivoOriginal $status.NomeArquivoOriginal -AoAtualizarStatus $callback
-
-        if ($resultadoCopia.Sucesso) {
-            Add-LinhaLog "=== SUCESSO: $($resultadoCopia.Mensagem) ==="
+    $script:Estado.ZonaAtual = $zona
+    try {
+        $script:Estado.MaquinasLiberadasInstalador = Get-MaquinasLiberadasInstalador
+        if ($null -eq $script:Estado.MaquinasLiberadasInstalador) {
+            Add-Log "Nao foi possivel consultar o AD para o status do instalador nesta varredura." "Gray"
+        } elseif ($script:Estado.MaquinasLiberadasInstalador.Count -eq 0) {
+            Add-Log "Usuario do Instalador sem restricao de maquina no AD (liberado em qualquer uma)." "Gray"
         } else {
-            Add-LinhaLog "=== FALHA: $($resultadoCopia.Mensagem) ==="
+            Add-Log "Usuario do Instalador liberado em $($script:Estado.MaquinasLiberadasInstalador.Count) maquina(s) no AD." "Gray"
         }
     } catch {
-        Add-LinhaLog "ERRO: $($_.Exception.Message)"
-    } finally {
-        $btnTestarFase6.Enabled = $true
+        $script:Estado.MaquinasLiberadasInstalador = $null
+        Add-Log "[AVISO] Falha ao consultar o AD para o status do instalador: $($_.Exception.Message)" "Yellow"
     }
-}.GetNewClosure())
 
-# ============================================================
-# FASE 7: escritas no Apps Script (request/resposta unico, sem
-# polling). So exercita Send-ResultadoCampanhaZonaRemoto (linha NOVA na
-# aba RESULTADOS-CAMPANHAS, nao sobrescreve nada) e
-# Send-ArquivoParaGoogleDriveRemoto (arquivo NOVO no Drive) com dados
-# claramente marcados como teste. NAO exercita
-# Send-AtualizacaoZonaRemoto aqui de proposito - essa funcao
-# SOBRESCREVE a Substituta/Observacao de uma zona REAL na planilha,
-# validada so por revisao de codigo (decisao tomada com o usuario
-# durante a migracao).
-# ============================================================
-$btnTestarFase7.Add_Click({
-    $btnTestarFase7.Enabled = $false
     try {
-        Add-LinhaLog "Enviando resultado de campanha de TESTE (zona 999, nao e uma zona real)..."
-        $r1 = Send-ResultadoCampanhaZonaRemoto -Zona 999 -NomeCampanha "TESTE-MIGRACAO-FASE7" -Total 1 -Aptas 1 -MaquinasAptas "TESTE-MAQUINA-FASE7"
-        if ($r1.Ok) { Add-LinhaLog "  OK: $($r1.Mensagem)" } else { Add-LinhaLog "  ERRO: $($r1.Mensagem)" }
-
-        Add-LinhaLog "Enviando arquivo de TESTE ao Google Drive..."
-        $conteudoTeste = "Arquivo de teste da migracao Fase 7 - Visao - $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') - pode apagar."
-        $base64 = [System.Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($conteudoTeste))
-        $r2 = Send-ArquivoParaGoogleDriveRemoto -NomeArquivo "TESTE-MIGRACAO-FASE7.txt" -ConteudoBase64 $base64
-        if ($r2.Ok) { Add-LinhaLog "  OK: $($r2.Mensagem) ($($r2.Url))" } else { Add-LinhaLog "  ERRO: $($r2.Mensagem)" }
+        $script:Estado.RedeCompartilhada = Test-RedeEhCompartilhadaRemoto -Prefixo $baseIP
     } catch {
-        Add-LinhaLog "ERRO: $($_.Exception.Message)"
-    } finally {
-        $btnTestarFase7.Enabled = $true
+        $script:Estado.RedeCompartilhada = $false
+        Add-Log "[AVISO] Falha ao verificar se a rede e compartilhada: $($_.Exception.Message)" "Yellow"
+    }
+
+    $grid.Rows.Clear()
+    $rtbLog.Clear()
+    $script:Resultados.Clear()
+    $script:MaquinasDesligadasOcs.Clear()
+    $btnExportar.Enabled = $false
+    $btnVerificarCampanhaZona.Enabled = $false
+    $numZona.Enabled = $false
+
+    $sedeTxt = if ($resolucao.Sede) { $resolucao.Sede } else { "(sede desconhecida)" }
+    Add-Log "=== Iniciando varredura da Zona $zona - $sedeTxt ($($baseIP)0/24) ===" "Yellow"
+    Add-Log "Rede determinada por: $($resolucao.Origem)" "Gray"
+    if ($script:Estado.RedeCompartilhada) {
+        $filtroTxt = if ($chkFiltrarZona.Checked) { "ativo (so mostra hosts desta zona)" } else { "desativado (mostra todos os hosts da rede)" }
+        Add-Log "Rede compartilhada entre varias zonas - filtro por hostname $filtroTxt." "Gray"
+    }
+
+    $ips = 1..254 | ForEach-Object { "$baseIP$_" }
+    $progressBar.Maximum = $ips.Count
+    $progressBar.Value = 0
+
+    try {
+        $script:Estado.IdSessaoVarredura = Start-VarreduraRemota -Ips $ips -Zona $zona -RedeCompartilhada $script:Estado.RedeCompartilhada
+    } catch {
+        Add-Log "[ERRO] Falha ao iniciar a varredura no servidor: $($_.Exception.Message)" "OrangeRed"
+        $numZona.Enabled = $true
+        $btnIniciar.Enabled = $true
+        return
+    }
+    $btnIniciar.Enabled = $false
+    $btnCancelar.Enabled = $true
+    $timer.Start()
+}.GetNewClosure())
+
+# ============================================================
+# EVENTO: Cancelar
+#
+# So para o POLLING do lado cliente - a varredura em si continua
+# rodando no servidor ate terminar sozinha (nao ha uma funcao de
+# "abortar" server-side ainda; cada varredura de zona termina em
+# poucos segundos de qualquer forma, entao o custo de deixar terminar
+# em segundo plano e baixo). Ver plano da Fase A.
+# ============================================================
+$btnCancelar.Add_Click({
+    $timer.Stop()
+    Add-Log "=== Varredura cancelada pelo usuario (o servidor pode levar mais alguns segundos pra terminar em segundo plano) ===" "OrangeRed"
+    $lblStatus.Text = "Cancelado."
+    $btnIniciar.Enabled = $true
+    $btnCancelar.Enabled = $false
+    $numZona.Enabled = $true
+    $ativos = @($script:Resultados | Where-Object { $_.Online })
+    $btnExportar.Enabled = ($ativos.Count -gt 0 -or $script:MaquinasDesligadasOcs.Count -gt 0)
+    $btnVerificarCampanhaZona.Enabled = $btnExportar.Enabled
+}.GetNewClosure())
+
+# ============================================================
+# EVENTO: Exportar CSV
+# ============================================================
+$btnExportar.Add_Click({
+    $exportarFiltrado = $script:Estado.RedeCompartilhada -and $chkFiltrarZona.Checked
+    $ativos = @(if ($exportarFiltrado) {
+        $script:Resultados | Where-Object { $_.Online -and $_.PertenceZonaAtual } | Sort-Object { [int]($_.IP -split '\.')[3] }
+    } else {
+        $script:Resultados | Where-Object { $_.Online } | Sort-Object { [int]($_.IP -split '\.')[3] }
+    })
+    $desligados = $script:MaquinasDesligadasOcs
+    if ($ativos.Count -eq 0 -and $desligados.Count -eq 0) { return }
+
+    $zona = [int]$numZona.Value
+    $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+    $sfd = New-Object System.Windows.Forms.SaveFileDialog
+    $sfd.Filter = "Arquivo CSV (*.csv)|*.csv"
+    $sfd.FileName = "Zona${zona}_Dispositivos_$timestamp.csv"
+
+    if ($sfd.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+        (@($ativos) + @($desligados)) |
+            Select-Object IP, Hostname, PossivelImpressora, PortasAbertas, VncAtivo, RcIvantiAtivo, TempoMs, DetectadoPor, @{Name = "PossivelmenteDesligado"; Expression = { [bool]$_.PossivelmenteDesligado } } |
+            Export-Csv -Path $sfd.FileName -NoTypeInformation -Encoding UTF8
+        $obsFiltro = if ($exportarFiltrado) { " (filtrado - so desta zona)" } else { "" }
+        Add-Log "CSV exportado para: $($sfd.FileName) - $($ativos.Count) ativo(s) + $($desligados.Count) possivelmente desligada(s)$obsFiltro." "Cyan"
+        [System.Windows.Forms.MessageBox]::Show("CSV exportado com sucesso.", "Concluido", "OK", "Information") | Out-Null
     }
 }.GetNewClosure())
 
-$form.Add_Shown({
-    if (Connect-ServidorVisao) {
-        $lblStatusConexao.Text = "Conectado ao POLICY-SERVER."
-        $lblStatusConexao.ForeColor = [System.Drawing.Color]::FromArgb(0, 128, 0)
-        Add-LinhaLog "Conexao inicial OK."
+# ============================================================
+# ATUALIZAR STATUS DE 1 MAQUINA (menu de contexto)
+# ============================================================
+function Invoke-AcaoAtualizarHost {
+    param($Resultado)
+    if (-not $Resultado -or -not $Resultado.IP) { return }
 
-        # Carrega a tabela de zonas UMA VEZ, na conexao (igual o
-        # ScannerRedeZona.ps1 original fazia na abertura da janela) -
-        # Resolve-RedeDaZonaRemoto/Test-RedeEhCompartilhadaRemoto (usados
-        # pela Fase 5) dependem dela estar carregada NA SESSAO, senao
-        # tudo cai no calculo padrao (10.198.<zona>.) mesmo pra zonas com
-        # rede substituta/compartilhada cadastrada na planilha.
-        try {
-            $z = Get-ZonasRemoto
-            Add-LinhaLog "Tabela de zonas carregada: $($z.Contagem) zona(s) (origem: $($z.Origem))."
-        } catch {
-            Add-LinhaLog "ERRO ao carregar tabela de zonas: $($_.Exception.Message)"
+    Add-Log "Atualizando status de '$($Resultado.Hostname)' ($($Resultado.IP))..." "Cyan"
+    $grid.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
+    try {
+        $idSessao = Start-VarreduraRemota -Ips @($Resultado.IP) -Zona $script:Estado.ZonaAtual -RedeCompartilhada $script:Estado.RedeCompartilhada
+        $novoResultado = $null
+        $tentativas = 0
+        do {
+            Start-Sleep -Milliseconds 400
+            [System.Windows.Forms.Application]::DoEvents()
+            $resp = Get-VarreduraNovosResultadosRemoto -IdSessaoEsperado $idSessao
+            if ($resp.SessaoPerdida) { throw "Conexao com o servidor foi perdida." }
+            foreach ($n in $resp.Novos) { $novoResultado = $n }
+            $tentativas++
+        } while ($resp.EmAndamento -and $tentativas -lt 30)
+
+        if (-not $novoResultado) {
+            Add-Log "[ERRO] Falha ao atualizar '$($Resultado.IP)' (tempo esgotado)." "OrangeRed"
+            return
         }
-    } else {
-        $lblStatusConexao.Text = "Falha ao conectar ao POLICY-SERVER."
-        $lblStatusConexao.ForeColor = [System.Drawing.Color]::FromArgb(220, 53, 69)
-        Add-LinhaLog "Falha na conexao inicial - veja aviso no console/terminal."
+
+        # A varredura nova ja devolve a classificacao (EhGateway/
+        # PertenceZonaAtual/etc) pronta, diferente do original (que
+        # calculava so 1x e preservava por cima do objeto antigo) - aqui
+        # da pra so SUBSTITUIR a entrada antiga pela nova inteira.
+        $indice = -1
+        for ($i = 0; $i -lt $script:Resultados.Count; $i++) {
+            if ($script:Resultados[$i].IP -eq $Resultado.IP) { $indice = $i; break }
+        }
+        if ($indice -ge 0) { $script:Resultados[$indice] = $novoResultado } else { $script:Resultados.Add($novoResultado) }
+
+        try { $script:Estado.MaquinasLiberadasInstalador = Get-MaquinasLiberadasInstalador } catch {}
+
+        Reconstruir-Grid
+        Add-Log "Status de '$($novoResultado.Hostname)' ($($novoResultado.IP)) atualizado." "Green"
+    } catch {
+        Add-Log "[ERRO] Falha ao atualizar '$($Resultado.IP)': $($_.Exception.Message)" "OrangeRed"
+    } finally {
+        $grid.Cursor = [System.Windows.Forms.Cursors]::Default
     }
-    $btnTestarChamada.Enabled = $true
-    $btnDerrubarSessao.Enabled = $true
-    $btnTestarFase1.Enabled = $true
-    $btnTestarFase4.Enabled = $true
-    $btnTestarFase5.Enabled = $true
-    $btnTestarFase6.Enabled = $true
-    $btnTestarFase7.Enabled = $true
+}
+
+# ============================================================
+# MENU DE CONTEXTO DO GRID (subconjunto da Fase A - Ping, Atualizar,
+# VNC, RC; Info de Impressora/WOL/Sistemas Eleitorais/Campanha/CVC
+# entram nas fases seguintes)
+# ============================================================
+$script:Estado.LinhaContextoAtual = $null
+
+$grid.Add_MouseDown({
+    param($sender, $e)
+    if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Right) {
+        $hit = $grid.HitTest($e.X, $e.Y)
+        if ($hit.RowIndex -ge 0) {
+            $grid.ClearSelection()
+            $grid.Rows[$hit.RowIndex].Selected = $true
+            $script:Estado.LinhaContextoAtual = $grid.Rows[$hit.RowIndex]
+        } else {
+            $script:Estado.LinhaContextoAtual = $null
+        }
+    }
+}.GetNewClosure())
+
+$menuContextoGrid = New-Object System.Windows.Forms.ContextMenuStrip
+$grid.ContextMenuStrip = $menuContextoGrid
+
+$menuContextoGrid.Add_Opening({
+    param($sender, $e)
+    $menuContextoGrid.Items.Clear()
+    $linha = $script:Estado.LinhaContextoAtual
+    if (-not $linha -or -not $linha.Tag) { $e.Cancel = $true; return }
+    $r = $linha.Tag
+
+    $itemPing = $menuContextoGrid.Items.Add("Ping")
+    $itemPing.Add_Click({ Start-PingContinuo -IP $r.IP }.GetNewClosure())
+
+    $ehHostPc = $r.Hostname -and $r.Hostname -ne "(sem resolucao de nome)" -and -not $r.PossivelImpressora -and -not $r.EhGateway -and -not $r.EhNobreakCentral -and -not $r.EhTelefoneVoip -and -not $r.PossivelmenteDesligado
+
+    if ($ehHostPc) {
+        [void]$menuContextoGrid.Items.Add("-")
+
+        if ($r.VncAtivo) {
+            $itemVnc = $menuContextoGrid.Items.Add("Abrir VNC")
+            $itemVnc.Add_Click({
+                $resultadoAcao = Open-VncViewer -IP $r.IP
+                if ($resultadoAcao.Sucesso) { Add-Log $resultadoAcao.Mensagem "Cyan" } else { Add-Log "[ERRO] $($resultadoAcao.Mensagem)" "OrangeRed" }
+            }.GetNewClosure())
+        }
+        if ($r.RcIvantiAtivo) {
+            $itemRc = $menuContextoGrid.Items.Add("Abrir RCViewer")
+            $itemRc.Add_Click({
+                $resultadoAcao = Open-RcViewer -IP $r.IP
+                if ($resultadoAcao.Sucesso) { Add-Log $resultadoAcao.Mensagem "Cyan" } else { Add-Log "[ERRO] $($resultadoAcao.Mensagem)" "OrangeRed" }
+            }.GetNewClosure())
+        }
+
+        [void]$menuContextoGrid.Items.Add("-")
+        $itemAtualizar = $menuContextoGrid.Items.Add("Atualizar Status desta Maquina")
+        $itemAtualizar.Add_Click({ Invoke-AcaoAtualizarHost -Resultado $r }.GetNewClosure())
+    }
+
+    if ($menuContextoGrid.Items.Count -eq 0) { $e.Cancel = $true }
+}.GetNewClosure())
+
+$grid.Add_CellDoubleClick({
+    param($sender, $e)
+    if ($e.RowIndex -lt 0) { return }
+    $r = $grid.Rows[$e.RowIndex].Tag
+    if (-not $r) { return }
+    if ($r.VncAtivo -and -not $r.PossivelImpressora) {
+        $resultadoAcao = Open-VncViewer -IP $r.IP
+        if ($resultadoAcao.Sucesso) { Add-Log $resultadoAcao.Mensagem "Cyan" } else { Add-Log "[ERRO] $($resultadoAcao.Mensagem)" "OrangeRed" }
+    } elseif ($r.RcIvantiAtivo -and -not $r.PossivelImpressora) {
+        $resultadoAcao = Open-RcViewer -IP $r.IP
+        if ($resultadoAcao.Sucesso) { Add-Log $resultadoAcao.Mensagem "Cyan" } else { Add-Log "[ERRO] $($resultadoAcao.Mensagem)" "OrangeRed" }
+    }
+}.GetNewClosure())
+
+# ============================================================
+# BOTOES DE JANELAS AINDA NAO MIGRADAS (Fases B-F)
+# ============================================================
+$btnGerenciarZonas.Add_Click({ Show-AindaNaoImplementado -Recurso "Gerenciar Redes Zonas" -Fase "Fase E" }.GetNewClosure())
+$btnRelatorioCampanhas.Add_Click({ Show-AindaNaoImplementado -Recurso "Relatorio de Campanhas" -Fase "Fase D" }.GetNewClosure())
+$btnUsuariosZona.Add_Click({ Show-AindaNaoImplementado -Recurso "Usuarios da ZE" -Fase "Fase E" }.GetNewClosure())
+$btnVerificarCampanhaZona.Add_Click({ Show-AindaNaoImplementado -Recurso "Verificar Campanha da Zona" -Fase "Fase D" }.GetNewClosure())
+$btnConfiguracoes.Add_Click({ Show-AindaNaoImplementado -Recurso "Configuracoes" -Fase "Fase F" }.GetNewClosure())
+$btnFechar.Add_Click({ $form.Close() }.GetNewClosure())
+
+# ============================================================
+# INICIALIZACAO
+# ============================================================
+$form.Add_Shown({
+    if (-not (Connect-ServidorVisao)) {
+        $lblStatus.Text = "Falha ao conectar ao POLICY-SERVER - a ferramenta nao pode funcionar sem essa conexao."
+        Add-Log "[ERRO] Falha ao conectar ao POLICY-SERVER.tre-ma.gov.br - verifique a rede/VPN e reabra a ferramenta." "OrangeRed"
+        [System.Windows.Forms.MessageBox]::Show("Nao foi possivel conectar ao POLICY-SERVER. Verifique a rede/VPN e tente novamente.", "Erro de conexao", "OK", "Error") | Out-Null
+        return
+    }
+    Add-Log "Conectado ao POLICY-SERVER." "Cyan"
+
+    try {
+        $script:Estado.SistemasEleitoraisExtra = Get-SistemasEleitoraisExtraRemoto
+        foreach ($sis in $script:Estado.SistemasEleitoraisExtra) {
+            if (-not $sis.NaGradePrincipal) { continue }
+            Add-ColunaGrid $sis.Coluna $sis.Titulo $sis.Largura
+        }
+    } catch {
+        Add-Log "[AVISO] Falha ao carregar schema de sistemas eleitorais: $($_.Exception.Message)" "Yellow"
+    }
+
+    try {
+        $z = Get-ZonasRemoto
+        Add-Log "Tabela de zonas carregada: $($z.Contagem) zona(s) (origem: $($z.Origem))." "Gray"
+        foreach ($aviso in $z.Avisos) { Add-Log "[AVISO] $aviso" "Yellow" }
+    } catch {
+        Add-Log "[ERRO] Falha ao carregar tabela de zonas: $($_.Exception.Message)" "OrangeRed"
+    }
+
+    try {
+        $v = Get-VersoesRemoto
+        if ($v.Ok) {
+            $script:Estado.TabelaVersoes = ConvertTo-HashtableLocal $v.TabelaVersoes
+            $script:Estado.VersaoAtualPorSistema = ConvertTo-HashtableLocal $v.VersaoAtualPorSistema
+            Add-Log "Planilha de versoes de sistemas eleitorais carregada: $($v.Contagem) pacote(s) (origem: $($v.Origem))." "Gray"
+        } else {
+            Add-Log "Planilha de versoes de sistemas eleitorais nao configurada ($($v.Erro)) - segue sem destaque de versao atualizada/desatualizada." "Gray"
+        }
+    } catch {
+        Add-Log "[AVISO] Falha ao carregar planilha de versoes: $($_.Exception.Message)" "Yellow"
+    }
+
+    Update-LabelSedeInfo
+    $numZona.Enabled = $true
+    $btnIniciar.Enabled = $true
+    $lblStatus.Text = "Pronto. Informe a zona e clique em Iniciar Varredura."
+}.GetNewClosure())
+
+$form.Add_FormClosing({
+    if ($timer.Enabled) {
+        $timer.Stop()
+    }
 }.GetNewClosure())
 
 $form.Add_FormClosed({ Disconnect-ServidorVisao }.GetNewClosure())

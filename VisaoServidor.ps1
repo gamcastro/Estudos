@@ -989,13 +989,36 @@ function Import-TabelaVersoes {
     }
 
     return ([PSCustomObject]@{
-        Ok       = $true
-        Origem   = $origem
-        Contagem = $script:TabelaPacotes.Count
-        Avisos   = @($avisos)
-        Erro     = $null
-        Pacotes  = $script:TabelaPacotes
+        Ok                    = $true
+        Origem                = $origem
+        Contagem              = $script:TabelaPacotes.Count
+        Avisos                = @($avisos)
+        Erro                  = $null
+        Pacotes               = $script:TabelaPacotes
+        # TabelaVersoes/VersaoAtualPorSistema tambem vao no retorno - o
+        # CLIENTE precisa deles pra replicar Add-LinhaGrid (nome amigavel
+        # + destaque verde/vermelho de versao atualizada/desatualizada na
+        # grade principal), nao so a lista de pacotes baixaveis. Hashtable
+        # vira objeto JSON normal (ConvertFrom-Json do lado cliente
+        # devolve PSCustomObject, nao Hashtable - o cliente reconverte).
+        TabelaVersoes         = $script:TabelaVersoes
+        VersaoAtualPorSistema = $script:VersaoAtualPorSistema
     } | ConvertTo-Json -Depth 6 -Compress)
+}
+
+function Get-SistemasEleitoraisExtra {
+    <#
+        Devolve $script:SistemasEleitoraisExtra (schema das colunas
+        dinamicas de sistemas eleitorais - Bitlocker/Gedai/Holocron/
+        Transportador etc.) como STRING JSON (array de PSCustomObject,
+        mesmo bug de serializacao de sempre). O CLIENTE precisa desse
+        schema pra montar as colunas dinamicas da grade principal (nome
+        da coluna, titulo, largura) sem duplicar essa definicao em dois
+        arquivos - fica so aqui no servidor, fonte unica de verdade
+        (mesma fonte que o $script:scriptBlock da varredura ja usa pra
+        essas mesmas propriedades).
+    #>
+    return (@($script:SistemasEleitoraisExtra) | ConvertTo-Json -Depth 6 -Compress)
 }
 
 function Get-CaminhosCachePacote {
