@@ -356,9 +356,11 @@ function Show-JanelaSistemasEleitorais {
         # o fix e o mesmo: realiasar localmente antes de aninhar mais um
         # closure.
         $lblProgressoLocal = $lblProgressoPacoteAtual
+        $barraProgressoLocal = $barraProgressoPacoteAtual
 
         if ($nomeColuna -eq "Copiar") {
             $dlg.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
+            $barraProgressoPacoteAtual.Style = [System.Windows.Forms.ProgressBarStyle]::Marquee
             $barraProgressoPacoteAtual.Value = 0
             $barraProgressoPacoteAtual.Visible = $true
             $lblProgressoPacoteAtual.Text = "Iniciando..."
@@ -372,7 +374,9 @@ function Show-JanelaSistemasEleitorais {
                 # demais ("conectividade... perdida"). O cache
                 # compartilhado do servidor continua sendo usado (so
                 # nao baixa de novo se outro tecnico ja deixou o arquivo
-                # la) - ver Invoke-AcaoGarantirPacoteEmCache.
+                # la) - ver Invoke-AcaoGarantirPacoteEmCache. A barra
+                # fica em Marquee (indeterminada) nesta fase - o download
+                # ainda nao tem % ligado na barra, so texto de status.
                 $callbackDownload = { param($texto) $lblProgressoLocal.Text = $texto; [System.Windows.Forms.Application]::DoEvents() }.GetNewClosure()
                 $resultadoDownload = Invoke-AcaoGarantirPacoteEmCache -Pacote $tagLinha.Pacote -AoAtualizarStatus $callbackDownload
 
@@ -382,9 +386,16 @@ function Show-JanelaSistemasEleitorais {
                 } else {
                     foreach ($aviso in $resultadoDownload.Avisos) { & $AoLog "[AVISO] $aviso" "Yellow" }
                     $lblProgressoPacoteAtual.Text = "Copiando para o InstSeg..."
+                    # A fase de copia (robocopy) tem porcentagem REAL
+                    # (Get-PercentualRobocopyDoLog em VisaoPacotes.psm1,
+                    # le o log do robocopy sem a flag /NP) - troca a
+                    # barra pra modo com valor de verdade so aqui.
+                    $barraProgressoLocal.Style = [System.Windows.Forms.ProgressBarStyle]::Blocks
+                    $barraProgressoLocal.Value = 0
                     [System.Windows.Forms.Application]::DoEvents()
                     $callbackCopia = { param($texto) $lblProgressoLocal.Text = $texto; [System.Windows.Forms.Application]::DoEvents() }.GetNewClosure()
-                    $resultadoCopia = Invoke-AcaoCopiarPacoteJaBaixado -Resultado $Resultado -Pacote $tagLinha.Pacote -ArquivoCacheUnc $resultadoDownload.ArquivoCacheUnc -NomeArquivoOriginal $resultadoDownload.NomeArquivoOriginal -AoAtualizarStatus $callbackCopia
+                    $callbackPercentual = { param($p) $barraProgressoLocal.Value = $p; [System.Windows.Forms.Application]::DoEvents() }.GetNewClosure()
+                    $resultadoCopia = Invoke-AcaoCopiarPacoteJaBaixado -Resultado $Resultado -Pacote $tagLinha.Pacote -ArquivoCacheUnc $resultadoDownload.ArquivoCacheUnc -NomeArquivoOriginal $resultadoDownload.NomeArquivoOriginal -AoAtualizarStatus $callbackCopia -AoAtualizarPercentual $callbackPercentual
                     if ($resultadoCopia.Sucesso) {
                         & $AoLog $resultadoCopia.Mensagem "LightGreen"
                         [System.Windows.Forms.MessageBox]::Show($resultadoCopia.Mensagem, "Concluido", "OK", "Information") | Out-Null
@@ -398,6 +409,7 @@ function Show-JanelaSistemasEleitorais {
                 [System.Windows.Forms.MessageBox]::Show("Falha ao baixar/copiar o pacote:`r`n$($_.Exception.Message)", "Erro", "OK", "Error") | Out-Null
             } finally {
                 $barraProgressoPacoteAtual.Visible = $false
+                $barraProgressoPacoteAtual.Style = [System.Windows.Forms.ProgressBarStyle]::Marquee
                 $lblProgressoPacoteAtual.Text = ""
                 $dlg.Cursor = [System.Windows.Forms.Cursors]::Default
             }

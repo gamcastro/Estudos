@@ -184,6 +184,42 @@ function Format-DuracaoLegivel {
     }
 }
 
+function Get-PercentualRobocopyDoLog {
+    <#
+        Le o conteudo ATUAL do log de saida do robocopy (ainda sendo
+        escrito pelo processo filho) e devolve a ULTIMA porcentagem
+        encontrada, ou $null se ainda nao apareceu nenhuma. O robocopy
+        escreve cada atualizacao de "% copiado" com \r (retorno de carro,
+        sem \n) pra sobrescrever a mesma linha num console de verdade -
+        redirecionado pra arquivo, isso vira uma sequencia de
+        "  0.0%\r  4.5%\r...\r100%\r" tudo tecnicamente "numa linha so",
+        por isso le o arquivo INTEIRO de uma vez (nao linha por linha) e
+        pega o ULTIMO casamento do regex, nao o primeiro.
+
+        Abre o arquivo com FileShare.ReadWrite explicito porque o
+        robocopy ainda esta com ele aberto pra escrita nesse momento -
+        Get-Content sozinho pode esbarrar em erro de compartilhamento
+        dependendo do momento exato do polling.
+    #>
+    param([string]$CaminhoLog)
+    if (-not (Test-Path -LiteralPath $CaminhoLog)) { return $null }
+    try {
+        $fs = [System.IO.File]::Open($CaminhoLog, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        try {
+            $sr = New-Object System.IO.StreamReader($fs)
+            $conteudo = $sr.ReadToEnd()
+        } finally {
+            $sr.Dispose()
+            $fs.Dispose()
+        }
+    } catch {
+        return $null
+    }
+    $casamentos = [regex]::Matches($conteudo, '(\d+(?:\.\d+)?)\s*%')
+    if ($casamentos.Count -eq 0) { return $null }
+    return [double]$casamentos[$casamentos.Count - 1].Groups[1].Value
+}
+
 function Copy-ArquivoComRobocopy {
     <#
         Copia um arquivo (origem tipicamente \\POLICY-SERVER...\
@@ -192,13 +228,17 @@ function Copy-ArquivoComRobocopy {
         direto na thread de UI do cliente (DoEvents durante a espera,
         igual o ScannerRedeZona.ps1 original) - $AoAtualizarStatus
         (opcional) e chamado com o texto de status a cada atualizacao,
-        no lugar de $GridStatus/$LinhaIndice do original.
+        $AoAtualizarPercentual (opcional) e chamado com a porcentagem
+        NUMERICA (0-100, lida do log via Get-PercentualRobocopyDoLog) a
+        cada tick do polling, no lugar de $GridStatus/$LinhaIndice do
+        original.
     #>
     param(
         [string]$Origem,
         [string]$Destino,
         [string]$NomePacote = "pacote",
-        [scriptblock]$AoAtualizarStatus = $null
+        [scriptblock]$AoAtualizarStatus = $null,
+        [scriptblock]$AoAtualizarPercentual = $null
     )
 
     if ($AoAtualizarStatus) { & $AoAtualizarStatus "Iniciando copia de '$NomePacote'..." }
@@ -211,14 +251,15 @@ function Copy-ArquivoComRobocopy {
     $totalBytes = (Get-Item $Origem).Length
 
     # /Z = restartable; /J = I/O nao-bufferizado; /R:5 /W:10 = tenta ate
-    # 5x, esperando 10s; /NP evita progresso por byte no console; os
-    # /N*/NC/NS reduzem o log a praticamente nada - mesmos flags do
-    # ScannerRedeZona.ps1 original.
+    # 5x, esperando 10s; os /N*/NC/NS reduzem o log a praticamente nada -
+    # mesmos flags do ScannerRedeZona.ps1 original, MENOS o /NP (que la
+    # suprimia o progresso por bloco) - aqui e exatamente o dado que
+    # $AoAtualizarPercentual precisa, entao fica ligado de proposito.
     $argsRobocopy = @(
         "`"$origemDir`""
         "`"$destinoDir`""
         "`"$nomeArquivo`""
-        "/Z", "/J", "/R:5", "/W:10", "/NP", "/NJH", "/NJS", "/NDL", "/NFL", "/NC", "/NS"
+        "/Z", "/J", "/R:5", "/W:10", "/NJH", "/NJS", "/NDL", "/NFL", "/NC", "/NS"
     )
 
     $pastaLogsTemp = Join-Path $env:TEMP "Visao_RobocopyLogs"
@@ -233,16 +274,30 @@ function Copy-ArquivoComRobocopy {
         $mbTotal = [Math]::Round($totalBytes / 1MB, 1)
         $cronometro = [System.Diagnostics.Stopwatch]::StartNew()
         $proximaAtualizacao = [System.Diagnostics.Stopwatch]::StartNew()
+        $ultimoPercentualNotificado = -1
         if ($AoAtualizarStatus) { & $AoAtualizarStatus "Copiando '$NomePacote' (robocopy, $mbTotal MB) ha $(Format-DuracaoLegivel 0)..." }
         while (-not $processo.HasExited) {
             [System.Windows.Forms.Application]::DoEvents()
             Start-Sleep -Milliseconds 200
+
+            if ($AoAtualizarPercentual) {
+                $percentualAtual = Get-PercentualRobocopyDoLog -CaminhoLog $logSaida
+                if ($null -ne $percentualAtual) {
+                    $percentualInteiro = [Math]::Min(100, [Math]::Round($percentualAtual))
+                    if ($percentualInteiro -ne $ultimoPercentualNotificado) {
+                        $ultimoPercentualNotificado = $percentualInteiro
+                        & $AoAtualizarPercentual $percentualInteiro
+                    }
+                }
+            }
+
             if ($proximaAtualizacao.Elapsed.TotalSeconds -ge 3) {
                 $proximaAtualizacao.Restart()
                 if ($AoAtualizarStatus) { & $AoAtualizarStatus "Copiando '$NomePacote' (robocopy, $mbTotal MB) ha $(Format-DuracaoLegivel $cronometro.Elapsed.TotalSeconds)..." }
             }
         }
         $processo.WaitForExit()
+        if ($AoAtualizarPercentual -and $ultimoPercentualNotificado -ne 100) { & $AoAtualizarPercentual 100 }
     } finally {
         Remove-Item -Path $logSaida, $logErro -Force -ErrorAction SilentlyContinue
     }
@@ -288,7 +343,8 @@ function Invoke-AcaoCopiarPacoteJaBaixado {
         [Parameter(Mandatory)][PSCustomObject]$Pacote,
         [Parameter(Mandatory)][string]$ArquivoCacheUnc,
         [string]$NomeArquivoOriginal = $null,
-        [scriptblock]$AoAtualizarStatus = $null
+        [scriptblock]$AoAtualizarStatus = $null,
+        [scriptblock]$AoAtualizarPercentual = $null
     )
 
     if (-not $Pacote.PastaDestino) {
@@ -308,7 +364,7 @@ function Invoke-AcaoCopiarPacoteJaBaixado {
     $nomeArquivoDestino = if ($Pacote.NomeArquivo) { $Pacote.NomeArquivo } elseif ($NomeArquivoOriginal) { $NomeArquivoOriginal } else { $Pacote.Pacote -replace '[\\/:*?"<>|]', '_' }
     $arquivoDestinoUnc = Join-Path $pastaDestinoUnc $nomeArquivoDestino
 
-    Copy-ArquivoComRobocopy -Origem $ArquivoCacheUnc -Destino $arquivoDestinoUnc -NomePacote $Pacote.Pacote -AoAtualizarStatus $AoAtualizarStatus
+    Copy-ArquivoComRobocopy -Origem $ArquivoCacheUnc -Destino $arquivoDestinoUnc -NomePacote $Pacote.Pacote -AoAtualizarStatus $AoAtualizarStatus -AoAtualizarPercentual $AoAtualizarPercentual
 
     if ($AoAtualizarStatus) { & $AoAtualizarStatus "Conferindo tamanho no destino..." }
     $tamanhoLocal = (Get-Item -LiteralPath $ArquivoCacheUnc).Length
