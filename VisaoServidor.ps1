@@ -436,7 +436,7 @@ function Import-TabelaCampanhas {
     }
 
     if (-not $linhas) {
-        return [PSCustomObject]@{ Ok = $false; Origem = $origem; Contagem = 0; Avisos = @($avisos); Erro = $null }
+        return ([PSCustomObject]@{ Ok = $false; Origem = $origem; Contagem = 0; Avisos = @($avisos); Erro = $null; Campanhas = @() } | ConvertTo-Json -Depth 6 -Compress)
     }
 
     $indice = @{}
@@ -454,7 +454,13 @@ function Import-TabelaCampanhas {
         }
         $indice[$chave].Requisitos.Add([PSCustomObject]@{ Sistema = $sistema; VersaoMinima = $versaoMinima })
     }
-    return [PSCustomObject]@{ Ok = $true; Origem = $origem; Contagem = $script:TabelaCampanhas.Count; Avisos = @($avisos); Erro = $null }
+    # Campanhas (Nome+Requisitos) tambem vai no retorno - alem do status
+    # Ok/Origem/Contagem, o CLIENTE precisa dos dados de verdade pra
+    # montar o combo e conferir os requisitos (Show-JanelaVerificarCampanha*,
+    # Fase D). Mesmo padrao ja usado em Import-TabelaVersoes (TabelaVersoes/
+    # Pacotes no retorno) - ConvertTo-Json aqui porque Requisitos e um
+    # array de PSCustomObject aninhado (bug de serializacao de sempre).
+    return ([PSCustomObject]@{ Ok = $true; Origem = $origem; Contagem = $script:TabelaCampanhas.Count; Avisos = @($avisos); Erro = $null; Campanhas = $script:TabelaCampanhas } | ConvertTo-Json -Depth 6 -Compress)
 }
 
 function Get-ResultadosCampanhas {

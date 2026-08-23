@@ -161,8 +161,17 @@ function Test-RedeEhCompartilhadaRemoto {
 }
 
 function Get-CampanhasRemoto {
+    <#
+        Import-TabelaCampanhas do lado servidor devolve uma STRING JSON
+        (Campanhas e uma lista de PSCustomObject, cada uma com Requisitos
+        aninhado - mesmo bug de serializacao de sempre). Aqui desserializa
+        de volta; o objeto devolvido tem .Campanhas como array normal do
+        PowerShell (cada item com .Nome/.Requisitos), pronto pra popular
+        um ComboBox/conferir requisitos no cliente.
+    #>
     param([switch]$ForcarCache)
-    Invoke-ComandoRemoto -ScriptBlock { param($f) Import-TabelaCampanhas -ForcarCache:$f } -ArgumentList @($ForcarCache.IsPresent)
+    $json = Invoke-ComandoRemoto -ScriptBlock { param($f) Import-TabelaCampanhas -ForcarCache:$f } -ArgumentList @($ForcarCache.IsPresent)
+    return ($json | ConvertFrom-Json)
 }
 
 function Get-VersoesRemoto {

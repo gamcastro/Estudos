@@ -34,6 +34,7 @@ Import-Module (Join-Path $PSScriptRoot "VisaoAD.psm1") -Force
 Import-Module (Join-Path $PSScriptRoot "VisaoPacotes.psm1") -Force
 Import-Module (Join-Path $PSScriptRoot "VisaoAcoesLocais.psm1") -Force
 Import-Module (Join-Path $PSScriptRoot "VisaoJanelaPacotes.psm1") -Force
+Import-Module (Join-Path $PSScriptRoot "VisaoJanelaCampanhas.psm1") -Force
 
 $script:NomeFerramenta = "Visao"
 $script:VersaoFerramenta = "2.0"
@@ -71,6 +72,7 @@ $script:Estado = @{
     TabelaVersoes                = @{}     # preenchido via Get-VersoesRemoto (hashtable "SISTEMA|VERSAO" -> {NomeAmigavel})
     VersaoAtualPorSistema        = @{}     # preenchido via Get-VersoesRemoto (hashtable "SISTEMA" -> versao)
     Pacotes                      = @()     # preenchido via Get-VersoesRemoto (.Pacotes) - lista de pacotes baixaveis, ver VisaoJanelaPacotes.psm1
+    Campanhas                    = @()     # preenchido via Get-CampanhasRemoto (.Campanhas) - ver VisaoJanelaCampanhas.psm1
     LinhaContextoAtual           = $null   # linha do grid selecionada pro menu de contexto (setada no MouseDown, lida no Add_Opening - dois closures separados)
 }
 
@@ -857,6 +859,7 @@ $menuContextoGrid.Add_Opening({
     $tabelaVersoesLocal = $script:Estado.TabelaVersoes
     $versaoAtualPorSistemaLocal = $script:Estado.VersaoAtualPorSistema
     $pacotesLocal = $script:Estado.Pacotes
+    $campanhasLocal = $script:Estado.Campanhas
 
     $itemPing = $menuContextoGrid.Items.Add("Ping")
     $itemPing.Add_Click({ Start-PingContinuo -IP $r.IP }.GetNewClosure())
@@ -925,6 +928,30 @@ $menuContextoGrid.Add_Opening({
                     [System.Windows.Forms.MessageBox]::Show("Falha ao abrir a janela de Sistemas Eleitorais:`r`n$($_.Exception.Message)`r`n`r`n$($_.ScriptStackTrace)", "Erro", "OK", "Error") | Out-Null
                 }
             }.GetNewClosure())
+        }
+
+        # Submenu com 1 item por campanha cadastrada - so aparece se a
+        # maquina tiver SIS instalado e existir pelo menos 1 campanha
+        # configurada (sem isso nao ha o que verificar). $campanha (a
+        # variavel do loop) e atribuida FRESCA a cada iteracao, dentro
+        # da propria execucao deste Add_Opening - atravessa corretamente
+        # pro Add_Click aninhado (mesma familia da Descoberta critica
+        # no5/no6: so variavel HERDADA de um closure mais externo, nao
+        # atribuida na execucao atual, e que nao atravessa).
+        if ($temSis -and $campanhasLocal.Count -gt 0) {
+            [void]$menuContextoGrid.Items.Add("-")
+            $itemCampanhas = $menuContextoGrid.Items.Add("Verificar Campanha")
+            foreach ($campanha in $campanhasLocal) {
+                $itemCampanha = $itemCampanhas.DropDownItems.Add($campanha.Nome)
+                $itemCampanha.Add_Click({
+                    try {
+                        Show-JanelaVerificarCampanha -Resultado $r -Campanha $campanha -SistemasEleitoraisExtra $sistemasEleitoraisExtraLocal -NomeFerramenta $script:NomeFerramenta
+                    } catch {
+                        Add-Log "[ERRO] Falha ao abrir Verificar Campanha: $($_.Exception.Message)" "OrangeRed"
+                        [System.Windows.Forms.MessageBox]::Show("Falha ao abrir Verificar Campanha:`r`n$($_.Exception.Message)", "Erro", "OK", "Error") | Out-Null
+                    }
+                }.GetNewClosure())
+            }
         }
 
         [void]$menuContextoGrid.Items.Add("-")
@@ -1002,9 +1029,34 @@ $grid.Add_CellDoubleClick({
 # BOTOES DE JANELAS AINDA NAO MIGRADAS (Fases B-F)
 # ============================================================
 $btnGerenciarZonas.Add_Click({ Show-AindaNaoImplementado -Recurso "Gerenciar Redes Zonas" -Fase "Fase E" }.GetNewClosure())
-$btnRelatorioCampanhas.Add_Click({ Show-AindaNaoImplementado -Recurso "Relatorio de Campanhas" -Fase "Fase D" }.GetNewClosure())
+$btnRelatorioCampanhas.Add_Click({
+    try {
+        Show-JanelaRelatorioCampanhas -NomeFerramenta $script:NomeFerramenta -AoLog { param($t, $c) Add-Log $t $c }.GetNewClosure()
+    } catch {
+        Add-Log "[ERRO] Falha ao abrir Relatorio de Campanhas: $($_.Exception.Message)" "OrangeRed"
+        [System.Windows.Forms.MessageBox]::Show("Falha ao abrir Relatorio de Campanhas:`r`n$($_.Exception.Message)", "Erro", "OK", "Error") | Out-Null
+    }
+}.GetNewClosure())
 $btnUsuariosZona.Add_Click({ Show-AindaNaoImplementado -Recurso "Usuarios da ZE" -Fase "Fase E" }.GetNewClosure())
-$btnVerificarCampanhaZona.Add_Click({ Show-AindaNaoImplementado -Recurso "Verificar Campanha da Zona" -Fase "Fase D" }.GetNewClosure())
+$btnVerificarCampanhaZona.Add_Click({
+    if ($script:Estado.Campanhas.Count -eq 0) {
+        [System.Windows.Forms.MessageBox]::Show("Nenhuma campanha cadastrada ainda (aba CAMPANHAS da planilha).", "Verificar Campanha", "OK", "Information") | Out-Null
+        return
+    }
+    $linhasComSis = @($grid.Rows | Where-Object { $_.Tag -and $_.Tag.VersaoSis -and $_.Tag.VersaoSis -ne "-" } | ForEach-Object { $_.Tag })
+    try {
+        $resolucaoZona = Resolve-RedeDaZonaRemoto -Zona $script:Estado.ZonaAtual
+    } catch {
+        $resolucaoZona = $null
+    }
+    $sedeZona = if ($resolucaoZona -and $resolucaoZona.Sede) { $resolucaoZona.Sede } else { "" }
+    try {
+        Show-JanelaVerificarCampanhaZona -Campanhas $script:Estado.Campanhas -LinhasComSis $linhasComSis -SistemasEleitoraisExtra $script:Estado.SistemasEleitoraisExtra -Zona $script:Estado.ZonaAtual -Sede $sedeZona -NomeFerramenta $script:NomeFerramenta -AoLog { param($t, $c) Add-Log $t $c }.GetNewClosure()
+    } catch {
+        Add-Log "[ERRO] Falha ao abrir Verificar Campanha da Zona: $($_.Exception.Message)" "OrangeRed"
+        [System.Windows.Forms.MessageBox]::Show("Falha ao abrir Verificar Campanha da Zona:`r`n$($_.Exception.Message)", "Erro", "OK", "Error") | Out-Null
+    }
+}.GetNewClosure())
 $btnConfiguracoes.Add_Click({ Show-AindaNaoImplementado -Recurso "Configuracoes" -Fase "Fase F" }.GetNewClosure())
 $btnFechar.Add_Click({ $form.Close() }.GetNewClosure())
 
@@ -1050,6 +1102,19 @@ $form.Add_Shown({
         }
     } catch {
         Add-Log "[AVISO] Falha ao carregar planilha de versoes: $($_.Exception.Message)" "Yellow"
+    }
+
+    try {
+        $c = Get-CampanhasRemoto
+        if ($c.Ok) {
+            $script:Estado.Campanhas = @($c.Campanhas)
+            Add-Log "Planilha de campanhas carregada: $($c.Contagem) campanha(s) (origem: $($c.Origem))." "Gray"
+        } else {
+            Add-Log "Planilha de campanhas nao configurada/vazia - segue sem campanhas." "Gray"
+        }
+        foreach ($aviso in $c.Avisos) { Add-Log "[AVISO] $aviso" "Yellow" }
+    } catch {
+        Add-Log "[AVISO] Falha ao carregar planilha de campanhas: $($_.Exception.Message)" "Yellow"
     }
 
     Update-LabelSedeInfo
