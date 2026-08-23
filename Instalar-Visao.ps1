@@ -26,7 +26,14 @@
 #>
 
 [CmdletBinding()]
-param()
+param(
+    # Usado pelo botao "Atualizar Ferramenta" dentro da propria Visao
+    # (VisaoCliente.ps1): em vez de so terminar e esperar ENTER, reabre a
+    # ferramenta sozinho ao final (mesmo comando que o atalho da Area de
+    # Trabalho usa) - fecha o loop completo sem exigir mais nenhum clique
+    # do tecnico depois de confirmar a atualizacao.
+    [switch]$ReabrirAoTerminar
+)
 
 $ErrorActionPreference = 'Stop'
 
@@ -270,6 +277,14 @@ catch {
     Write-Host "Instalacao concluida! O icone 'Visao' ja esta na Area de Trabalho." -ForegroundColor Green
     Write-Host 'Pra atualizar pra uma versao nova no futuro, basta rodar de novo o Instalar-Visao.bat.' -ForegroundColor Gray
     Write-Host 'Se ocorrer uma falha ao abrir, consulte Erro-Visao.txt na Area de Trabalho.' -ForegroundColor Gray
+
+    if ($ReabrirAoTerminar) {
+        Write-Host ''
+        Write-Host 'Reabrindo a Visao...' -ForegroundColor Cyan
+        Start-Process -FilePath $powershell51 -ArgumentList @('-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', "`"$caminhoInicializador`"")
+        Start-Sleep -Seconds 2
+        exit 0
+    }
 }
 catch {
     Write-Host ''

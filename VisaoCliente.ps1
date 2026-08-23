@@ -201,6 +201,14 @@ $btnRelatorioCampanhas.Height = 28
 $btnRelatorioCampanhas.Anchor = "Bottom,Left"
 $form.Controls.Add($btnRelatorioCampanhas)
 
+$btnAtualizarFerramenta = New-Object System.Windows.Forms.Button
+$btnAtualizarFerramenta.Text = "Atualizar Ferramenta"
+$btnAtualizarFerramenta.Location = New-Object System.Drawing.Point(680, 611)
+$btnAtualizarFerramenta.Width = 170
+$btnAtualizarFerramenta.Height = 28
+$btnAtualizarFerramenta.Anchor = "Bottom,Left"
+$form.Controls.Add($btnAtualizarFerramenta)
+
 $btnUsuariosZona = New-Object System.Windows.Forms.Button
 $btnUsuariosZona.Text = "Usuarios da ZE 1"
 $btnUsuariosZona.Location = New-Object System.Drawing.Point(710, 43)
@@ -1063,6 +1071,37 @@ $btnRelatorioCampanhas.Add_Click({
     } catch {
         Add-Log "[ERRO] Falha ao abrir Relatorio de Campanhas: $($_.Exception.Message)" "OrangeRed"
         [System.Windows.Forms.MessageBox]::Show("Falha ao abrir Relatorio de Campanhas:`r`n$($_.Exception.Message)", "Erro", "OK", "Error") | Out-Null
+    }
+}.GetNewClosure())
+$btnAtualizarFerramenta.Add_Click({
+    <#
+        Roda de novo o mesmo Instalar-Visao.ps1 usado na instalacao
+        inicial (registra o repositorio se precisar, reinstala o modulo,
+        desbloqueia os arquivos, recria o atalho/icone da Area de
+        Trabalho) - so que com -ReabrirAoTerminar, que faz ele reabrir a
+        Visao sozinho ao final em vez de so parar e esperar ENTER. A
+        janela atual fecha logo depois de disparar o processo, pra nao
+        segurar arquivo nenhum da versao instalada durante a reinstalacao
+        (Install-Module -Force reinstala mesmo se a versao for a mesma
+        ja instalada - nao so quando ha versao nova).
+    #>
+    $resposta = [System.Windows.Forms.MessageBox]::Show(
+        "Isso vai fechar a Visao agora, atualizar a ferramenta (e o atalho/icone da Area de Trabalho) e reabrir automaticamente a versao mais nova.`r`n`r`nContinuar?",
+        "Atualizar Ferramenta",
+        [System.Windows.Forms.MessageBoxButtons]::YesNo,
+        [System.Windows.Forms.MessageBoxIcon]::Question
+    )
+    if ($resposta -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+
+    try {
+        Add-Log "Iniciando atualizacao completa da ferramenta - a janela vai fechar e reabrir sozinha em instantes..." "Cyan"
+        $caminhoInstalador = '\\POLICY-SERVER.tre-ma.gov.br\ScanZonas\Instalar-Visao.ps1'
+        $comandoInstalador = "Start-Sleep -Seconds 3; & '$caminhoInstalador' -ReabrirAoTerminar"
+        Start-Process -FilePath "powershell.exe" -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $comandoInstalador)
+        $form.Close()
+    } catch {
+        Add-Log "[ERRO] Falha ao iniciar a atualizacao: $($_.Exception.Message)" "OrangeRed"
+        [System.Windows.Forms.MessageBox]::Show("Falha ao iniciar a atualizacao:`r`n$($_.Exception.Message)", "Erro", "OK", "Error") | Out-Null
     }
 }.GetNewClosure())
 $btnUsuariosZona.Add_Click({
