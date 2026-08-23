@@ -15,6 +15,14 @@
     ele chama este script via linha de comando (powershell.exe -File),
     que nao passa pelo verbo "abrir" do Explorer e por isso nao dispara
     aquele aviso.
+
+    A partir desta versao, o atalho da Area de Trabalho tambem checa
+    sozinho (em segundo plano, com prazo maximo de 20s) se ha uma versao
+    nova a cada abertura, e se atualiza sozinho quando encontra - nao e
+    mais preciso rodar este instalador de novo so pra atualizar. Pra
+    desativar isso numa maquina especifica sem reinstalar nada, crie um
+    arquivo vazio chamado SemAutoAtualizacao.txt dentro de
+    %LOCALAPPDATA%\SuporteTI\Visao\.
 #>
 
 [CmdletBinding()]
@@ -104,15 +112,94 @@ try {
         New-Item -Path $pastaInicializador -ItemType Directory -Force | Out-Null
     }
 
-    # O inicializador roda de fato o Start-Visao a partir do atalho. Se
-    # algo der errado (modulo corrompido, erro na interface etc.), ele
-    # mostra uma mensagem amigavel em vez de so fechar a janela sem
-    # explicacao, e grava os detalhes num arquivo na Area de Trabalho
-    # pra facilitar o suporte remoto.
+    # O inicializador roda de fato o Start-Visao a partir do atalho. Antes
+    # de abrir, ele confere (com prazo curto, em segundo plano) se ha uma
+    # versao mais nova no repositorio e atualiza sozinho - assim o tecnico
+    # nao precisa mais rodar o Instalar-Visao.bat manualmente a cada
+    # atualizacao. Essa checagem e best-effort: qualquer falha (rede fora,
+    # demora demais, repositorio indisponivel) e ignorada silenciosamente
+    # e a versao ja instalada abre normalmente - nunca trava nem mostra
+    # erro por causa disso. Se algo der errado de verdade (modulo
+    # corrompido, erro na interface etc.), ele mostra uma mensagem amigavel
+    # em vez de so fechar a janela sem explicacao, e grava os detalhes num
+    # arquivo na Area de Trabalho pra facilitar o suporte remoto.
+    #
+    # ROLLBACK RAPIDO (sem precisar reinstalar nada): crie um arquivo
+    # vazio chamado SemAutoAtualizacao.txt dentro de
+    # %LOCALAPPDATA%\SuporteTI\Visao\ na maquina afetada - a checagem
+    # passa a ser pulada no proximo clique no icone.
     $conteudoInicializador = @'
 #requires -Version 5.1
 
 $ErrorActionPreference = 'Stop'
+
+function Registrar-LogAutoAtualizacao {
+    param([string]$Linha)
+    try {
+        $arquivoLog = Join-Path $PSScriptRoot 'AutoAtualizacao.log'
+        $linhaComData = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') - $Linha"
+        $linhasExistentes = @()
+        if (Test-Path -LiteralPath $arquivoLog) {
+            $linhasExistentes = @(Get-Content -LiteralPath $arquivoLog -ErrorAction SilentlyContinue)
+        }
+        $linhasFinais = @($linhasExistentes + $linhaComData) | Select-Object -Last 50
+        Set-Content -LiteralPath $arquivoLog -Value $linhasFinais -Encoding utf8 -Force
+    } catch {}
+}
+
+$arquivoDesativarAutoAtualizacao = Join-Path $PSScriptRoot 'SemAutoAtualizacao.txt'
+
+if (Test-Path -LiteralPath $arquivoDesativarAutoAtualizacao) {
+    Registrar-LogAutoAtualizacao 'Pulado - SemAutoAtualizacao.txt presente'
+}
+else {
+    try {
+        $job = Start-Job -ScriptBlock {
+            param($NomeModulo, $NomeRepo, $CaminhoRepo)
+            $instalado = Get-Module -ListAvailable -Name $NomeModulo | Sort-Object Version -Descending | Select-Object -First 1
+            if (-not $instalado) { return "Modulo nao encontrado localmente - pulando checagem" }
+
+            # Le a versao disponivel direto do nome dos arquivos na pasta
+            # (Visao.<versao>.nupkg) em vez de usar Find-Module: o
+            # Find-Module/Update-Module desta versao do PowerShellGet
+            # (1.0.0.1) negocia o provedor NuGet a cada chamada e leva de 3
+            # a 6 segundos so pra checar - uma simples listagem da pasta
+            # leva menos de 1 segundo. So paga o custo do PowerShellGet
+            # quando ja se sabe que precisa atualizar de verdade.
+            $pacotes = Get-ChildItem -LiteralPath $CaminhoRepo -Filter "$NomeModulo.*.nupkg" -ErrorAction Stop
+            $versaoDisponivel = $pacotes | ForEach-Object {
+                if ($_.BaseName -match "^$([regex]::Escape($NomeModulo))\.(\d+(?:\.\d+){1,3})$") { [version]$Matches[1] }
+            } | Sort-Object -Descending | Select-Object -First 1
+
+            if (-not $versaoDisponivel -or $versaoDisponivel -le [version]$instalado.Version) {
+                return "Ja estava na versao mais recente ($($instalado.Version))"
+            }
+
+            # Update-Module nesta versao do PowerShellGet nao aceita
+            # -Repository - ele ja sabe de qual repositorio o modulo veio
+            # (gravado no proprio modulo instalado).
+            Update-Module -Name $NomeModulo -Force -ErrorAction Stop
+            $verificacao = Get-Module -ListAvailable -Name $NomeModulo | Sort-Object Version -Descending | Select-Object -First 1
+            if ($verificacao.Version -lt $versaoDisponivel) {
+                throw "Update-Module nao lancou erro, mas a versao instalada continua $($verificacao.Version) (esperada $versaoDisponivel)"
+            }
+            return "Atualizado de $($instalado.Version) para $($verificacao.Version)"
+        } -ArgumentList 'Visao', 'VisaoRepoInterno', '\\POLICY-SERVER.tre-ma.gov.br\ScanZonas\PSRepo'
+
+        if (Wait-Job -Job $job -Timeout 20) {
+            $resultado = Receive-Job -Job $job -ErrorAction SilentlyContinue
+            Registrar-LogAutoAtualizacao $resultado
+        }
+        else {
+            Stop-Job -Job $job -ErrorAction SilentlyContinue
+            Registrar-LogAutoAtualizacao 'Pulado - checagem excedeu o prazo (servidor lento ou fora do ar)'
+        }
+        Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+    }
+    catch {
+        Registrar-LogAutoAtualizacao "Pulado - erro na checagem: $($_.Exception.Message)"
+    }
+}
 
 try {
     Import-Module Visao -Force -ErrorAction Stop
