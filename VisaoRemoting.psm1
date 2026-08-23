@@ -97,6 +97,23 @@ function Connect-ServidorVisao {
         (sincrono). Com esses limites mais curtos, o pior caso vira uma
         pausa de segundos, nao minutos, tanto pra idle quanto pra queda
         de rede de verdade.
+
+        Achado ao vivo nº2 (2026-08-23) - MaxConnectionRetryCount: um
+        tecnico reportou telas mostrando a mensagem NATIVA do WinRM
+        "A conexao de rede com POLICY-SERVER foi interrompida. Tentando
+        reconexao por ate 4 minutos..." (com contador regressivo) - isso
+        NAO e codigo nosso, e o proprio WinRM tentando se recuperar
+        sozinho de uma queda de rede ENQUANTO um comando ja estava em
+        andamento (diferente de abrir sessao nova, que e o que
+        OpenTimeout cobre). Esse mecanismo roda ANTES de qualquer
+        excecao chegar no nosso try/catch - a reconexao propria do
+        Invoke-ComandoRemoto so age DEPOIS que o WinRM desiste. Sem
+        configurar, o padrao usa MaxConnectionRetryCount=4 (cada
+        tentativa ~1min, daí os "4 minutos" batendo exato com o
+        relatado). Reduzido pra 1 - da uma chance rapida de
+        autorrecuperação pra blips curtos de rede, mas sem prender a UI
+        por minutos antes da NOSSA reconexao (mais rapida, ja com
+        OpenTimeout curto) assumir.
     #>
     if ($script:PSSessionServidor -and $script:PSSessionServidor.State -eq [System.Management.Automation.Runspaces.RunspaceState]::Opened) {
         return $true
@@ -106,7 +123,7 @@ function Connect-ServidorVisao {
 
     $cronometro = [System.Diagnostics.Stopwatch]::StartNew()
     try {
-        $opcoesSessao = New-PSSessionOption -OpenTimeout 45000 -OperationTimeout 60000 -IdleTimeout 900000 -CancelTimeout 15000
+        $opcoesSessao = New-PSSessionOption -OpenTimeout 45000 -OperationTimeout 60000 -IdleTimeout 900000 -CancelTimeout 15000 -MaxConnectionRetryCount 1
         $script:PSSessionServidor = New-PSSession -ComputerName $script:NomeServidorVisao -SessionOption $opcoesSessao -ErrorAction Stop
         Invoke-Command -Session $script:PSSessionServidor -FilePath $script:CaminhoVisaoServidorPs1 -ErrorAction Stop
         $script:IdSessaoAtual = [guid]::NewGuid()
