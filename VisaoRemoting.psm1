@@ -39,6 +39,19 @@ function Connect-ServidorVisao {
         topo do VisaoServidor.ps1). Devolve $true/$false; quem chama
         decide o que fazer em caso de falha (ex: mostrar erro e nao abrir
         a janela principal).
+
+        SessionOption com OperationTimeout/IdleTimeout MENORES que o
+        padrao do PowerShell (3 minutos de OperationTimeout, 2 horas de
+        IdleTimeout) - confirmado como causa real de "a ferramenta trava
+        se ficar muito tempo ociosa": um firewall intermediario pode
+        derrubar a conexao TCP em silencio (sem RST/FIN) enquanto a
+        janela fica parada; sem um limite mais curto, a PROXIMA chamada
+        remota (Invoke-ComandoRemoto, sincrona na thread de UI - trava a
+        janela inteira enquanto espera) so percebe a sessao morta depois
+        de ate 3 minutos parada, antes da reconexao automatica (ja
+        existente em Invoke-ComandoRemoto) entrar em acao. Com esses
+        limites mais curtos, o pior caso vira uma pausa de segundos, nao
+        minutos, antes de reconectar sozinho.
     #>
     if ($script:PSSessionServidor -and $script:PSSessionServidor.State -eq [System.Management.Automation.Runspaces.RunspaceState]::Opened) {
         return $true
@@ -47,7 +60,8 @@ function Connect-ServidorVisao {
     Disconnect-ServidorVisao
 
     try {
-        $script:PSSessionServidor = New-PSSession -ComputerName $script:NomeServidorVisao -ErrorAction Stop
+        $opcoesSessao = New-PSSessionOption -OperationTimeout 60000 -IdleTimeout 900000
+        $script:PSSessionServidor = New-PSSession -ComputerName $script:NomeServidorVisao -SessionOption $opcoesSessao -ErrorAction Stop
         Invoke-Command -Session $script:PSSessionServidor -FilePath $script:CaminhoVisaoServidorPs1 -ErrorAction Stop
         $script:IdSessaoAtual = [guid]::NewGuid()
         return $true
