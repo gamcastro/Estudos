@@ -136,13 +136,28 @@ function Invoke-ComandoRemoto {
 # VisaoServidor.ps1 via Invoke-ComandoRemoto.
 # ============================================================
 function Get-ZonasRemoto {
+    <#
+        Import-TabelaZonas do lado servidor devolve uma STRING JSON
+        (Zonas e um array de PSCustomObject - mesmo bug de serializacao
+        de sempre). Aqui desserializa de volta; .Zonas vem como array
+        normal do PowerShell, cada item com .Zona (int) embutido - Fase E
+        (Gerenciar Zonas) usa isso pra montar a grade editavel.
+    #>
     param([switch]$ForcarCache)
-    Invoke-ComandoRemoto -ScriptBlock { param($f) Import-TabelaZonas -ForcarCache:$f } -ArgumentList @($ForcarCache.IsPresent)
+    $json = Invoke-ComandoRemoto -ScriptBlock { param($f) Import-TabelaZonas -ForcarCache:$f } -ArgumentList @($ForcarCache.IsPresent)
+    return ($json | ConvertFrom-Json)
 }
 
 function Get-GruposSistemasRemoto {
+    <#
+        Import-TabelaGruposSistemas do lado servidor devolve uma STRING
+        JSON. Aqui desserializa de volta - .GruposSistemas vem como
+        PSCustomObject (converter pra Hashtable do lado cliente antes de
+        indexar por chave, mesmo padrao de TabelaVersoes/VersaoAtualPorSistema).
+    #>
     param([switch]$ForcarCache)
-    Invoke-ComandoRemoto -ScriptBlock { param($f) Import-TabelaGruposSistemas -ForcarCache:$f } -ArgumentList @($ForcarCache.IsPresent)
+    $json = Invoke-ComandoRemoto -ScriptBlock { param($f) Import-TabelaGruposSistemas -ForcarCache:$f } -ArgumentList @($ForcarCache.IsPresent)
+    return ($json | ConvertFrom-Json)
 }
 
 function Resolve-RedeDaZonaRemoto {

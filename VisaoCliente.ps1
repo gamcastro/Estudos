@@ -35,6 +35,7 @@ Import-Module (Join-Path $PSScriptRoot "VisaoPacotes.psm1") -Force
 Import-Module (Join-Path $PSScriptRoot "VisaoAcoesLocais.psm1") -Force
 Import-Module (Join-Path $PSScriptRoot "VisaoJanelaPacotes.psm1") -Force
 Import-Module (Join-Path $PSScriptRoot "VisaoJanelaCampanhas.psm1") -Force
+Import-Module (Join-Path $PSScriptRoot "VisaoJanelaAdmin.psm1") -Force
 
 $script:NomeFerramenta = "Visao"
 $script:VersaoFerramenta = "2.0"
@@ -73,6 +74,8 @@ $script:Estado = @{
     VersaoAtualPorSistema        = @{}     # preenchido via Get-VersoesRemoto (hashtable "SISTEMA" -> versao)
     Pacotes                      = @()     # preenchido via Get-VersoesRemoto (.Pacotes) - lista de pacotes baixaveis, ver VisaoJanelaPacotes.psm1
     Campanhas                    = @()     # preenchido via Get-CampanhasRemoto (.Campanhas) - ver VisaoJanelaCampanhas.psm1
+    Zonas                        = @()     # preenchido via Get-ZonasRemoto (.Zonas) - ver VisaoJanelaAdmin.psm1 (Gerenciar Zonas)
+    GruposSistemas               = @{}     # preenchido via Get-GruposSistemasRemoto (.GruposSistemas) - ver VisaoJanelaAdmin.psm1 (Usuarios da ZE)
     LinhaContextoAtual           = $null   # linha do grid selecionada pro menu de contexto (setada no MouseDown, lida no Add_Opening - dois closures separados)
 }
 
@@ -513,6 +516,19 @@ function Invoke-BuscarDesligadosOcs {
     Reconstruir-Grid
     $qtdCandidatas = @($resposta.Desligadas | Where-Object { $_.CandidatoExclusaoOcs }).Count
     Add-Log "=== $($resposta.Desligadas.Count) maquina(s) da Zona $($script:Estado.ZonaAtual) parecem desligadas/desconectadas (cadastradas no OCS, sem resposta na varredura) - $qtdCandidatas com mais de $($resposta.MesesParaCandidatoExclusao) meses sem contato ===" "OrangeRed"
+}
+
+function Atualizar-MaximoZona {
+    <#
+        Sobe o maximo do campo "Numero da Zona" se a planilha tiver zona
+        alem de 253 (raro, mas o original ja previa isso) - relocacao
+        quase pura, so $script:TabelaZonas.Keys vira $script:Estado.Zonas
+        (array de {Zona;...} em vez de Hashtable indexada por zona).
+    #>
+    if ($script:Estado.Zonas.Count -gt 0) {
+        $maxZona = ($script:Estado.Zonas | Measure-Object -Property Zona -Maximum).Maximum
+        $numZona.Maximum = [Math]::Max($maxZona, 253)
+    }
 }
 
 function Update-LabelSedeInfo {
@@ -1028,7 +1044,14 @@ $grid.Add_CellDoubleClick({
 # ============================================================
 # BOTOES DE JANELAS AINDA NAO MIGRADAS (Fases B-F)
 # ============================================================
-$btnGerenciarZonas.Add_Click({ Show-AindaNaoImplementado -Recurso "Gerenciar Redes Zonas" -Fase "Fase E" }.GetNewClosure())
+$btnGerenciarZonas.Add_Click({
+    try {
+        Show-GerenciarZonas -Zonas $script:Estado.Zonas -NomeFerramenta $script:NomeFerramenta -AoLog { param($t, $c) Add-Log $t $c }.GetNewClosure() -AoZonasAtualizadas { param($novasZonas) $script:Estado.Zonas = $novasZonas; Atualizar-MaximoZona; Update-LabelSedeInfo }.GetNewClosure()
+    } catch {
+        Add-Log "[ERRO] Falha ao abrir Gerenciar Zonas: $($_.Exception.Message)" "OrangeRed"
+        [System.Windows.Forms.MessageBox]::Show("Falha ao abrir Gerenciar Zonas:`r`n$($_.Exception.Message)", "Erro", "OK", "Error") | Out-Null
+    }
+}.GetNewClosure())
 $btnRelatorioCampanhas.Add_Click({
     try {
         Show-JanelaRelatorioCampanhas -NomeFerramenta $script:NomeFerramenta -AoLog { param($t, $c) Add-Log $t $c }.GetNewClosure()
@@ -1037,7 +1060,14 @@ $btnRelatorioCampanhas.Add_Click({
         [System.Windows.Forms.MessageBox]::Show("Falha ao abrir Relatorio de Campanhas:`r`n$($_.Exception.Message)", "Erro", "OK", "Error") | Out-Null
     }
 }.GetNewClosure())
-$btnUsuariosZona.Add_Click({ Show-AindaNaoImplementado -Recurso "Usuarios da ZE" -Fase "Fase E" }.GetNewClosure())
+$btnUsuariosZona.Add_Click({
+    try {
+        Show-JanelaUsuariosZona -Zona ([int]$numZona.Value) -GruposSistemas $script:Estado.GruposSistemas -NomeFerramenta $script:NomeFerramenta -AoLog { param($t, $c) Add-Log $t $c }.GetNewClosure()
+    } catch {
+        Add-Log "[ERRO] Falha ao abrir Usuarios da ZE: $($_.Exception.Message)" "OrangeRed"
+        [System.Windows.Forms.MessageBox]::Show("Falha ao abrir Usuarios da ZE:`r`n$($_.Exception.Message)", "Erro", "OK", "Error") | Out-Null
+    }
+}.GetNewClosure())
 $btnVerificarCampanhaZona.Add_Click({
     if ($script:Estado.Campanhas.Count -eq 0) {
         [System.Windows.Forms.MessageBox]::Show("Nenhuma campanha cadastrada ainda (aba CAMPANHAS da planilha).", "Verificar Campanha", "OK", "Information") | Out-Null
@@ -1084,10 +1114,25 @@ $form.Add_Shown({
 
     try {
         $z = Get-ZonasRemoto
+        $script:Estado.Zonas = @($z.Zonas)
         Add-Log "Tabela de zonas carregada: $($z.Contagem) zona(s) (origem: $($z.Origem))." "Gray"
         foreach ($aviso in $z.Avisos) { Add-Log "[AVISO] $aviso" "Yellow" }
+        Atualizar-MaximoZona
     } catch {
         Add-Log "[ERRO] Falha ao carregar tabela de zonas: $($_.Exception.Message)" "OrangeRed"
+    }
+
+    try {
+        $g = Get-GruposSistemasRemoto
+        if ($g.Ok) {
+            $script:Estado.GruposSistemas = ConvertTo-HashtableLocal $g.GruposSistemas
+            Add-Log "Planilha de grupos/sistemas carregada: $($g.Contagem) grupo(s) (origem: $($g.Origem))." "Gray"
+        } else {
+            Add-Log "Planilha de grupos/sistemas nao configurada/vazia - segue sem mapeamento de grupos." "Gray"
+        }
+        foreach ($aviso in $g.Avisos) { Add-Log "[AVISO] $aviso" "Yellow" }
+    } catch {
+        Add-Log "[AVISO] Falha ao carregar planilha de grupos/sistemas: $($_.Exception.Message)" "Yellow"
     }
 
     try {

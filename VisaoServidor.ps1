@@ -260,7 +260,7 @@ function Import-TabelaZonas {
     }
 
     if (-not $linhas) {
-        return [PSCustomObject]@{ Ok = $false; Origem = $origem; Contagem = 0; Avisos = @($avisos); Erro = "Nenhuma tabela de zonas disponivel (nem online, nem cache local)." }
+        return ([PSCustomObject]@{ Ok = $false; Origem = $origem; Contagem = 0; Avisos = @($avisos); Erro = "Nenhuma tabela de zonas disponivel (nem online, nem cache local)."; Zonas = @() } | ConvertTo-Json -Depth 6 -Compress)
     }
 
     foreach ($l in $linhas) {
@@ -274,7 +274,25 @@ function Import-TabelaZonas {
             }
         }
     }
-    return [PSCustomObject]@{ Ok = $true; Origem = $origem; Contagem = $script:TabelaZonas.Count; Avisos = @($avisos); Erro = $null }
+    # Zonas (array, uma entrada por zona com o numero embutido) tambem vai
+    # no retorno - alem do status Ok/Origem/Contagem, o CLIENTE precisa
+    # dos dados de verdade pra montar a janela "Gerenciar Zonas" (Fase E).
+    # Array de PSCustomObject em vez de devolver $script:TabelaZonas (a
+    # Hashtable) direto: chaves INTEIRAS de hashtable viram STRING depois
+    # de um ConvertTo-Json/ConvertFrom-Json (JSON so tem chave-string), o
+    # que quebraria qualquer busca por indice inteiro do lado cliente -
+    # um array com .Zona (int) embutido em cada item evita esse problema
+    # de vez, e already o mesmo padrao usado em TabelaCampanhas/TabelaPacotes.
+    $zonasArray = $script:TabelaZonas.Keys | Sort-Object | ForEach-Object {
+        [PSCustomObject]@{
+            Zona       = $_
+            Sede       = $script:TabelaZonas[$_].Sede
+            RedePadrao = $script:TabelaZonas[$_].RedePadrao
+            Substituta = $script:TabelaZonas[$_].Substituta
+            Observacao = $script:TabelaZonas[$_].Observacao
+        }
+    }
+    return ([PSCustomObject]@{ Ok = $true; Origem = $origem; Contagem = $script:TabelaZonas.Count; Avisos = @($avisos); Erro = $null; Zonas = @($zonasArray) } | ConvertTo-Json -Depth 6 -Compress)
 }
 
 function Resolve-RedeDaZona {
@@ -384,7 +402,7 @@ function Import-TabelaGruposSistemas {
     }
 
     if (-not $linhas) {
-        return [PSCustomObject]@{ Ok = $false; Origem = $origem; Contagem = 0; Avisos = @($avisos); Erro = $null }
+        return ([PSCustomObject]@{ Ok = $false; Origem = $origem; Contagem = 0; Avisos = @($avisos); Erro = $null; GruposSistemas = @{} } | ConvertTo-Json -Depth 6 -Compress)
     }
 
     foreach ($l in $linhas) {
@@ -395,7 +413,10 @@ function Import-TabelaGruposSistemas {
             Perfil  = $l.Perfil
         }
     }
-    return [PSCustomObject]@{ Ok = $true; Origem = $origem; Contagem = $script:TabelaGruposSistemas.Count; Avisos = @($avisos); Erro = $null }
+    # GruposSistemas (a Hashtable, chaves ja sao STRING - sem o problema
+    # de chave inteira virar string que a Zonas tem) tambem vai no
+    # retorno - o CLIENTE precisa pra montar "Usuarios da ZE" (Fase E).
+    return ([PSCustomObject]@{ Ok = $true; Origem = $origem; Contagem = $script:TabelaGruposSistemas.Count; Avisos = @($avisos); Erro = $null; GruposSistemas = $script:TabelaGruposSistemas } | ConvertTo-Json -Depth 6 -Compress)
 }
 
 # ============================================================
@@ -1393,7 +1414,10 @@ function Send-AtualizacaoZonaViaAppsScript {
         # um Web App novo) - antes de considerar falha de verdade,
         # confere se o valor foi mesmo gravado buscando a planilha de
         # novo.
-        $resultadoImport = Import-TabelaZonas
+        # Import-TabelaZonas devolve STRING JSON (contrato pra QUALQUER
+        # chamador, direto ou remoto - mesmo motivo de sempre) - precisa
+        # do ConvertFrom-Json mesmo chamando local, sem remoting.
+        $resultadoImport = (Import-TabelaZonas | ConvertFrom-Json)
         if ($resultadoImport.Ok) {
             $zonaInfo = $script:TabelaZonas[$Zona]
             $substitutaGravada = if ($zonaInfo -and $zonaInfo.Substituta) { $zonaInfo.Substituta.Trim() } else { "" }
