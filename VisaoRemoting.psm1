@@ -31,6 +31,37 @@ $script:PSSessionServidor = $null
 # teste de resiliencia da Fase 4).
 $script:IdSessaoAtual = $null
 
+# Pasta usada pelo instalador pra guardar o launcher/log de auto-
+# atualizacao (ver Instalar-Visao.ps1) - reaproveitada aqui pro log de
+# eventos de conexao, pelo mesmo motivo: fica visivel/coletavel pelo
+# suporte sem precisar pegar o tecnico em flagrante com o problema
+# acontecendo ao vivo.
+$script:PastaLogVisao = Join-Path $env:LOCALAPPDATA 'SuporteTI\Visao'
+$script:ArquivoLogConexao = Join-Path $script:PastaLogVisao 'Conexao.log'
+
+function Registrar-LogConexao {
+    <#
+        Log local (nao vai pro servidor) de eventos de conexao/reconexao
+        com o POLICY-SERVER - existe pra dar visibilidade de quanto
+        tempo cada reconexao realmente leva e com que frequencia
+        acontece, sem depender do tecnico "pegar no flagrante" e
+        descrever o que viu. Guarda so as ultimas 200 linhas.
+    #>
+    param([string]$Linha)
+    try {
+        if (-not (Test-Path -LiteralPath $script:PastaLogVisao)) {
+            New-Item -Path $script:PastaLogVisao -ItemType Directory -Force | Out-Null
+        }
+        $linhaComData = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') - $Linha"
+        $linhasExistentes = @()
+        if (Test-Path -LiteralPath $script:ArquivoLogConexao) {
+            $linhasExistentes = @(Get-Content -LiteralPath $script:ArquivoLogConexao -ErrorAction SilentlyContinue)
+        }
+        $linhasFinais = @($linhasExistentes + $linhaComData) | Select-Object -Last 200
+        Set-Content -LiteralPath $script:ArquivoLogConexao -Value $linhasFinais -Encoding utf8 -Force
+    } catch {}
+}
+
 function Connect-ServidorVisao {
     <#
         Abre (ou reabre) a sessao persistente com o POLICY-SERVER e
@@ -40,18 +71,32 @@ function Connect-ServidorVisao {
         decide o que fazer em caso de falha (ex: mostrar erro e nao abrir
         a janela principal).
 
-        SessionOption com OperationTimeout/IdleTimeout MENORES que o
-        padrao do PowerShell (3 minutos de OperationTimeout, 2 horas de
-        IdleTimeout) - confirmado como causa real de "a ferramenta trava
-        se ficar muito tempo ociosa": um firewall intermediario pode
-        derrubar a conexao TCP em silencio (sem RST/FIN) enquanto a
-        janela fica parada; sem um limite mais curto, a PROXIMA chamada
-        remota (Invoke-ComandoRemoto, sincrona na thread de UI - trava a
-        janela inteira enquanto espera) so percebe a sessao morta depois
-        de ate 3 minutos parada, antes da reconexao automatica (ja
-        existente em Invoke-ComandoRemoto) entrar em acao. Com esses
-        limites mais curtos, o pior caso vira uma pausa de segundos, nao
-        minutos, antes de reconectar sozinho.
+        SessionOption com OperationTimeout/IdleTimeout/OpenTimeout MENORES
+        que o padrao do PowerShell (3 minutos de OperationTimeout, 2
+        horas de IdleTimeout, 3 minutos de OpenTimeout) - confirmado como
+        causa real de "a ferramenta trava se ficar muito tempo ociosa":
+        um firewall intermediario pode derrubar a conexao TCP em
+        silencio (sem RST/FIN) enquanto a janela fica parada; sem um
+        limite mais curto, a PROXIMA chamada remota (Invoke-ComandoRemoto,
+        sincrona na thread de UI - trava a janela inteira enquanto
+        espera) so percebe a sessao morta depois de ate 3 minutos parada,
+        antes da reconexao automatica (ja existente em Invoke-ComandoRemoto)
+        entrar em acao.
+
+        O OpenTimeout (3 minutos por padrao) e um limite DIFERENTE do
+        OperationTimeout - controla quanto tempo o New-PSSession abaixo
+        espera enquanto tenta ABRIR uma sessao nova, nao uma ja aberta.
+        Achado ao vivo (2026-08-23): um tecnico relatou a GUI travando de
+        verdade (nao so ficando ociosa) no meio do uso, com a janela de
+        console atras mostrando que ainda estava tentando conectar. A
+        primeira correcao deste comentario (OperationTimeout/IdleTimeout)
+        so cobria sessao JA aberta que ficou idle - deixava de fora
+        justamente o caso de reconexao no meio de uma queda de rede de
+        verdade, onde o New-PSSession do zero podia ficar ate 3 minutos
+        tentando abrir antes de desistir, com a UI travada o tempo todo
+        (sincrono). Com esses limites mais curtos, o pior caso vira uma
+        pausa de segundos, nao minutos, tanto pra idle quanto pra queda
+        de rede de verdade.
     #>
     if ($script:PSSessionServidor -and $script:PSSessionServidor.State -eq [System.Management.Automation.Runspaces.RunspaceState]::Opened) {
         return $true
@@ -59,14 +104,17 @@ function Connect-ServidorVisao {
 
     Disconnect-ServidorVisao
 
+    $cronometro = [System.Diagnostics.Stopwatch]::StartNew()
     try {
-        $opcoesSessao = New-PSSessionOption -OperationTimeout 60000 -IdleTimeout 900000
+        $opcoesSessao = New-PSSessionOption -OpenTimeout 45000 -OperationTimeout 60000 -IdleTimeout 900000 -CancelTimeout 15000
         $script:PSSessionServidor = New-PSSession -ComputerName $script:NomeServidorVisao -SessionOption $opcoesSessao -ErrorAction Stop
         Invoke-Command -Session $script:PSSessionServidor -FilePath $script:CaminhoVisaoServidorPs1 -ErrorAction Stop
         $script:IdSessaoAtual = [guid]::NewGuid()
+        Registrar-LogConexao "Conectado com sucesso ($([math]::Round($cronometro.Elapsed.TotalSeconds, 1))s)"
         return $true
     } catch {
         Write-Warning "Falha ao conectar/carregar logica no servidor '$($script:NomeServidorVisao)': $($_.Exception.Message)"
+        Registrar-LogConexao "Falha ao conectar ($([math]::Round($cronometro.Elapsed.TotalSeconds, 1))s): $($_.Exception.Message)"
         $script:PSSessionServidor = $null
         $script:IdSessaoAtual = $null
         return $false
@@ -133,6 +181,7 @@ function Invoke-ComandoRemoto {
         # so esse tipo de erro justifica tentar reconectar; um erro de
         # LOGICA vindo de dentro do scriptblock remoto e outro tipo de
         # excecao e cai no catch generico abaixo, propagando normal.
+        Registrar-LogConexao "Sessao perdida durante operacao remota (erro de transporte): $($_.Exception.Message)"
         if (-not (Connect-ServidorVisao)) {
             throw [System.InvalidOperationException]::new("Conexao com o POLICY-SERVER perdida e nao foi possivel reconectar. Verifique a rede/VPN e tente novamente.")
         }
