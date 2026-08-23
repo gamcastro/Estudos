@@ -1087,7 +1087,34 @@ $btnVerificarCampanhaZona.Add_Click({
         [System.Windows.Forms.MessageBox]::Show("Falha ao abrir Verificar Campanha da Zona:`r`n$($_.Exception.Message)", "Erro", "OK", "Error") | Out-Null
     }
 }.GetNewClosure())
-$btnConfiguracoes.Add_Click({ Show-AindaNaoImplementado -Recurso "Configuracoes" -Fase "Fase F" }.GetNewClosure())
+$btnConfiguracoes.Add_Click({
+    # Alias LOCAL de $script:Estado, atribuido AQUI (closure de primeiro
+    # nivel) - o callback -AoVersoesAtualizadas abaixo e um SEGUNDO
+    # .GetNewClosure() aninhado dentro deste, e ler $script:Estado direto
+    # de dentro dele nao seria confiavel (Descoberta critica no5/no6) -
+    # mutar $estadoLocal.Chave mesmo assim atualiza o MESMO hashtable que
+    # $script:Estado aponta (mesmo objeto por referencia).
+    $estadoLocal = $script:Estado
+    try {
+        Show-Configuracoes -NomeFerramenta $script:NomeFerramenta -AoLog { param($t, $c) Add-Log $t $c }.GetNewClosure() -AoVersoesAtualizadas {
+            try {
+                $v = Get-VersoesRemoto
+                if ($v.Ok) {
+                    $estadoLocal.TabelaVersoes = ConvertTo-HashtableLocal $v.TabelaVersoes
+                    $estadoLocal.VersaoAtualPorSistema = ConvertTo-HashtableLocal $v.VersaoAtualPorSistema
+                    $estadoLocal.Pacotes = @($v.Pacotes)
+                    Add-Log "Planilha de versoes de sistemas eleitorais recarregada: $($v.Contagem) pacote(s) (origem: $($v.Origem))." "Cyan"
+                    Reconstruir-Grid
+                }
+            } catch {
+                Add-Log "[AVISO] Falha ao recarregar planilha de versoes apos salvar: $($_.Exception.Message)" "Yellow"
+            }
+        }.GetNewClosure()
+    } catch {
+        Add-Log "[ERRO] Falha ao abrir Configuracoes: $($_.Exception.Message)" "OrangeRed"
+        [System.Windows.Forms.MessageBox]::Show("Falha ao abrir Configuracoes:`r`n$($_.Exception.Message)", "Erro", "OK", "Error") | Out-Null
+    }
+}.GetNewClosure())
 $btnFechar.Add_Click({ $form.Close() }.GetNewClosure())
 
 # ============================================================

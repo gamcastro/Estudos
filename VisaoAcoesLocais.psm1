@@ -22,8 +22,10 @@
 
 $script:VncViewerPath = $null
 $script:RcViewerPath  = $null
-$script:ArquivoConfigVnc = Join-Path $PSScriptRoot "vnc_config.txt"
-$script:ArquivoConfigRc  = Join-Path $PSScriptRoot "rcviewer_config.txt"
+$script:SnmpCommunity = $null
+$script:ArquivoConfigVnc  = Join-Path $PSScriptRoot "vnc_config.txt"
+$script:ArquivoConfigRc   = Join-Path $PSScriptRoot "rcviewer_config.txt"
+$script:ArquivoConfigSnmp = Join-Path $PSScriptRoot "snmp_config.txt"
 
 function Get-CaminhoVncViewer {
     <#
@@ -925,14 +927,16 @@ function Invoke-AcaoInfoImpressora {
         atualiza a celula "Tipo" a partir de EhPantum, e se/como exibe os
         Avisos.
 
-        $Community: comunidade SNMP (o original usava $script:SnmpCommunity,
-        configuravel numa tela de configuracoes da janela principal - aqui
-        vira parametro, com o mesmo padrao "public" usado nas impressoras
-        Pantum do TRE-MA).
+        $Community: comunidade SNMP, configuravel na tela de
+        Configuracoes (Fase F) via Get-ComunidadeSnmp/Set-ComunidadeSnmp
+        (persistida em arquivo local, mesmo esquema de VNC/RC) - o
+        default abaixo so entra em jogo se quem chamar nao passar
+        -Community explicito (caso do unico chamador atual,
+        Invoke-AcaoInfoImpressoraNaLinha em VisaoCliente.ps1).
     #>
     param(
         [Parameter(Mandatory)]$Resultado,
-        [string]$Community = "public"
+        [string]$Community = (Get-ComunidadeSnmp)
     )
 
     $avisos = New-Object System.Collections.Generic.List[string]
@@ -1010,6 +1014,83 @@ function Open-ExclusaoOcs {
     }
 }
 
-Export-ModuleMember -Function Get-CaminhoVncViewer, Get-CaminhoRcViewer, Open-VncViewer, Open-RcViewer, Start-PingContinuo, `
+function Get-CaminhoVncViewerAtual {
+    <#
+        Igual Get-CaminhoVncViewer, mas SEM a busca automatica nem o
+        OpenFileDialog - so espia o que ja esta salvo (cache em memoria
+        ou arquivo local), devolvendo $null se nada foi configurado
+        ainda. Usada pra PRE-PREENCHER a tela de Configuracoes (Fase F)
+        sem forcar um dialogo de arquivo so por abrir a tela.
+    #>
+    if ($script:VncViewerPath -and (Test-Path $script:VncViewerPath)) { return $script:VncViewerPath }
+    if (Test-Path $script:ArquivoConfigVnc) {
+        $salvo = (Get-Content $script:ArquivoConfigVnc -Raw -ErrorAction SilentlyContinue)
+        if ($salvo) { $salvo = $salvo.Trim() }
+        if ($salvo) { return $salvo }
+    }
+    return $null
+}
+
+function Get-CaminhoRcViewerAtual {
+    <# Mesma ideia de Get-CaminhoVncViewerAtual, pro RCViewer.exe. #>
+    if ($script:RcViewerPath -and (Test-Path $script:RcViewerPath)) { return $script:RcViewerPath }
+    if (Test-Path $script:ArquivoConfigRc) {
+        $salvo = (Get-Content $script:ArquivoConfigRc -Raw -ErrorAction SilentlyContinue)
+        if ($salvo) { $salvo = $salvo.Trim() }
+        if ($salvo) { return $salvo }
+    }
+    return $null
+}
+
+function Set-CaminhoVncViewer {
+    <#
+        Grava explicitamente o caminho do vncviewer.exe (usado pela aba
+        "VNC Viewer" da tela de Configuracoes, Fase F) - Get-CaminhoVncViewer
+        ja gravava isso internamente quando achava sozinho ou perguntava
+        via OpenFileDialog; esta funcao existe pra permitir SALVAR um
+        caminho digitado/editado direto na tela, sem passar pelo fluxo de
+        busca automatica.
+    #>
+    param([Parameter(Mandatory)][string]$Caminho)
+    $script:VncViewerPath = $Caminho
+    Set-Content -Path $script:ArquivoConfigVnc -Value $Caminho -Encoding UTF8
+}
+
+function Set-CaminhoRcViewer {
+    <# Mesma ideia de Set-CaminhoVncViewer, pro RCViewer.exe (Ivanti/LANDesk). #>
+    param([Parameter(Mandatory)][string]$Caminho)
+    $script:RcViewerPath = $Caminho
+    Set-Content -Path $script:ArquivoConfigRc -Value $Caminho -Encoding UTF8
+}
+
+function Get-ComunidadeSnmp {
+    <#
+        Comunidade SNMP v1/v2c usada pelas impressoras (padrao das Pantum
+        do TRE-MA: "public") - cache em memoria, senao arquivo local,
+        senao "public". Mesmo esquema de persistencia de
+        Get-CaminhoVncViewer/Get-CaminhoRcViewer, so sem a parte de busca
+        automatica (nao ha "procurar sozinho" pra uma string de
+        comunidade).
+    #>
+    if ($script:SnmpCommunity) { return $script:SnmpCommunity }
+    if (Test-Path $script:ArquivoConfigSnmp) {
+        $salvo = (Get-Content -Path $script:ArquivoConfigSnmp -Raw -ErrorAction SilentlyContinue)
+        if ($salvo) { $salvo = $salvo.Trim() }
+        if ($salvo) {
+            $script:SnmpCommunity = $salvo
+            return $script:SnmpCommunity
+        }
+    }
+    $script:SnmpCommunity = "public"
+    return $script:SnmpCommunity
+}
+
+function Set-ComunidadeSnmp {
+    param([Parameter(Mandatory)][string]$Comunidade)
+    $script:SnmpCommunity = $Comunidade.Trim()
+    Set-Content -Path $script:ArquivoConfigSnmp -Value $script:SnmpCommunity -Encoding UTF8
+}
+
+Export-ModuleMember -Function Get-CaminhoVncViewer, Get-CaminhoRcViewer, Get-CaminhoVncViewerAtual, Get-CaminhoRcViewerAtual, Set-CaminhoVncViewer, Set-CaminhoRcViewer, Open-VncViewer, Open-RcViewer, Start-PingContinuo, `
     Get-InfoImpressoraPantum, Get-PreferenciasImpressaoPantum, Get-InfoImpressoraSNMP, Test-EhImpressoraPantum, `
-    Show-InfoImpressora, Invoke-AcaoInfoImpressora, Open-ExclusaoOcs
+    Show-InfoImpressora, Invoke-AcaoInfoImpressora, Open-ExclusaoOcs, Get-ComunidadeSnmp, Set-ComunidadeSnmp

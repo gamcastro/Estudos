@@ -418,7 +418,53 @@ function Invoke-LigarWolRemoto {
     Invoke-ComandoRemoto -ScriptBlock { param($hid, $ip) Invoke-AcaoLigarWol -HardwareId $hid -Ip $ip } -ArgumentList @($HardwareId, $Ip)
 }
 
-Export-ModuleMember -Function Connect-ServidorVisao, Disconnect-ServidorVisao, Invoke-ComandoRemoto, Get-IdSessaoAtualVisao, Get-ZonasRemoto, Get-GruposSistemasRemoto, Get-CampanhasRemoto, Get-ResultadosCampanhasRemoto, Resolve-RedeDaZonaRemoto, Test-RedeEhCompartilhadaRemoto, Start-VarreduraRemota, Get-VarreduraNovosResultadosRemoto, Get-VersoesRemoto, Get-SistemasEleitoraisExtraRemoto, Start-BaixarPacoteRemoto, Get-StatusPacoteRemoto, Send-AtualizacaoZonaRemoto, Send-ResultadoCampanhaZonaRemoto, Send-ArquivoParaGoogleDriveRemoto, Get-MaquinasDesligadasOcsRemoto, Invoke-LigarWolRemoto
+# ============================================================
+# FASE F: leitura/gravacao dos 4 configs de Web App do Apps Script -
+# leitores ja existiam do lado servidor (Fases 6/7, usados internamente
+# por Import-TabelaVersoes/Send-AtualizacaoZonaViaAppsScript/etc), mas
+# nunca tinham sido expostos via remoting porque nenhuma tela ainda
+# precisava MOSTRAR o valor atual pro tecnico editar - a tela de
+# Configuracoes (VisaoJanelaAdmin.psm1) e a primeira a precisar. Todos
+# devolvem PSCustomObject simples (nao-array) ou $null - atravessam sem
+# o contorno JSON (mesmo motivo de sempre).
+# ============================================================
+function Get-ConfigVersoesRemoto {
+    Invoke-ComandoRemoto -ScriptBlock { Get-ConfigVersoes }
+}
+
+function Set-ConfigVersoesRemoto {
+    param([Parameter(Mandatory)][string]$SpreadsheetId, [string]$Gid = "0")
+    Invoke-ComandoRemoto -ScriptBlock { param($id, $g) Set-ConfigVersoes -SpreadsheetId $id -Gid $g } -ArgumentList @($SpreadsheetId, $Gid)
+}
+
+function Get-ConfigZonasWebAppRemoto {
+    Invoke-ComandoRemoto -ScriptBlock { Get-ConfigZonasWebApp }
+}
+
+function Set-ConfigZonasWebAppRemoto {
+    param([Parameter(Mandatory)][string]$UrlWebApp, [Parameter(Mandatory)][string]$Token)
+    Invoke-ComandoRemoto -ScriptBlock { param($u, $t) Set-ConfigZonasWebApp -UrlWebApp $u -Token $t } -ArgumentList @($UrlWebApp, $Token)
+}
+
+function Get-ConfigCampanhasWebAppRemoto {
+    Invoke-ComandoRemoto -ScriptBlock { Get-ConfigCampanhasWebApp }
+}
+
+function Set-ConfigCampanhasWebAppRemoto {
+    param([Parameter(Mandatory)][string]$UrlWebApp, [Parameter(Mandatory)][string]$Token)
+    Invoke-ComandoRemoto -ScriptBlock { param($u, $t) Set-ConfigCampanhasWebApp -UrlWebApp $u -Token $t } -ArgumentList @($UrlWebApp, $Token)
+}
+
+function Get-ConfigEnvioDriveRemoto {
+    Invoke-ComandoRemoto -ScriptBlock { Get-ConfigEnvioDrive }
+}
+
+function Set-ConfigEnvioDriveRemoto {
+    param([Parameter(Mandatory)][string]$UrlWebApp, [Parameter(Mandatory)][string]$Token)
+    Invoke-ComandoRemoto -ScriptBlock { param($u, $t) Set-ConfigEnvioDrive -UrlWebApp $u -Token $t } -ArgumentList @($UrlWebApp, $Token)
+}
+
+Export-ModuleMember -Function Connect-ServidorVisao, Disconnect-ServidorVisao, Invoke-ComandoRemoto, Get-IdSessaoAtualVisao, Get-ZonasRemoto, Get-GruposSistemasRemoto, Get-CampanhasRemoto, Get-ResultadosCampanhasRemoto, Resolve-RedeDaZonaRemoto, Test-RedeEhCompartilhadaRemoto, Start-VarreduraRemota, Get-VarreduraNovosResultadosRemoto, Get-VersoesRemoto, Get-SistemasEleitoraisExtraRemoto, Start-BaixarPacoteRemoto, Get-StatusPacoteRemoto, Send-AtualizacaoZonaRemoto, Send-ResultadoCampanhaZonaRemoto, Send-ArquivoParaGoogleDriveRemoto, Get-MaquinasDesligadasOcsRemoto, Invoke-LigarWolRemoto, Get-ConfigVersoesRemoto, Set-ConfigVersoesRemoto, Get-ConfigZonasWebAppRemoto, Set-ConfigZonasWebAppRemoto, Get-ConfigCampanhasWebAppRemoto, Set-ConfigCampanhasWebAppRemoto, Get-ConfigEnvioDriveRemoto, Set-ConfigEnvioDriveRemoto
 
 # NOTA: as consultas ao AD (Usuarios da ZE, status do Instalador) NAO
 # passam por aqui - ver VisaoAD.psm1. Nao sao trafego de varredura, e

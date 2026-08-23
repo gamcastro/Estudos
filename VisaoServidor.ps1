@@ -891,6 +891,23 @@ function Get-ConfigVersoes {
     return $null
 }
 
+function Set-ConfigVersoes {
+    <#
+        $SpreadsheetId/$Gid ja vem RESOLVIDOS de quem chama (o cliente
+        aceita colar a URL inteira da aba e resolve Id+Gid la, mesma
+        logica de Resolve-IdEGidPlanilha do ScannerRedeZona.ps1 original -
+        nao precisa duplicar esse parsing aqui, so gravar).
+    #>
+    param([Parameter(Mandatory)][string]$SpreadsheetId, [string]$Gid = "0")
+    try {
+        [PSCustomObject]@{ SpreadsheetId = $SpreadsheetId; Gid = $Gid } |
+            ConvertTo-Json | Set-Content -Path $script:ArquivoConfigVersoes -Encoding UTF8
+        return [PSCustomObject]@{ Ok = $true; Mensagem = "Configuracao da planilha de sistemas eleitorais/pacotes salva." }
+    } catch {
+        return [PSCustomObject]@{ Ok = $false; Mensagem = "Falha ao salvar: $($_.Exception.Message)" }
+    }
+}
+
 function Resolve-NomeExibicaoSistema {
     <#
         Alguns "Sistema" da planilha tem nome de exibicao diferente da
@@ -1374,6 +1391,48 @@ function Get-ConfigEnvioDrive {
         if ($cfg.UrlWebApp -and $cfg.Token) { return $cfg }
     } catch {}
     return $null
+}
+
+# ============================================================
+# FASE F: gravacao dos 4 configs de Web App do Apps Script (Zonas,
+# Campanhas, Envio ao Drive, Versoes/Pacotes) - antes so tinham LEITOR
+# migrado (Get-Config*, Fases 6/7); os assistentes de PRIMEIRA
+# CONFIGURACAO do original (Read-Config*Interativo, InputBox) nao fazem
+# sentido aqui porque o servidor roda headless (sem ninguem pra
+# responder um InputBox) - viram uma tela de Configuracoes de verdade
+# no cliente (VisaoJanelaAdmin.psm1), que chama esses gravadores.
+# ============================================================
+function Set-ConfigZonasWebApp {
+    param([Parameter(Mandatory)][string]$UrlWebApp, [Parameter(Mandatory)][string]$Token)
+    try {
+        [PSCustomObject]@{ UrlWebApp = $UrlWebApp; Token = $Token } |
+            ConvertTo-Json | Set-Content -Path $script:ArquivoConfigZonasWebApp -Encoding UTF8
+        return [PSCustomObject]@{ Ok = $true; Mensagem = "Configuracao de atualizacao da planilha de zonas salva." }
+    } catch {
+        return [PSCustomObject]@{ Ok = $false; Mensagem = "Falha ao salvar: $($_.Exception.Message)" }
+    }
+}
+
+function Set-ConfigCampanhasWebApp {
+    param([Parameter(Mandatory)][string]$UrlWebApp, [Parameter(Mandatory)][string]$Token)
+    try {
+        [PSCustomObject]@{ UrlWebApp = $UrlWebApp; Token = $Token } |
+            ConvertTo-Json | Set-Content -Path $script:ArquivoConfigCampanhasWebApp -Encoding UTF8
+        return [PSCustomObject]@{ Ok = $true; Mensagem = "Configuracao de envio de resultado de campanha salva." }
+    } catch {
+        return [PSCustomObject]@{ Ok = $false; Mensagem = "Falha ao salvar: $($_.Exception.Message)" }
+    }
+}
+
+function Set-ConfigEnvioDrive {
+    param([Parameter(Mandatory)][string]$UrlWebApp, [Parameter(Mandatory)][string]$Token)
+    try {
+        [PSCustomObject]@{ UrlWebApp = $UrlWebApp; Token = $Token } |
+            ConvertTo-Json | Set-Content -Path $script:ArquivoConfigDrive -Encoding UTF8
+        return [PSCustomObject]@{ Ok = $true; Mensagem = "Configuracao de envio automatico ao Google Drive salva." }
+    } catch {
+        return [PSCustomObject]@{ Ok = $false; Mensagem = "Falha ao salvar: $($_.Exception.Message)" }
+    }
 }
 
 function Send-AtualizacaoZonaViaAppsScript {

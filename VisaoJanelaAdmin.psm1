@@ -24,6 +24,17 @@
     aqui e uma variavel LOCAL da funcao (nao precisa de $script:, ja que
     todos os closures desta janela sao de PRIMEIRO NIVEL, direto no corpo
     de Show-GerenciarZonas - nenhum aninhado dentro de outro).
+
+    Show-Configuracoes (Fase F): VNC/RC/SNMP ficam so no cliente (sem
+    remoting - sao caminho de exe/config de UI, ver
+    VisaoAcoesLocais.psm1); os outros 4 (Envio ao Drive, Versoes de
+    Sistemas, Atualizacao de Zonas, Envio de Campanha) sao configs
+    COMPARTILHADOS gravados no servidor (Get/Set-Config*Remoto). O
+    original so tinha abas de UI pras 2 primeiras (Drive/Versoes) - as
+    outras 2 (Zonas/Campanhas) so existiam via um InputBox de
+    "primeira configuracao" disparado sob demanda, que nao faz sentido
+    mais porque o servidor roda headless (ninguem pra responder um
+    InputBox la) - viraram abas de verdade aqui.
 #>
 
 function Remove-Acentos {
@@ -430,4 +441,322 @@ function Show-GerenciarZonas {
     [void]$dlg.ShowDialog()
 }
 
-Export-ModuleMember -Function Remove-Acentos, ConvertTo-CidrRede, Show-JanelaUsuariosZona, Show-GerenciarZonas
+function Resolve-IdEGidPlanilha {
+    <#
+        Aceita tanto o ID puro da planilha quanto a URL inteira colada do
+        navegador (.../spreadsheets/d/<ID>/edit#gid=123456) e devolve
+        {Id;Gid}, pra o tecnico nao precisar recortar nada na mao. Sem
+        gid na URL (ou so o ID puro), assume gid=0 (1a aba). Relocacao
+        pura do original.
+    #>
+    param([string]$Entrada)
+    if (-not $Entrada) { return $null }
+    $Entrada = $Entrada.Trim()
+    $id = if ($Entrada -match "/d/([a-zA-Z0-9_-]+)") { $Matches[1] } else { $Entrada }
+    $gid = if ($Entrada -match "[#&?]gid=(\d+)") { $Matches[1] } else { "0" }
+    return [PSCustomObject]@{ Id = $id; Gid = $gid }
+}
+
+function Show-Configuracoes {
+    param(
+        [string]$NomeFerramenta = "Visao",
+        [scriptblock]$AoLog = $null,
+        [scriptblock]$AoVersoesAtualizadas = $null
+    )
+    if (-not $AoLog) { $AoLog = { param($Texto, $Cor) } }
+    if (-not $AoVersoesAtualizadas) { $AoVersoesAtualizadas = {} }
+
+    $dlg = New-Object System.Windows.Forms.Form
+    $dlg.Text = "$NomeFerramenta - Configuracoes da Ferramenta"
+    $dlg.Size = New-Object System.Drawing.Size(530, 560)
+    $dlg.StartPosition = "CenterParent"
+    $dlg.FormBorderStyle = "FixedDialog"
+    $dlg.MaximizeBox = $false
+    $dlg.MinimizeBox = $false
+    $dlg.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+
+    $tabs = New-Object System.Windows.Forms.TabControl
+    $tabs.Location = New-Object System.Drawing.Point(12, 12)
+    $tabs.Size = New-Object System.Drawing.Size(495, 455)
+    $dlg.Controls.Add($tabs)
+
+    # --- Aba VNC Viewer ---
+    $tabVnc = New-Object System.Windows.Forms.TabPage
+    $tabVnc.Text = "VNC Viewer"
+    $tabs.TabPages.Add($tabVnc)
+
+    $lblVnc = New-Object System.Windows.Forms.Label
+    $lblVnc.Text = "Caminho do vncviewer.exe (usado no botao 'Abrir VNC' de cada linha):"
+    $lblVnc.Location = New-Object System.Drawing.Point(15, 20)
+    $lblVnc.Size = New-Object System.Drawing.Size(455, 20)
+    $tabVnc.Controls.Add($lblVnc)
+
+    $txtVnc = New-Object System.Windows.Forms.TextBox
+    $txtVnc.Location = New-Object System.Drawing.Point(15, 45)
+    $txtVnc.Width = 355
+    $txtVnc.Text = Get-CaminhoVncViewerAtual
+    $tabVnc.Controls.Add($txtVnc)
+
+    $btnProcurarVnc = New-Object System.Windows.Forms.Button
+    $btnProcurarVnc.Text = "Procurar..."
+    $btnProcurarVnc.Location = New-Object System.Drawing.Point(378, 43)
+    $btnProcurarVnc.Width = 95
+    $btnProcurarVnc.Height = 25
+    $tabVnc.Controls.Add($btnProcurarVnc)
+    $btnProcurarVnc.Add_Click({
+        $ofd = New-Object System.Windows.Forms.OpenFileDialog
+        $ofd.Title = "Localizar vncviewer.exe"
+        $ofd.Filter = "Executavel (*.exe)|*.exe"
+        if ($txtVnc.Text -and (Test-Path $txtVnc.Text -ErrorAction SilentlyContinue)) {
+            $ofd.InitialDirectory = Split-Path $txtVnc.Text
+        }
+        if ($ofd.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { $txtVnc.Text = $ofd.FileName }
+    }.GetNewClosure())
+
+    # --- Aba RCViewer ---
+    $tabRc = New-Object System.Windows.Forms.TabPage
+    $tabRc.Text = "RCViewer"
+    $tabs.TabPages.Add($tabRc)
+
+    $lblRc = New-Object System.Windows.Forms.Label
+    $lblRc.Text = "Caminho do RCViewer.exe (Ivanti/LANDesk - botao 'Abrir RCViewer' de cada linha):"
+    $lblRc.Location = New-Object System.Drawing.Point(15, 20)
+    $lblRc.Size = New-Object System.Drawing.Size(455, 20)
+    $tabRc.Controls.Add($lblRc)
+
+    $txtRc = New-Object System.Windows.Forms.TextBox
+    $txtRc.Location = New-Object System.Drawing.Point(15, 45)
+    $txtRc.Width = 355
+    $txtRc.Text = Get-CaminhoRcViewerAtual
+    $tabRc.Controls.Add($txtRc)
+
+    $btnProcurarRc = New-Object System.Windows.Forms.Button
+    $btnProcurarRc.Text = "Procurar..."
+    $btnProcurarRc.Location = New-Object System.Drawing.Point(378, 43)
+    $btnProcurarRc.Width = 95
+    $btnProcurarRc.Height = 25
+    $tabRc.Controls.Add($btnProcurarRc)
+    $btnProcurarRc.Add_Click({
+        $ofd = New-Object System.Windows.Forms.OpenFileDialog
+        $ofd.Title = "Localizar RCViewer.exe"
+        $ofd.Filter = "Executavel (*.exe)|*.exe"
+        if ($txtRc.Text -and (Test-Path $txtRc.Text -ErrorAction SilentlyContinue)) {
+            $ofd.InitialDirectory = Split-Path $txtRc.Text
+        }
+        if ($ofd.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { $txtRc.Text = $ofd.FileName }
+    }.GetNewClosure())
+
+    # --- Aba SNMP ---
+    $tabSnmp = New-Object System.Windows.Forms.TabPage
+    $tabSnmp.Text = "SNMP"
+    $tabs.TabPages.Add($tabSnmp)
+
+    $lblSnmp = New-Object System.Windows.Forms.Label
+    $lblSnmp.Text = "Comunidade SNMP v1/v2c usada pelas impressoras (padrao das Pantum do TRE-MA: public):"
+    $lblSnmp.Location = New-Object System.Drawing.Point(15, 20)
+    $lblSnmp.Size = New-Object System.Drawing.Size(455, 35)
+    $tabSnmp.Controls.Add($lblSnmp)
+
+    $txtSnmp = New-Object System.Windows.Forms.TextBox
+    $txtSnmp.Location = New-Object System.Drawing.Point(15, 60)
+    $txtSnmp.Width = 200
+    $txtSnmp.Text = Get-ComunidadeSnmp
+    $tabSnmp.Controls.Add($txtSnmp)
+
+    # --- Aba Envio ao Google Drive ---
+    $tabDrive = New-Object System.Windows.Forms.TabPage
+    $tabDrive.Text = "Envio ao Drive"
+    $tabs.TabPages.Add($tabDrive)
+
+    $cfgDriveAtual = $null
+    try { $cfgDriveAtual = Get-ConfigEnvioDriveRemoto } catch {}
+
+    $lblDriveUrl = New-Object System.Windows.Forms.Label
+    $lblDriveUrl.Text = "URL do Web App do Apps Script (Implantar > Nova implantacao), termina em /exec:"
+    $lblDriveUrl.Location = New-Object System.Drawing.Point(15, 20)
+    $lblDriveUrl.Size = New-Object System.Drawing.Size(455, 20)
+    $tabDrive.Controls.Add($lblDriveUrl)
+
+    $txtDriveUrl = New-Object System.Windows.Forms.TextBox
+    $txtDriveUrl.Location = New-Object System.Drawing.Point(15, 45)
+    $txtDriveUrl.Width = 455
+    $txtDriveUrl.Text = if ($cfgDriveAtual) { $cfgDriveAtual.UrlWebApp } else { "" }
+    $tabDrive.Controls.Add($txtDriveUrl)
+
+    $lblDriveToken = New-Object System.Windows.Forms.Label
+    $lblDriveToken.Text = "Token combinado com o script (mesmo valor da constante TOKEN no Apps Script):"
+    $lblDriveToken.Location = New-Object System.Drawing.Point(15, 80)
+    $lblDriveToken.Size = New-Object System.Drawing.Size(455, 20)
+    $tabDrive.Controls.Add($lblDriveToken)
+
+    $txtDriveToken = New-Object System.Windows.Forms.TextBox
+    $txtDriveToken.Location = New-Object System.Drawing.Point(15, 105)
+    $txtDriveToken.Width = 455
+    $txtDriveToken.Text = if ($cfgDriveAtual) { $cfgDriveAtual.Token } else { "" }
+    $tabDrive.Controls.Add($txtDriveToken)
+
+    # --- Aba Versoes de Sistemas ---
+    $tabVersoes = New-Object System.Windows.Forms.TabPage
+    $tabVersoes.Text = "Versoes de Sistemas"
+    $tabs.TabPages.Add($tabVersoes)
+
+    $cfgVersoesAtual = $null
+    try { $cfgVersoesAtual = Get-ConfigVersoesRemoto } catch {}
+
+    $lblVersoes = New-Object System.Windows.Forms.Label
+    $lblVersoes.Text = "URL da ABA (nao da planilha inteira) com os Sistemas Eleitorais - usada pro nome amigavel na grade e pelos pacotes de instalacao. Compartilhe como 'Qualquer pessoa com o link - Leitor'.`r`n`r`nColunas esperadas:`r`nSistema | Versao | NomeAmigavel | LinkDrive | PastaDestino | Atual | NomeArquivo | Hash | Tamanho`r`n`r`nLinkDrive/PastaDestino (opcionais) viram pacote baixavel. Atual=SIM na versao mais recente de cada sistema. Hash/Tamanho (opcionais) conferem a integridade do pacote copiado. Todo o recurso e opcional - sem planilha, a grade so mostra a versao crua."
+    $lblVersoes.Location = New-Object System.Drawing.Point(15, 15)
+    $lblVersoes.Size = New-Object System.Drawing.Size(455, 180)
+    $tabVersoes.Controls.Add($lblVersoes)
+
+    $txtVersoes = New-Object System.Windows.Forms.TextBox
+    $txtVersoes.Location = New-Object System.Drawing.Point(15, 200)
+    $txtVersoes.Width = 455
+    $txtVersoes.Text = if ($cfgVersoesAtual) { $cfgVersoesAtual.SpreadsheetId } else { "" }
+    $tabVersoes.Controls.Add($txtVersoes)
+
+    # --- Aba Atualizacao de Zonas (nova - Fase F) ---
+    $tabZonasWebApp = New-Object System.Windows.Forms.TabPage
+    $tabZonasWebApp.Text = "Atualizacao de Zonas"
+    $tabs.TabPages.Add($tabZonasWebApp)
+
+    $cfgZonasAtual = $null
+    try { $cfgZonasAtual = Get-ConfigZonasWebAppRemoto } catch {}
+
+    $lblZonasUrl = New-Object System.Windows.Forms.Label
+    $lblZonasUrl.Text = "URL do Web App do Apps Script que ATUALIZA a planilha de zonas (usado por 'Gerenciar Redes Zonas' > Salvar), termina em /exec:"
+    $lblZonasUrl.Location = New-Object System.Drawing.Point(15, 20)
+    $lblZonasUrl.Size = New-Object System.Drawing.Size(455, 35)
+    $tabZonasWebApp.Controls.Add($lblZonasUrl)
+
+    $txtZonasUrl = New-Object System.Windows.Forms.TextBox
+    $txtZonasUrl.Location = New-Object System.Drawing.Point(15, 60)
+    $txtZonasUrl.Width = 455
+    $txtZonasUrl.Text = if ($cfgZonasAtual) { $cfgZonasAtual.UrlWebApp } else { "" }
+    $tabZonasWebApp.Controls.Add($txtZonasUrl)
+
+    $lblZonasToken = New-Object System.Windows.Forms.Label
+    $lblZonasToken.Text = "Token combinado com o script (mesmo valor da constante TOKEN no Apps Script):"
+    $lblZonasToken.Location = New-Object System.Drawing.Point(15, 100)
+    $lblZonasToken.Size = New-Object System.Drawing.Size(455, 20)
+    $tabZonasWebApp.Controls.Add($lblZonasToken)
+
+    $txtZonasToken = New-Object System.Windows.Forms.TextBox
+    $txtZonasToken.Location = New-Object System.Drawing.Point(15, 125)
+    $txtZonasToken.Width = 455
+    $txtZonasToken.Text = if ($cfgZonasAtual) { $cfgZonasAtual.Token } else { "" }
+    $tabZonasWebApp.Controls.Add($txtZonasToken)
+
+    # --- Aba Envio de Campanha (nova - Fase F) ---
+    $tabCampanhasWebApp = New-Object System.Windows.Forms.TabPage
+    $tabCampanhasWebApp.Text = "Envio de Campanha"
+    $tabs.TabPages.Add($tabCampanhasWebApp)
+
+    $cfgCampanhasAtual = $null
+    try { $cfgCampanhasAtual = Get-ConfigCampanhasWebAppRemoto } catch {}
+
+    $lblCampanhasUrl = New-Object System.Windows.Forms.Label
+    $lblCampanhasUrl.Text = "URL do Web App do Apps Script que REGISTRA o resultado de 'Verificar Campanha da Zona' > Enviar Resultado, termina em /exec:"
+    $lblCampanhasUrl.Location = New-Object System.Drawing.Point(15, 20)
+    $lblCampanhasUrl.Size = New-Object System.Drawing.Size(455, 35)
+    $tabCampanhasWebApp.Controls.Add($lblCampanhasUrl)
+
+    $txtCampanhasUrl = New-Object System.Windows.Forms.TextBox
+    $txtCampanhasUrl.Location = New-Object System.Drawing.Point(15, 60)
+    $txtCampanhasUrl.Width = 455
+    $txtCampanhasUrl.Text = if ($cfgCampanhasAtual) { $cfgCampanhasAtual.UrlWebApp } else { "" }
+    $tabCampanhasWebApp.Controls.Add($txtCampanhasUrl)
+
+    $lblCampanhasToken = New-Object System.Windows.Forms.Label
+    $lblCampanhasToken.Text = "Token combinado com o script (mesmo valor da constante TOKEN no Apps Script):"
+    $lblCampanhasToken.Location = New-Object System.Drawing.Point(15, 100)
+    $lblCampanhasToken.Size = New-Object System.Drawing.Size(455, 20)
+    $tabCampanhasWebApp.Controls.Add($lblCampanhasToken)
+
+    $txtCampanhasToken = New-Object System.Windows.Forms.TextBox
+    $txtCampanhasToken.Location = New-Object System.Drawing.Point(15, 125)
+    $txtCampanhasToken.Width = 455
+    $txtCampanhasToken.Text = if ($cfgCampanhasAtual) { $cfgCampanhasAtual.Token } else { "" }
+    $tabCampanhasWebApp.Controls.Add($txtCampanhasToken)
+
+    # --- Botoes ---
+    $btnSalvarConfig = New-Object System.Windows.Forms.Button
+    $btnSalvarConfig.Text = "Salvar"
+    $btnSalvarConfig.Location = New-Object System.Drawing.Point(320, 478)
+    $btnSalvarConfig.Width = 90
+    $btnSalvarConfig.Height = 30
+    $btnSalvarConfig.BackColor = [System.Drawing.Color]::FromArgb(46, 125, 50)
+    $btnSalvarConfig.ForeColor = [System.Drawing.Color]::White
+    $dlg.Controls.Add($btnSalvarConfig)
+
+    $btnFecharConfig = New-Object System.Windows.Forms.Button
+    $btnFecharConfig.Text = "Fechar"
+    $btnFecharConfig.Location = New-Object System.Drawing.Point(415, 478)
+    $btnFecharConfig.Width = 90
+    $btnFecharConfig.Height = 30
+    $dlg.Controls.Add($btnFecharConfig)
+
+    $btnSalvarConfig.Add_Click({
+        $dlg.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
+        $itensSalvos = New-Object System.Collections.Generic.List[string]
+        $itensComErro = New-Object System.Collections.Generic.List[string]
+
+        if ($txtVnc.Text -and $txtVnc.Text.Trim()) {
+            Set-CaminhoVncViewer -Caminho $txtVnc.Text.Trim()
+            $itensSalvos.Add("VNC Viewer")
+        }
+        if ($txtRc.Text -and $txtRc.Text.Trim()) {
+            Set-CaminhoRcViewer -Caminho $txtRc.Text.Trim()
+            $itensSalvos.Add("RCViewer")
+        }
+        if ($txtSnmp.Text -and $txtSnmp.Text.Trim()) {
+            Set-ComunidadeSnmp -Comunidade $txtSnmp.Text.Trim()
+            $itensSalvos.Add("SNMP")
+        }
+        if ($txtDriveUrl.Text.Trim() -and $txtDriveToken.Text.Trim()) {
+            try {
+                $resp = Set-ConfigEnvioDriveRemoto -UrlWebApp $txtDriveUrl.Text.Trim() -Token $txtDriveToken.Text.Trim()
+                if ($resp.Ok) { $itensSalvos.Add("Envio ao Drive") } else { $itensComErro.Add("Envio ao Drive ($($resp.Mensagem))") }
+            } catch { $itensComErro.Add("Envio ao Drive ($($_.Exception.Message))") }
+        }
+        if ($txtVersoes.Text -and $txtVersoes.Text.Trim()) {
+            $refVersoes = Resolve-IdEGidPlanilha $txtVersoes.Text
+            try {
+                $resp = Set-ConfigVersoesRemoto -SpreadsheetId $refVersoes.Id -Gid $refVersoes.Gid
+                if ($resp.Ok) {
+                    $itensSalvos.Add("Versoes de Sistemas")
+                    & $AoVersoesAtualizadas
+                } else {
+                    $itensComErro.Add("Versoes de Sistemas ($($resp.Mensagem))")
+                }
+            } catch { $itensComErro.Add("Versoes de Sistemas ($($_.Exception.Message))") }
+        }
+        if ($txtZonasUrl.Text.Trim() -and $txtZonasToken.Text.Trim()) {
+            try {
+                $resp = Set-ConfigZonasWebAppRemoto -UrlWebApp $txtZonasUrl.Text.Trim() -Token $txtZonasToken.Text.Trim()
+                if ($resp.Ok) { $itensSalvos.Add("Atualizacao de Zonas") } else { $itensComErro.Add("Atualizacao de Zonas ($($resp.Mensagem))") }
+            } catch { $itensComErro.Add("Atualizacao de Zonas ($($_.Exception.Message))") }
+        }
+        if ($txtCampanhasUrl.Text.Trim() -and $txtCampanhasToken.Text.Trim()) {
+            try {
+                $resp = Set-ConfigCampanhasWebAppRemoto -UrlWebApp $txtCampanhasUrl.Text.Trim() -Token $txtCampanhasToken.Text.Trim()
+                if ($resp.Ok) { $itensSalvos.Add("Envio de Campanha") } else { $itensComErro.Add("Envio de Campanha ($($resp.Mensagem))") }
+            } catch { $itensComErro.Add("Envio de Campanha ($($_.Exception.Message))") }
+        }
+
+        $dlg.Cursor = [System.Windows.Forms.Cursors]::Default
+
+        if ($itensSalvos.Count -gt 0) { & $AoLog "Configuracoes salvas: $($itensSalvos -join ', ')." "Cyan" }
+        foreach ($erro in $itensComErro) { & $AoLog "[ERRO] Falha ao salvar $erro" "OrangeRed" }
+
+        $msg = if ($itensSalvos.Count -gt 0) { "Salvo: $($itensSalvos -join ', ')." } else { "Nada pra salvar (nenhum campo preenchido)." }
+        if ($itensComErro.Count -gt 0) { $msg += "`r`n`r`nFalhou: $($itensComErro -join '; ')" }
+        [System.Windows.Forms.MessageBox]::Show($msg, "Configuracoes", "OK", $(if ($itensComErro.Count -gt 0) { "Warning" } else { "Information" })) | Out-Null
+    }.GetNewClosure())
+
+    $btnFecharConfig.Add_Click({ $dlg.Close() }.GetNewClosure())
+
+    [void]$dlg.ShowDialog()
+}
+
+Export-ModuleMember -Function Remove-Acentos, ConvertTo-CidrRede, Resolve-IdEGidPlanilha, Show-JanelaUsuariosZona, Show-GerenciarZonas, Show-Configuracoes
