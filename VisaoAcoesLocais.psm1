@@ -201,6 +201,62 @@ function Start-PingContinuo {
 }
 
 # ============================================================
+# CONTASENHA-LAPS
+# ============================================================
+# ContaSenhaLAPS.exe (~110MB) fica FORA do pacote do modulo Visao de
+# proposito - se estivesse no FileList do manifesto, TODA atualizacao
+# futura da ferramenta (mesmo sem nada a ver com LAPS) forcaria o
+# Update-Module/auto-atualizacao a rebaixar esses 110MB de novo pra
+# cada tecnico, ja que Install-Module/Update-Module nao faz atualizacao
+# incremental (decisao com o usuario, 2026-08-23). Fica solto no
+# compartilhamento, copiado pro cache local SO na primeira vez (ou
+# quando o tamanho mudar - nova versao publicada la) - depois disso
+# abre a copia local sempre, sem tocar rede de novo.
+$script:CaminhoOrigemContaSenhaLaps = '\\POLICY-SERVER.tre-ma.gov.br\ScanZonas\Ferramentas\ContaSenhaLAPS.exe'
+
+function Invoke-AcaoAbrirContaSenhaLaps {
+    <#
+        Garante uma copia local de ContaSenhaLAPS.exe (copia/atualiza se
+        o tamanho remoto for diferente do local) e abre. Devolve
+        [PSCustomObject]@{ Sucesso; Mensagem }.
+    #>
+    param([scriptblock]$AoAtualizarStatus = $null)
+
+    if (-not (Test-Path -LiteralPath $script:CaminhoOrigemContaSenhaLaps)) {
+        return [PSCustomObject]@{ Sucesso = $false; Mensagem = "ContaSenhaLAPS.exe nao encontrado em '$script:CaminhoOrigemContaSenhaLaps' - verifique a rede/VPN." }
+    }
+
+    $pastaCacheLocal = Join-Path $env:LOCALAPPDATA 'SuporteTI\Visao\Ferramentas'
+    if (-not (Test-Path -LiteralPath $pastaCacheLocal)) {
+        New-Item -Path $pastaCacheLocal -ItemType Directory -Force | Out-Null
+    }
+    $caminhoLocal = Join-Path $pastaCacheLocal 'ContaSenhaLAPS.exe'
+
+    $tamanhoRemoto = (Get-Item -LiteralPath $script:CaminhoOrigemContaSenhaLaps).Length
+    $precisaCopiar = $true
+    if (Test-Path -LiteralPath $caminhoLocal) {
+        $tamanhoLocal = (Get-Item -LiteralPath $caminhoLocal).Length
+        if ($tamanhoLocal -eq $tamanhoRemoto) { $precisaCopiar = $false }
+    }
+
+    if ($precisaCopiar) {
+        try {
+            Copy-ArquivoComRobocopy -Origem $script:CaminhoOrigemContaSenhaLaps -Destino $caminhoLocal -NomePacote "ContaSenhaLAPS.exe" -AoAtualizarStatus $AoAtualizarStatus
+            Unblock-File -LiteralPath $caminhoLocal -ErrorAction SilentlyContinue
+        } catch {
+            return [PSCustomObject]@{ Sucesso = $false; Mensagem = "Falha ao copiar ContaSenhaLAPS.exe para a maquina local: $($_.Exception.Message)" }
+        }
+    }
+
+    try {
+        Invoke-ShellExecuteExterno -Caminho $caminhoLocal
+        return [PSCustomObject]@{ Sucesso = $true; Mensagem = "Abrindo ContaSenha-LAPS..." }
+    } catch {
+        return [PSCustomObject]@{ Sucesso = $false; Mensagem = "Falha ao abrir ContaSenhaLAPS.exe: $($_.Exception.Message)" }
+    }
+}
+
+# ============================================================
 # INFO DE IMPRESSORA (console web Pantum + SNMP)
 # ============================================================
 # Relocado do ScannerRedeZona.ps1 original. Acao disparada da grade
@@ -1125,6 +1181,6 @@ function Set-ComunidadeSnmp {
     Set-Content -Path $script:ArquivoConfigSnmp -Value $script:SnmpCommunity -Encoding UTF8
 }
 
-Export-ModuleMember -Function Get-CaminhoVncViewer, Get-CaminhoRcViewer, Get-CaminhoVncViewerAtual, Get-CaminhoRcViewerAtual, Set-CaminhoVncViewer, Set-CaminhoRcViewer, Open-VncViewer, Open-RcViewer, Start-PingContinuo, `
+Export-ModuleMember -Function Get-CaminhoVncViewer, Get-CaminhoRcViewer, Get-CaminhoVncViewerAtual, Get-CaminhoRcViewerAtual, Set-CaminhoVncViewer, Set-CaminhoRcViewer, Open-VncViewer, Open-RcViewer, Start-PingContinuo, Invoke-AcaoAbrirContaSenhaLaps, `
     Get-InfoImpressoraPantum, Get-PreferenciasImpressaoPantum, Get-InfoImpressoraSNMP, Test-EhImpressoraPantum, `
     Show-InfoImpressora, Invoke-AcaoInfoImpressora, Open-ExclusaoOcs, Get-ComunidadeSnmp, Set-ComunidadeSnmp

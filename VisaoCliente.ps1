@@ -209,6 +209,14 @@ $btnAtualizarFerramenta.Height = 28
 $btnAtualizarFerramenta.Anchor = "Bottom,Left"
 $form.Controls.Add($btnAtualizarFerramenta)
 
+$btnContaSenhaLaps = New-Object System.Windows.Forms.Button
+$btnContaSenhaLaps.Text = "ContraSenha-LAPS"
+$btnContaSenhaLaps.Location = New-Object System.Drawing.Point(860, 611)
+$btnContaSenhaLaps.Width = 155
+$btnContaSenhaLaps.Height = 28
+$btnContaSenhaLaps.Anchor = "Bottom,Left"
+$form.Controls.Add($btnContaSenhaLaps)
+
 $btnUsuariosZona = New-Object System.Windows.Forms.Button
 $btnUsuariosZona.Text = "Usuarios da ZE 1"
 $btnUsuariosZona.Location = New-Object System.Drawing.Point(710, 43)
@@ -1102,6 +1110,20 @@ $btnAtualizarFerramenta.Add_Click({
     } catch {
         Add-Log "[ERRO] Falha ao iniciar a atualizacao: $($_.Exception.Message)" "OrangeRed"
         [System.Windows.Forms.MessageBox]::Show("Falha ao iniciar a atualizacao:`r`n$($_.Exception.Message)", "Erro", "OK", "Error") | Out-Null
+    }
+}.GetNewClosure())
+$btnContaSenhaLaps.Add_Click({
+    try {
+        $resultadoAcao = Invoke-AcaoAbrirContaSenhaLaps -AoAtualizarStatus { param($t) Add-Log $t "Cyan" }.GetNewClosure()
+        if ($resultadoAcao.Sucesso) {
+            Add-Log $resultadoAcao.Mensagem "Cyan"
+        } else {
+            Add-Log "[ERRO] $($resultadoAcao.Mensagem)" "OrangeRed"
+            [System.Windows.Forms.MessageBox]::Show($resultadoAcao.Mensagem, "ContraSenha-LAPS", "OK", "Error") | Out-Null
+        }
+    } catch {
+        Add-Log "[ERRO] Falha ao abrir ContraSenha-LAPS: $($_.Exception.Message)" "OrangeRed"
+        [System.Windows.Forms.MessageBox]::Show("Falha ao abrir ContraSenha-LAPS:`r`n$($_.Exception.Message)", "Erro", "OK", "Error") | Out-Null
     }
 }.GetNewClosure())
 $btnUsuariosZona.Add_Click({
