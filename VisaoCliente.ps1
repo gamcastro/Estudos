@@ -32,10 +32,25 @@ Import-Module (Join-Path $PSScriptRoot "VisaoJanelaCampanhas.psm1") -Force
 Import-Module (Join-Path $PSScriptRoot "VisaoJanelaAdmin.psm1") -Force
 
 $script:NomeFerramenta = "Visao"
-# Mantida em sincronia com o ModuleVersion do manifesto Visao.psd1 toda
-# vez que o modulo e republicado (ver projeto_distribuicao_visao) - so
-# pra exibicao no titulo da janela, nao afeta nenhuma logica.
-$script:VersaoFerramenta = "2.0.6"
+
+# Le a versao DIRETO do manifesto do modulo (Visao.psd1, fica do lado de
+# VisaoCliente.ps1 dentro da pasta instalada pelo Install-Module -
+# C:\...\Modules\Visao\<versao>\) - nunca mais precisa lembrar de
+# sincronizar um numero fixo aqui a mao toda vez que o modulo e
+# republicado (ver projeto_distribuicao_visao). Import-PowerShellDataFile
+# le em modo restrito (nao executa nada do .psd1, so avalia a tabela de
+# dados) - seguro mesmo lendo um arquivo que veio de fora. Cai num valor
+# fixo generico se rodar solto (fora do modulo, como no dia a dia de
+# desenvolvimento/teste direto na pasta do repositorio, sem Visao.psd1
+# do lado).
+$script:VersaoFerramenta = "2.0 (dev)"
+$caminhoManifestoVersao = Join-Path $PSScriptRoot "Visao.psd1"
+if (Test-Path $caminhoManifestoVersao) {
+    try {
+        $manifestoVersao = Import-PowerShellDataFile -Path $caminhoManifestoVersao
+        if ($manifestoVersao.ModuleVersion) { $script:VersaoFerramenta = $manifestoVersao.ModuleVersion }
+    } catch {}
+}
 
 # ============================================================
 # ESTADO GLOBAL (client-side) - equivalente ao topo do
