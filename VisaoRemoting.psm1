@@ -1,4 +1,4 @@
-<#
+﻿<#
     VisaoRemoting.psm1
 
     Camada fina do lado do CLIENTE que fala com o POLICY-SERVER via

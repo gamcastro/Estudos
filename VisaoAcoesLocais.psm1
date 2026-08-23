@@ -1,4 +1,4 @@
-<#
+﻿<#
     VisaoAcoesLocais.psm1
 
     Acoes disparadas do menu de contexto da grade principal que rodam

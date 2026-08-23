@@ -1,4 +1,4 @@
-<#
+﻿<#
     VisaoServidor.ps1
 
     Logica de trabalho da ferramenta "Visao" (ScannerRedeZona.ps1) que roda

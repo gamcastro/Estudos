@@ -1,4 +1,4 @@
-<#
+﻿<#
     VisaoAD.psm1
 
     Consultas ao Active Directory usadas pela "Visao" (janela "Usuarios da

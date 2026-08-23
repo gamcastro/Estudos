@@ -1,4 +1,4 @@
-<#
+﻿<#
     VisaoPacotes.psm1
 
     Copia de pacotes de instalacao pro \\IP\InstSeg das maquinas de
@@ -34,6 +34,8 @@
 #>
 
 $script:PastaCacheDownloadsUnc = "\\POLICY-SERVER.tre-ma.gov.br\ScanZonas\CacheDownloads"
+$script:UrlDrivePastaCvc       = "https://drive.google.com/drive/folders/1ssTe5V1qtDRtWTPJCS5Npw8EiiFJCp6o"
+$script:PastaLocalEnvioCvc     = Join-Path $env:TEMP "CVC_GoogleDrive"
 
 function Get-CaminhoDestinoUnc {
     param($Resultado, $Pacote)
@@ -54,6 +56,22 @@ function Get-NomeArquivoConhecidoPacote {
     $nomeArquivoCache = "$($Pacote.IdArquivo)_$($Pacote.Pacote -replace '[\\/:*?"<>|]', '_')"
     $arquivoNome = Join-Path $script:PastaCacheDownloadsUnc "$nomeArquivoCache.nome"
     if (Test-Path $arquivoNome) { return (Get-Content -Path $arquivoNome -Raw -Encoding UTF8).Trim() }
+    return $null
+}
+
+function Get-HashCachePacote {
+    <#
+        Mesma ideia de Get-NomeArquivoConhecidoPacote, so que pro sidecar
+        .md5 (hash MD5 calculado pelo SERVIDOR no momento do download,
+        gravado no mesmo cache compartilhado - ver Get-CaminhosCachePacote
+        em VisaoServidor.ps1, EXATO mesmo padrao de nome de arquivo). Usado
+        como referencia de fallback em Invoke-AcaoVerificarHashPacote
+        quando a planilha nao tem a coluna Hash preenchida pra esse pacote.
+    #>
+    param($Pacote)
+    $nomeArquivoCache = "$($Pacote.IdArquivo)_$($Pacote.Pacote -replace '[\\/:*?"<>|]', '_')"
+    $arquivoHash = Join-Path $script:PastaCacheDownloadsUnc "$nomeArquivoCache.md5"
+    if (Test-Path $arquivoHash) { return (Get-Content -Path $arquivoHash -Raw -Encoding UTF8).Trim() }
     return $null
 }
 
@@ -120,8 +138,15 @@ function Get-StatusPacoteNoDestino {
         nem copiar nada. Primeiro tenta o caminho EXATO esperado; se nao
         achar (ou nem souber o nome esperado ainda), cai pra uma busca
         tolerante em todo o InstSeg (Find-PacoteEmArquivosInstSeg).
+
+        $ArquivosInstSeg (opcional): quem chama pra VARIAS linhas de uma
+        vez (ex: Show-JanelaSistemasEleitorais) pode listar o InstSeg UMA
+        SO VEZ e passar aqui, evitando repetir a busca de ate 15s por
+        pacote nao encontrado no caminho exato. Sentinela distingue "nao
+        informado" (busca sozinho) de "informado, mesmo que vazio/$null"
+        (listagem ja tentada, nao repete).
     #>
-    param($Resultado, $Pacote)
+    param($Resultado, $Pacote, $ArquivosInstSeg = '__NAO_INFORMADO__')
 
     $pastaDestinoUnc = Get-CaminhoDestinoUnc -Resultado $Resultado -Pacote $Pacote
     $nomeConhecido = Get-NomeArquivoConhecidoPacote -Pacote $Pacote
@@ -137,7 +162,7 @@ function Get-StatusPacoteNoDestino {
         }
     }
 
-    $arquivosInstSeg = Get-ArquivosInstSeg -Resultado $Resultado
+    $arquivosInstSeg = if ("$ArquivosInstSeg" -eq '__NAO_INFORMADO__') { Get-ArquivosInstSeg -Resultado $Resultado } else { $ArquivosInstSeg }
     $achadoFora = Find-PacoteEmArquivosInstSeg -Pacote $Pacote -ArquivosInstSeg $arquivosInstSeg
     if ($achadoFora) {
         $tamanhoConfere = if ($Pacote.TamanhoEsperado) { $achadoFora.Length -eq $Pacote.TamanhoEsperado } else { $null }
@@ -297,4 +322,458 @@ function Invoke-AcaoCopiarPacoteJaBaixado {
     }
 }
 
-Export-ModuleMember -Function Get-CaminhoDestinoUnc, Get-NomeArquivoConhecidoPacote, Get-ArquivosInstSeg, Find-PacoteEmArquivosInstSeg, Get-StatusPacoteNoDestino, Format-DuracaoLegivel, Copy-ArquivoComRobocopy, Invoke-AcaoCopiarPacoteJaBaixado
+function Invoke-AcaoGarantirPacoteEmCache {
+    <#
+        Garante que o pacote esteja no cache COMPARTILHADO do servidor
+        (\\POLICY-SERVER...\ScanZonas\CacheDownloads), baixando do Google
+        Drive DIRETO DAQUI (estacao do tecnico) se ainda nao estiver la -
+        substitui o fluxo antigo (Start-BaixarPacoteRemoto/
+        Get-StatusPacoteRemoto, servidor baixa, cliente so espera por
+        polling) depois de confirmado AO VIVO (2026-08-22, zona 14) que
+        manter uma sessao de PowerShell Remoting aberta por varios minutos
+        enquanto um pacote de ate ~500MB baixa do Drive e fragil demais
+        ("A conectividade de rede com POLICY-SERVER... foi perdida").
+
+        O download em si e so uma chamada HTTPS pro Google - nao tem
+        duplo-salto de Kerberos nem trafego de broadcast nenhum (diferente
+        de varredura/WOL, que por isso continuam centralizados no
+        servidor), entao rodar aqui e tao valido quanto rodar no
+        servidor. Mantem o BENEFICIO do cache compartilhado (evita cada
+        tecnico baixar o mesmo pacote de novo): confere primeiro se
+        outro tecnico ja deixou o arquivo la (Test-Path via UNC, sem
+        download nenhum); so baixa se realmente faltar.
+
+        Baixa pra um arquivo TEMPORARIO LOCAL primeiro, nao direto pro
+        caminho final do cache compartilhado - assim nenhum outro
+        tecnico enxerga um arquivo parcial/incompleto no meio do
+        download (dois tecnicos podem, em teoria, tentar baixar o mesmo
+        pacote ao mesmo tempo; como o conteudo final e identico - mesmo
+        arquivo do Drive - um "ganhar" a gravacao final por ultimo nao
+        corrompe nada, so desperdica banda de um dos dois). A gravacao
+        final no cache compartilhado reusa Copy-ArquivoComRobocopy (mesma
+        funcao ja usada pra copiar pro InstSeg).
+    #>
+    param(
+        [Parameter(Mandatory)][PSCustomObject]$Pacote,
+        [scriptblock]$AoAtualizarStatus = $null
+    )
+
+    if (-not $Pacote -or -not $Pacote.IdArquivo) {
+        return [PSCustomObject]@{ Sucesso = $false; Mensagem = "Pacote sem ID de arquivo do Drive valido."; ArquivoCacheUnc = $null; NomeArquivoOriginal = $null; Avisos = @() }
+    }
+
+    $avisos = New-Object System.Collections.Generic.List[string]
+    $nomeArquivoCache = "$($Pacote.IdArquivo)_$($Pacote.Pacote -replace '[\\/:*?"<>|]', '_')"
+    $caminhoCacheUnc = Join-Path $script:PastaCacheDownloadsUnc $nomeArquivoCache
+    $caminhoNomeUnc = "$caminhoCacheUnc.nome"
+    $caminhoHashUnc = "$caminhoCacheUnc.md5"
+
+    if (Test-Path -LiteralPath $caminhoCacheUnc) {
+        if ($AoAtualizarStatus) { & $AoAtualizarStatus "Pacote ja esta no cache compartilhado (baixado por outro tecnico) - pulando download..." }
+        $nomeOriginal = if (Test-Path -LiteralPath $caminhoNomeUnc) { (Get-Content -Path $caminhoNomeUnc -Raw -Encoding UTF8).Trim() } else { $null }
+        return [PSCustomObject]@{ Sucesso = $true; Mensagem = "Pacote ja estava no cache compartilhado."; ArquivoCacheUnc = $caminhoCacheUnc; NomeArquivoOriginal = $nomeOriginal; Avisos = @($avisos) }
+    }
+
+    $pastaTemp = Join-Path $env:TEMP "Visao_DownloadPacotes"
+    if (-not (Test-Path $pastaTemp)) { New-Item -ItemType Directory -Path $pastaTemp -Force | Out-Null }
+    $arquivoTempLocal = Join-Path $pastaTemp "$($nomeArquivoCache)_$([Guid]::NewGuid().ToString('N')).tmp"
+
+    if ($AoAtualizarStatus) { & $AoAtualizarStatus "Baixando '$($Pacote.Pacote)' do Google Drive..." }
+
+    # Roda o download num runspace em segundo plano (mesmo padrao ja usado
+    # pra listar InstSeg/calcular hash) - a thread de UI so bombeia
+    # DoEvents enquanto poll $EstadoDownload.Texto pra atualizar o status.
+    # Isolado de proposito (sem acesso a funcoes de fora) - mesma
+    # restricao ja documentada no $scriptBlock da varredura/do job de
+    # download original no servidor, de onde essa logica foi portada
+    # quase sem mudanca (so $EstadoJob vira $EstadoDownload).
+    $scriptBlockDownload = {
+        param($EstadoDownload, $FileId, $DestinoLocal, $NomePacote)
+
+        function Get-NomeArquivoDeContentDisposition {
+            param($Headers)
+            if (-not $Headers) { return $null }
+            $cd = ($Headers["Content-Disposition"] -join ";")
+            if (-not $cd) { return $null }
+            if ($cd -match "filename\*=UTF-8''([^;]+)") { return [uri]::UnescapeDataString($Matches[1]) }
+            if ($cd -match 'filename="([^"]+)"') { return $Matches[1] }
+            if ($cd -match 'filename=([^;]+)') { return $Matches[1].Trim() }
+            return $null
+        }
+
+        function Invoke-DownloadArquivoComProgresso {
+            param([string]$Url, [System.Net.CookieContainer]$Cookies, [string]$DestinoLocal, [string]$NomePacote, $EstadoDownload)
+
+            $req = [System.Net.HttpWebRequest]::Create($Url)
+            $req.CookieContainer = $Cookies
+            $req.Timeout = 600000
+            $req.ReadWriteTimeout = 600000
+            $req.UserAgent = "Mozilla/5.0 (Visao-TRE-MA)"
+
+            $resp = $req.GetResponse()
+            try {
+                $totalBytes = $resp.ContentLength
+                $streamResposta = $resp.GetResponseStream()
+                $streamArquivo = [System.IO.File]::Create($DestinoLocal)
+                try {
+                    $buffer = New-Object byte[] 262144
+                    $totalLido = 0
+                    $ultimoPercentLogado = -5
+                    $cronometro = [System.Diagnostics.Stopwatch]::StartNew()
+
+                    while (($lidos = $streamResposta.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                        $streamArquivo.Write($buffer, 0, $lidos)
+                        $totalLido += $lidos
+
+                        if ($totalBytes -gt 0) {
+                            $percent = [Math]::Floor(($totalLido / $totalBytes) * 100)
+                            if ($percent -ge ($ultimoPercentLogado + 5) -or $percent -ge 100) {
+                                $mbLido = [Math]::Round($totalLido / 1MB, 1)
+                                $mbTotal = [Math]::Round($totalBytes / 1MB, 1)
+                                $velocidade = if ($cronometro.Elapsed.TotalSeconds -gt 0) { [Math]::Round(($totalLido / 1MB) / $cronometro.Elapsed.TotalSeconds, 1) } else { 0 }
+                                $EstadoDownload.Texto = "Baixando '$NomePacote': $percent% ($mbLido / $mbTotal MB, $velocidade MB/s)"
+                                $ultimoPercentLogado = $percent
+                            }
+                        }
+                    }
+                } finally {
+                    $streamArquivo.Close()
+                    $streamResposta.Close()
+                }
+                return (Get-NomeArquivoDeContentDisposition -Headers $resp.Headers)
+            } finally {
+                $resp.Close()
+            }
+        }
+
+        function Invoke-DownloadGoogleDrivePublico {
+            param([string]$FileId, [string]$DestinoLocal, [string]$NomePacote, $EstadoDownload)
+
+            $ProgressPreference = 'SilentlyContinue'
+            $urlInicial = "https://drive.google.com/uc?export=download&id=$FileId"
+
+            $resp1 = Invoke-WebRequest -Uri $urlInicial -SessionVariable sessaoWeb -UseBasicParsing -TimeoutSec 30
+            $tipoConteudo = ($resp1.Headers["Content-Type"] -join ";")
+            $ehHtml = $tipoConteudo -match "text/html"
+
+            if (-not $ehHtml) {
+                [System.IO.File]::WriteAllBytes($DestinoLocal, $resp1.Content)
+                return (Get-NomeArquivoDeContentDisposition -Headers $resp1.Headers)
+            }
+
+            $html = $resp1.Content
+
+            if ($html -match "(?i)accounts\.google\.com" -or $html -match "(?i)ServiceLogin" -or $html -match "(?i)You need permission" -or $html -match "(?i)Sign in to continue") {
+                throw "O arquivo nao esta publico no Google Drive (o Google pediu login em vez de mandar o arquivo). Verifique o compartilhamento do arquivo: precisa ser 'Qualquer pessoa com o link', nao so o dominio TRE-MA."
+            }
+
+            $urlFinal = $null
+            if ($html -match 'action="([^"]+)"') {
+                $acao = $Matches[1] -replace "&amp;", "&"
+                $campos = [ordered]@{}
+                foreach ($m in [regex]::Matches($html, '<input\s+type="hidden"\s+name="([^"]+)"\s+value="([^"]*)"')) {
+                    $campos[$m.Groups[1].Value] = $m.Groups[2].Value
+                }
+                if ($campos.Count -gt 0) {
+                    $qs = ($campos.GetEnumerator() | ForEach-Object { "$($_.Key)=$([uri]::EscapeDataString($_.Value))" }) -join "&"
+                    $urlFinal = "$acao`?$qs"
+                }
+            }
+            if (-not $urlFinal -and $html -match 'confirm=([0-9A-Za-z_-]+)&amp;id=') {
+                $urlFinal = "https://drive.google.com/uc?export=download&confirm=$($Matches[1])&id=$FileId"
+            }
+            if (-not $urlFinal) {
+                throw "Nao consegui reconhecer a pagina de confirmacao de download grande do Google Drive (formato mudou) - ajustar o parser em Invoke-DownloadGoogleDrivePublico."
+            }
+
+            return (Invoke-DownloadArquivoComProgresso -Url $urlFinal -Cookies $sessaoWeb.Cookies -DestinoLocal $DestinoLocal -NomePacote $NomePacote -EstadoDownload $EstadoDownload)
+        }
+
+        try {
+            $EstadoDownload.NomeArquivoOriginal = Invoke-DownloadGoogleDrivePublico -FileId $FileId -DestinoLocal $DestinoLocal -NomePacote $NomePacote -EstadoDownload $EstadoDownload
+        } catch {
+            $EstadoDownload.Erro = $_.Exception.Message
+        } finally {
+            $EstadoDownload.Concluido = $true
+        }
+    }
+
+    $estadoDownload = [hashtable]::Synchronized(@{ Texto = ""; NomeArquivoOriginal = $null; Erro = $null; Concluido = $false })
+    $ps = [powershell]::Create()
+    try {
+        [void]$ps.AddScript($scriptBlockDownload).AddArgument($estadoDownload).AddArgument($Pacote.IdArquivo).AddArgument($arquivoTempLocal).AddArgument($Pacote.Pacote)
+        $handle = $ps.BeginInvoke()
+        $ultimoTexto = ""
+        while (-not $handle.IsCompleted) {
+            [System.Windows.Forms.Application]::DoEvents()
+            Start-Sleep -Milliseconds 100
+            if ($estadoDownload.Texto -and $estadoDownload.Texto -ne $ultimoTexto) {
+                $ultimoTexto = $estadoDownload.Texto
+                if ($AoAtualizarStatus) { & $AoAtualizarStatus $ultimoTexto }
+            }
+        }
+        $ps.EndInvoke($handle) | Out-Null
+        if ($ps.Streams.Error.Count -gt 0) { throw $ps.Streams.Error[0].Exception }
+    } catch {
+        if (Test-Path -LiteralPath $arquivoTempLocal) { Remove-Item -LiteralPath $arquivoTempLocal -Force -ErrorAction SilentlyContinue }
+        return [PSCustomObject]@{ Sucesso = $false; Mensagem = "Falha ao baixar '$($Pacote.Pacote)' do Google Drive: $($_.Exception.Message)"; ArquivoCacheUnc = $null; NomeArquivoOriginal = $null; Avisos = @($avisos) }
+    } finally {
+        $ps.Dispose()
+    }
+
+    if ($estadoDownload.Erro) {
+        if (Test-Path -LiteralPath $arquivoTempLocal) { Remove-Item -LiteralPath $arquivoTempLocal -Force -ErrorAction SilentlyContinue }
+        return [PSCustomObject]@{ Sucesso = $false; Mensagem = "Falha ao baixar '$($Pacote.Pacote)' do Google Drive: $($estadoDownload.Erro)"; ArquivoCacheUnc = $null; NomeArquivoOriginal = $null; Avisos = @($avisos) }
+    }
+
+    if ($AoAtualizarStatus) { & $AoAtualizarStatus "Calculando hash MD5 do que foi baixado..." }
+    $hashLocal = (Get-FileHash -Path $arquivoTempLocal -Algorithm MD5).Hash
+    if ($Pacote.Hash -and $hashLocal -ne $Pacote.Hash) {
+        $avisos.Add("ATENCAO: hash MD5 do pacote baixado NAO confere com o oficial da planilha (baixado=$hashLocal planilha=$($Pacote.Hash)) - o download pode ter vindo corrompido.")
+    }
+
+    try {
+        Copy-ArquivoComRobocopy -Origem $arquivoTempLocal -Destino $caminhoCacheUnc -NomePacote $Pacote.Pacote -AoAtualizarStatus $AoAtualizarStatus
+        if ($estadoDownload.NomeArquivoOriginal) {
+            Set-Content -Path $caminhoNomeUnc -Value $estadoDownload.NomeArquivoOriginal -Encoding UTF8
+        }
+        Set-Content -Path $caminhoHashUnc -Value $hashLocal -Encoding UTF8
+    } catch {
+        return [PSCustomObject]@{ Sucesso = $false; Mensagem = "Download concluido, mas falhou ao gravar no cache compartilhado do servidor: $($_.Exception.Message)"; ArquivoCacheUnc = $null; NomeArquivoOriginal = $estadoDownload.NomeArquivoOriginal; Avisos = @($avisos) }
+    } finally {
+        Remove-Item -LiteralPath $arquivoTempLocal -Force -ErrorAction SilentlyContinue
+    }
+
+    return [PSCustomObject]@{ Sucesso = $true; Mensagem = "Pacote '$($Pacote.Pacote)' baixado e adicionado ao cache compartilhado."; ArquivoCacheUnc = $caminhoCacheUnc; NomeArquivoOriginal = $estadoDownload.NomeArquivoOriginal; Avisos = @($avisos) }
+}
+
+function Invoke-AcaoVerificarHashPacote {
+    <#
+        Reconfere o hash MD5 do arquivo JA copiado no destino, lendo o
+        arquivo INTEIRO de volta pelo link da zona (por isso so roda sob
+        demanda, nunca automatico). Relocacao de
+        Invoke-AcaoVerificarHashPacote do ScannerRedeZona.ps1 original -
+        diferencas: perde $GridStatus/$LinhaIndice (vira
+        $AoAtualizarStatus, mesma disciplina do resto deste modulo) e NAO
+        mostra MessageBox aqui dentro - devolve um resultado estruturado,
+        quem chama (a janela) decide como exibir.
+
+        Comparado, em ordem de preferencia: (1) coluna Hash da planilha
+        (MD5 oficial do Google Drive); (2) sidecar .md5 do cache
+        compartilhado do servidor (Get-HashCachePacote).
+    #>
+    param(
+        [Parameter(Mandatory)][PSCustomObject]$Resultado,
+        [Parameter(Mandatory)][PSCustomObject]$Pacote,
+        $StatusInfo = $null,
+        [scriptblock]$AoAtualizarStatus = $null
+    )
+
+    $statusInfo = $StatusInfo
+    if (-not $statusInfo) { $statusInfo = Get-StatusPacoteNoDestino -Resultado $Resultado -Pacote $Pacote }
+    if (-not $statusInfo.Existe) {
+        return [PSCustomObject]@{ Sucesso = $false; Confere = $null; Mensagem = "Esse pacote ainda nao foi copiado pra essa maquina."; HashReferencia = $null; HashDestino = $null; OrigemHash = $null; ArquivoDestino = $null }
+    }
+
+    $origemHash = "planilha (oficial do Drive)"
+    $hashReferencia = $Pacote.Hash
+    if (-not $hashReferencia) {
+        $hashReferencia = Get-HashCachePacote -Pacote $Pacote
+        $origemHash = "cache compartilhado do servidor (baixado por esta ferramenta)"
+    }
+    if (-not $hashReferencia) {
+        return [PSCustomObject]@{ Sucesso = $false; Confere = $null; Mensagem = "Sem hash de referencia pra comparar (nem a coluna Hash da planilha, nem o cache compartilhado do servidor tem esse pacote)."; HashReferencia = $null; HashDestino = $null; OrigemHash = $null; ArquivoDestino = $statusInfo.ArquivoDestino }
+    }
+
+    if ($AoAtualizarStatus) { & $AoAtualizarStatus "Verificando hash MD5 (lendo arquivo inteiro pela rede)..." }
+
+    # Le o arquivo INTEIRO pela rede da zona pra calcular o hash - roda num
+    # runspace em segundo plano com a thread da UI so bombeando DoEvents
+    # enquanto espera. Nao usa Get-FileHash (usa
+    # System.Security.Cryptography.MD5 direto, lendo em blocos de 4MB) -
+    # o buffer interno do Get-FileHash e pequeno demais pra um link com
+    # latencia alta.
+    $scriptBlockHashRemoto = {
+        param($Caminho)
+        $md5 = [System.Security.Cryptography.MD5]::Create()
+        try {
+            $stream = [System.IO.File]::OpenRead($Caminho)
+            try {
+                $buffer = New-Object byte[] 4194304
+                while (($lidos = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                    [void]$md5.TransformBlock($buffer, 0, $lidos, $null, 0)
+                }
+                [void]$md5.TransformFinalBlock((New-Object byte[] 0), 0, 0)
+                return ([System.BitConverter]::ToString($md5.Hash) -replace '-', '')
+            } finally {
+                $stream.Close()
+            }
+        } finally {
+            $md5.Dispose()
+        }
+    }
+
+    $cronometro = [System.Diagnostics.Stopwatch]::StartNew()
+    $psHash = [powershell]::Create()
+    try {
+        [void]$psHash.AddScript($scriptBlockHashRemoto).AddArgument($statusInfo.ArquivoDestino)
+        $handleHash = $psHash.BeginInvoke()
+        $proximaAtualizacaoHash = [System.Diagnostics.Stopwatch]::StartNew()
+        while (-not $handleHash.IsCompleted) {
+            [System.Windows.Forms.Application]::DoEvents()
+            Start-Sleep -Milliseconds 50
+            if ($proximaAtualizacaoHash.Elapsed.TotalSeconds -ge 3) {
+                $proximaAtualizacaoHash.Restart()
+                if ($AoAtualizarStatus) { & $AoAtualizarStatus "Verificando hash MD5 ha $([Math]::Round($cronometro.Elapsed.TotalSeconds))s..." }
+            }
+        }
+        $hashRemoto = $psHash.EndInvoke($handleHash)
+        if ($psHash.Streams.Error.Count -gt 0) { throw $psHash.Streams.Error[0].Exception }
+    } catch {
+        return [PSCustomObject]@{ Sucesso = $false; Confere = $null; Mensagem = "Falha ao ler o arquivo no destino pra calcular o hash: $($_.Exception.Message)"; HashReferencia = $hashReferencia; HashDestino = $null; OrigemHash = $origemHash; ArquivoDestino = $statusInfo.ArquivoDestino }
+    } finally {
+        $psHash.Dispose()
+    }
+
+    $confere = $hashRemoto -eq $hashReferencia
+    if ($AoAtualizarStatus) { & $AoAtualizarStatus $(if ($confere) { "Hash MD5 conferido - integro." } else { "Hash MD5 NAO confere - possivel corrupcao." }) }
+
+    return [PSCustomObject]@{
+        Sucesso        = $true
+        Confere        = $confere
+        Mensagem       = $(if ($confere) { "Os dois hashes conferem." } else { "ATENCAO: o arquivo no destino pode estar corrompido - recomendado copiar de novo." })
+        HashReferencia = $hashReferencia
+        HashDestino    = $hashRemoto
+        OrigemHash     = $origemHash
+        ArquivoDestino = $statusInfo.ArquivoDestino
+    }
+}
+
+function Invoke-AcaoAbrirPastaPacote {
+    <#
+        Abre o Explorer na pasta onde o pacote REALMENTE esta - se foi
+        achado fora do padrao, abre ESSA pasta em vez da esperada. So cai
+        pra pasta esperada (\\IP\InstSeg\PastaDestino) se nada foi
+        encontrado em lugar nenhum. Relocacao quase pura do original, so
+        Start-ProcessoNaoElevado (auto-elevacao, nao existe mais nesta
+        ferramenta) vira Start-Process simples.
+    #>
+    param(
+        [Parameter(Mandatory)][PSCustomObject]$Resultado,
+        [Parameter(Mandatory)][PSCustomObject]$Pacote,
+        $StatusInfo = $null
+    )
+
+    $statusInfo = $StatusInfo
+    if (-not $statusInfo) { $statusInfo = Get-StatusPacoteNoDestino -Resultado $Resultado -Pacote $Pacote }
+
+    $pastaParaAbrir = if ($statusInfo.Existe -and $statusInfo.ArquivoDestino) {
+        Split-Path $statusInfo.ArquivoDestino -Parent
+    } else {
+        $statusInfo.PastaDestinoUnc
+    }
+
+    if (-not (Test-Path $pastaParaAbrir)) {
+        return [PSCustomObject]@{ Sucesso = $false; Mensagem = "A pasta ainda nao existe no destino:`r`n$pastaParaAbrir`r`n`r`n(normal se nenhum pacote foi copiado pra la ainda)" }
+    }
+    Start-Process -FilePath $pastaParaAbrir
+    return [PSCustomObject]@{ Sucesso = $true; Mensagem = "Pasta aberta: $pastaParaAbrir" }
+}
+
+function Get-ArquivoCvcMaisRecente {
+    <#
+        Procura, no compartilhamento \\<IP>\InstSeg\CVC da propria estacao,
+        o arquivo .cvc cujo nome (sem extensao) e identico ao nome curto
+        da maquina. Se houver mais de um, fica com o de data de
+        modificacao mais recente. Relocacao pura do original.
+    #>
+    param([string]$IP, [string]$HostnameCurto)
+
+    $pastaCvc = "\\$IP\InstSeg\CVC"
+    if (-not (Test-Path $pastaCvc)) { return $null }
+
+    $candidatos = Get-ChildItem -Path $pastaCvc -Filter "*.cvc" -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.BaseName -eq $HostnameCurto }
+    if (-not $candidatos) { return $null }
+
+    return (@($candidatos) | Sort-Object LastWriteTime -Descending | Select-Object -First 1)
+}
+
+function Invoke-AcaoEnviarCvcDrive {
+    <#
+        Localiza o CVC da maquina (\\IP\InstSeg\CVC, 1 salto Kerberos,
+        acesso direto do cliente) e tenta enviar ao Google Drive via
+        Send-ArquivoParaGoogleDriveRemoto (POST feito pelo SERVIDOR -
+        Fase 7 ja pronta) - o cliente le os bytes e converte pra base64
+        ANTES de chamar, porque ler o arquivo de dentro da sessao remota
+        do servidor esbarraria no duplo-salto de Kerberos ja documentado
+        (Fase 6). Se o envio automatico falhar por qualquer motivo (Web
+        App nao configurado, fora do ar, erro de rede), cai no fallback
+        manual: copia o arquivo pra uma pasta local e devolve os dados
+        pra quem chama abrir a pasta local + a pasta do Drive no
+        navegador, pro tecnico arrastar o arquivo manualmente.
+    #>
+    param(
+        [Parameter(Mandatory)][PSCustomObject]$Resultado,
+        [scriptblock]$AoAtualizarStatus = $null
+    )
+
+    $temNomeResolvido = $Resultado.Hostname -and $Resultado.Hostname -ne "(sem resolucao de nome)"
+    if (-not $temNomeResolvido) {
+        return [PSCustomObject]@{ Sucesso = $false; Metodo = $null; Mensagem = "Este host nao tem nome resolvido - nao e possivel localizar o arquivo CVC pelo nome da maquina."; PastaLocal = $null; UrlDrive = $null }
+    }
+
+    $hostnameCurto = ($Resultado.Hostname -split '\.')[0]
+    $pastaCvc = "\\$($Resultado.IP)\InstSeg\CVC"
+    if ($AoAtualizarStatus) { & $AoAtualizarStatus "Procurando arquivo CVC de '$hostnameCurto' em $pastaCvc..." }
+
+    $arquivo = $null
+    try {
+        $arquivo = Get-ArquivoCvcMaisRecente -IP $Resultado.IP -HostnameCurto $hostnameCurto
+    } catch {
+        return [PSCustomObject]@{ Sucesso = $false; Metodo = $null; Mensagem = "Falha ao acessar ${pastaCvc}: $($_.Exception.Message)"; PastaLocal = $null; UrlDrive = $null }
+    }
+
+    if (-not $arquivo) {
+        return [PSCustomObject]@{ Sucesso = $false; Metodo = $null; Mensagem = "Nenhum arquivo '$hostnameCurto.cvc' encontrado em:`r`n$pastaCvc"; PastaLocal = $null; UrlDrive = $null }
+    }
+
+    if ($AoAtualizarStatus) { & $AoAtualizarStatus "CVC encontrado ($($arquivo.Name)) - enviando automaticamente ao Google Drive..." }
+
+    try {
+        $bytes = [System.IO.File]::ReadAllBytes($arquivo.FullName)
+        $base64 = [System.Convert]::ToBase64String($bytes)
+        $respEnvio = Send-ArquivoParaGoogleDriveRemoto -NomeArquivo $arquivo.Name -ConteudoBase64 $base64
+    } catch {
+        $respEnvio = [PSCustomObject]@{ Ok = $false; Mensagem = $_.Exception.Message; Url = $null }
+    }
+
+    if ($respEnvio -and $respEnvio.Ok) {
+        return [PSCustomObject]@{ Sucesso = $true; Metodo = "automatico"; Mensagem = "CVC de '$hostnameCurto' enviado automaticamente para o Google Drive ($($respEnvio.Url))."; PastaLocal = $null; UrlDrive = $respEnvio.Url }
+    }
+
+    if ($AoAtualizarStatus) { & $AoAtualizarStatus "Envio automatico falhou - copiando localmente para envio manual (fallback)..." }
+
+    try {
+        if (-not (Test-Path $script:PastaLocalEnvioCvc)) {
+            New-Item -ItemType Directory -Path $script:PastaLocalEnvioCvc -Force | Out-Null
+        }
+        $destino = Join-Path $script:PastaLocalEnvioCvc $arquivo.Name
+        Copy-Item -Path $arquivo.FullName -Destination $destino -Force
+    } catch {
+        return [PSCustomObject]@{ Sucesso = $false; Metodo = $null; Mensagem = "Envio automatico falhou ($($respEnvio.Mensagem)) e a copia local tambem falhou: $($_.Exception.Message)"; PastaLocal = $null; UrlDrive = $null }
+    }
+
+    Start-Process -FilePath "explorer.exe" -ArgumentList "/select,`"$destino`""
+    Start-Process -FilePath $script:UrlDrivePastaCvc
+
+    return [PSCustomObject]@{
+        Sucesso    = $true
+        Metodo     = "manual"
+        Mensagem   = "Envio automatico falhou ($($respEnvio.Mensagem)). CVC copiado para $destino - arraste o arquivo ate a janela do navegador (pasta do Drive ja aberta) para concluir o envio."
+        PastaLocal = $destino
+        UrlDrive   = $script:UrlDrivePastaCvc
+    }
+}
+
+Export-ModuleMember -Function Get-CaminhoDestinoUnc, Get-NomeArquivoConhecidoPacote, Get-HashCachePacote, Get-ArquivosInstSeg, Find-PacoteEmArquivosInstSeg, Get-StatusPacoteNoDestino, Format-DuracaoLegivel, Copy-ArquivoComRobocopy, Invoke-AcaoCopiarPacoteJaBaixado, Invoke-AcaoVerificarHashPacote, Invoke-AcaoAbrirPastaPacote, Get-ArquivoCvcMaisRecente, Invoke-AcaoEnviarCvcDrive, Invoke-AcaoGarantirPacoteEmCache

@@ -1,4 +1,4 @@
-<#
+﻿<#
     VisaoCliente.ps1
 
     Tela de PRODUCAO da "Visao" - roda LOCAL na estacao do tecnico, sem
@@ -33,6 +33,7 @@ Import-Module (Join-Path $PSScriptRoot "VisaoRemoting.psm1") -Force
 Import-Module (Join-Path $PSScriptRoot "VisaoAD.psm1") -Force
 Import-Module (Join-Path $PSScriptRoot "VisaoPacotes.psm1") -Force
 Import-Module (Join-Path $PSScriptRoot "VisaoAcoesLocais.psm1") -Force
+Import-Module (Join-Path $PSScriptRoot "VisaoJanelaPacotes.psm1") -Force
 
 $script:NomeFerramenta = "Visao"
 $script:VersaoFerramenta = "2.0"
@@ -69,6 +70,7 @@ $script:Estado = @{
     SistemasEleitoraisExtra      = @()     # preenchido na conexao via Get-SistemasEleitoraisExtraRemoto
     TabelaVersoes                = @{}     # preenchido via Get-VersoesRemoto (hashtable "SISTEMA|VERSAO" -> {NomeAmigavel})
     VersaoAtualPorSistema        = @{}     # preenchido via Get-VersoesRemoto (hashtable "SISTEMA" -> versao)
+    Pacotes                      = @()     # preenchido via Get-VersoesRemoto (.Pacotes) - lista de pacotes baixaveis, ver VisaoJanelaPacotes.psm1
     LinhaContextoAtual           = $null   # linha do grid selecionada pro menu de contexto (setada no MouseDown, lida no Add_Opening - dois closures separados)
 }
 
@@ -841,6 +843,21 @@ $menuContextoGrid.Add_Opening({
     if (-not $linha -or -not $linha.Tag) { $e.Cancel = $true; return }
     $r = $linha.Tag
 
+    # Aliases LOCAIS (sem prefixo $script:) de $script:Estado.* - confirmado
+    # ao vivo (2026-08-22) que ler $script:Estado.Chave direto de dentro de
+    # um Add_Click ANINHADO dentro deste Add_Opening (dois .GetNewClosure()
+    # empilhados, um criado em tempo de execucao de dentro do outro) pode
+    # devolver $null mesmo com a chave populada corretamente - o
+    # ScannerRedeZona.ps1 original ja tinha batido nesse mesmo caso
+    # (aliases locais em Show-JanelaSistemasEleitorais). Variaveis LOCAIS
+    # (como $r/$linha logo acima, que sempre funcionaram) sao capturadas
+    # corretamente por GetNewClosure() mesmo aninhado - so leitura de
+    # $script: aninhada que nao e confiavel.
+    $sistemasEleitoraisExtraLocal = $script:Estado.SistemasEleitoraisExtra
+    $tabelaVersoesLocal = $script:Estado.TabelaVersoes
+    $versaoAtualPorSistemaLocal = $script:Estado.VersaoAtualPorSistema
+    $pacotesLocal = $script:Estado.Pacotes
+
     $itemPing = $menuContextoGrid.Items.Add("Ping")
     $itemPing.Add_Click({ Start-PingContinuo -IP $r.IP }.GetNewClosure())
 
@@ -867,6 +884,46 @@ $menuContextoGrid.Add_Opening({
             $itemRc.Add_Click({
                 $resultadoAcao = Open-RcViewer -IP $r.IP
                 if ($resultadoAcao.Sucesso) { Add-Log $resultadoAcao.Mensagem "Cyan" } else { Add-Log "[ERRO] $($resultadoAcao.Mensagem)" "OrangeRed" }
+            }.GetNewClosure())
+        }
+
+        # So faz sentido oferecer o envio do CVC se a maquina tem SIS
+        # instalado - sem SIS, nao ha CVC gerado no InstSeg\CVC pra achar.
+        $temSis = $r.VersaoSis -and $r.VersaoSis -ne "-"
+        if ($temSis) {
+            [void]$menuContextoGrid.Items.Add("-")
+            $itemCvc = $menuContextoGrid.Items.Add("Enviar CVC para o Google Drive...")
+            $itemCvc.Add_Click({
+                $resultadoAcao = Invoke-AcaoEnviarCvcDrive -Resultado $r -AoAtualizarStatus { param($t) Add-Log $t "Gray" }.GetNewClosure()
+                if (-not $resultadoAcao.Sucesso) {
+                    Add-Log "[ERRO] $($resultadoAcao.Mensagem)" "OrangeRed"
+                    [System.Windows.Forms.MessageBox]::Show($resultadoAcao.Mensagem, "Erro", "OK", "Warning") | Out-Null
+                } elseif ($resultadoAcao.Metodo -eq "automatico") {
+                    Add-Log $resultadoAcao.Mensagem "LightGreen"
+                    [System.Windows.Forms.MessageBox]::Show($resultadoAcao.Mensagem, "Envio concluido", "OK", "Information") | Out-Null
+                } else {
+                    # Fallback manual: a pasta local + a pasta do Drive ja
+                    # abrem sozinhas (Explorer/navegador) - isso ja e o
+                    # feedback visual, sem precisar de MessageBox tambem
+                    # (mesmo comportamento do ScannerRedeZona.ps1 original).
+                    Add-Log $resultadoAcao.Mensagem "Cyan"
+                }
+            }.GetNewClosure())
+        }
+
+        # So aparece se a planilha de Pacotes de Sistemas tiver ao menos 1
+        # pacote configurado OU a maquina tiver SIS instalado (mesmo sem
+        # pacote configurado ainda, da pra ver o status de versao).
+        if ($pacotesLocal.Count -gt 0 -or $temSis) {
+            [void]$menuContextoGrid.Items.Add("-")
+            $itemSistemas = $menuContextoGrid.Items.Add("Sistemas Eleitorais...")
+            $itemSistemas.Add_Click({
+                try {
+                    Show-JanelaSistemasEleitorais -Resultado $r -SistemasEleitoraisExtra $sistemasEleitoraisExtraLocal -TabelaVersoes $tabelaVersoesLocal -VersaoAtualPorSistema $versaoAtualPorSistemaLocal -Pacotes $pacotesLocal -NomeFerramenta $script:NomeFerramenta -AoLog { param($t, $c) Add-Log $t $c }.GetNewClosure()
+                } catch {
+                    Add-Log "[ERRO] Falha ao abrir a janela de Sistemas Eleitorais: $($_.Exception.Message)" "OrangeRed"
+                    [System.Windows.Forms.MessageBox]::Show("Falha ao abrir a janela de Sistemas Eleitorais:`r`n$($_.Exception.Message)`r`n`r`n$($_.ScriptStackTrace)", "Erro", "OK", "Error") | Out-Null
+                }
             }.GetNewClosure())
         }
 
@@ -986,6 +1043,7 @@ $form.Add_Shown({
         if ($v.Ok) {
             $script:Estado.TabelaVersoes = ConvertTo-HashtableLocal $v.TabelaVersoes
             $script:Estado.VersaoAtualPorSistema = ConvertTo-HashtableLocal $v.VersaoAtualPorSistema
+            $script:Estado.Pacotes = @($v.Pacotes)
             Add-Log "Planilha de versoes de sistemas eleitorais carregada: $($v.Contagem) pacote(s) (origem: $($v.Origem))." "Gray"
         } else {
             Add-Log "Planilha de versoes de sistemas eleitorais nao configurada ($($v.Erro)) - segue sem destaque de versao atualizada/desatualizada." "Gray"
