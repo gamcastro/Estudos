@@ -112,6 +112,40 @@ function Get-CaminhoRcViewer {
     return $null
 }
 
+function Invoke-ShellExecuteExterno {
+    <#
+        Lanca um programa externo (nao PowerShell) via Shell.Application.
+        ShellExecute, EM VEZ de Start-Process - confirmado ao vivo
+        (2026-08-23) que Start-Process faz o VNC Viewer (UltraVNC) falhar
+        ao conectar SEM erro claro: o argumento de IP nem chega no
+        processo (titulo da janela do vncviewer fica vazio, "Failed to
+        connect to server!" - Test-NetConnection confirmou que a porta
+        5900 abre normal, nao e bloqueio de rede). O
+        ScannerRedeZona.ps1 original ja tinha documentado o MESMO
+        sintoma especificamente com VNC Viewer, so que por outro motivo
+        (elevacao de UAC herdada do processo pai - nao se aplica mais
+        aqui, esta ferramenta nao se autoeleva) - o contorno (ShellExecute
+        via explorer.exe, que roda no nivel de integridade normal do
+        usuario) continua sendo o que funciona na pratica mesmo sem
+        elevacao nenhuma envolvida, reaplicado aqui so pelo mecanismo,
+        sem a bagagem de "nao elevado" no nome (o motivo mudou).
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Caminho,
+        [string]$Argumentos = "",
+        [string]$PastaTrabalho = ""
+    )
+    if (-not $PastaTrabalho -and (Test-Path $Caminho -ErrorAction SilentlyContinue)) {
+        $PastaTrabalho = Split-Path $Caminho -Parent
+    }
+    $shellApp = New-Object -ComObject "Shell.Application"
+    try {
+        $shellApp.ShellExecute($Caminho, $Argumentos, $PastaTrabalho, "open", 1)
+    } finally {
+        [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($shellApp)
+    }
+}
+
 function Open-VncViewer {
     <#
         Abre o vncviewer.exe local ja apontado pro IP - conecta direto
@@ -125,7 +159,7 @@ function Open-VncViewer {
         return [PSCustomObject]@{ Sucesso = $false; Mensagem = "VNC Viewer nao configurado." }
     }
     try {
-        Start-Process -FilePath $caminho -ArgumentList $IP
+        Invoke-ShellExecuteExterno -Caminho $caminho -Argumentos $IP
         return [PSCustomObject]@{ Sucesso = $true; Mensagem = "Abrindo VNC Viewer para $IP..." }
     } catch {
         return [PSCustomObject]@{ Sucesso = $false; Mensagem = "Falha ao abrir o VNC Viewer para ${IP}: $($_.Exception.Message)" }
@@ -147,7 +181,7 @@ function Open-RcViewer {
         return [PSCustomObject]@{ Sucesso = $false; Mensagem = "RCViewer nao configurado." }
     }
     try {
-        Start-Process -FilePath $caminho
+        Invoke-ShellExecuteExterno -Caminho $caminho
         [System.Windows.Forms.Clipboard]::SetText($IP)
         return [PSCustomObject]@{ Sucesso = $true; Mensagem = "Abrindo RCViewer. IP $IP copiado pra area de transferencia - cole na busca de dispositivo apos logar." }
     } catch {
