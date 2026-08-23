@@ -35,7 +35,7 @@ $script:NomeFerramenta = "Visao"
 # Mantida em sincronia com o ModuleVersion do manifesto Visao.psd1 toda
 # vez que o modulo e republicado (ver projeto_distribuicao_visao) - so
 # pra exibicao no titulo da janela, nao afeta nenhuma logica.
-$script:VersaoFerramenta = "2.0.5"
+$script:VersaoFerramenta = "2.0.6"
 
 # ============================================================
 # ESTADO GLOBAL (client-side) - equivalente ao topo do
