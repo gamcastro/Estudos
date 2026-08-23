@@ -4,24 +4,18 @@
     Tela de PRODUCAO da "Visao" - roda LOCAL na estacao do tecnico, sem
     RDP, sem se autoelevar (nao precisa mais: varredura/robocopy/APIs do
     Google rodam no POLICY-SERVER via PowerShell Remoting; acesso a
-    \\IP\InstSeg de maquinas de zona e AD rodam local, sem elevacao). Ver
-    o plano da construcao desta tela em
-    C:\Users\029342881104\.claude\plans\splendid-enchanting-mochi.md.
+    \\IP\InstSeg de maquinas de zona e AD rodam local, sem elevacao).
 
-    FASE A: janela principal completa - grade de varredura, menu de
-    contexto basico (Ping/Atualizar/VNC/RC), exportar CSV.
-    FASE B: maquinas "possivelmente desligadas" via OCS Inventory (com
-    correcao de hostname), Wake-on-LAN, Info de Impressora (SNMP/console
-    web Pantum).
-    AINDA NAO tem: janela de Sistemas Eleitorais/Pacotes + envio de CVC
-    (Fase C); janelas de Campanha (Fase D); Usuarios da ZE + Gerenciar
-    Zonas (Fase E); Configuracoes (Fase F) - os botoes dessas janelas ja
-    existem no layout (mesma posicao/texto do ScannerRedeZona.ps1
-    original) mas mostram um aviso "ainda nao implementado nesta fase"
-    ate a fase correspondente entrar.
-
-    ScannerRedeZona.ps1 (a versao antiga, via RDP) continua sendo a
-    versao de producao ate esta tela estar completa e madura.
+    Todas as 6 fases (A-F) do plano de construcao desta tela
+    (C:\Users\029342881104\.claude\plans\splendid-enchanting-mochi.md)
+    estao concluidas e testadas ao vivo: janela principal (grade de
+    varredura, menu de contexto, exportar CSV), maquinas desligadas via
+    OCS Inventory + Wake-on-LAN + Info de Impressora, Sistemas
+    Eleitorais/Pacotes + envio de CVC, Campanhas (individual/zona) +
+    Relatorio, Usuarios da ZE + Gerenciar Zonas, Configuracoes. Esta
+    ferramenta e a versao de producao completa - ScannerRedeZona.ps1 (a
+    versao antiga, via RDP) fica como referencia/fallback ate ser
+    aposentado.
 #>
 
 Add-Type -AssemblyName System.Windows.Forms
@@ -112,13 +106,6 @@ function Resolve-NomeAmigavelVersao {
         NomeAmigavel = $script:Estado.TabelaVersoes[$chave].NomeAmigavel
         EhAtual      = if ($versaoAtual) { $versaoAtual -eq $Versao.Trim() } else { $null }
     }
-}
-
-function Show-AindaNaoImplementado {
-    param([string]$Recurso, [string]$Fase)
-    [System.Windows.Forms.MessageBox]::Show(
-        "'$Recurso' ainda nao foi migrado pra esta versao da Visao (entra na $Fase da reconstrucao da tela).`r`n`r`nUse o ScannerRedeZona.ps1 (versao antiga, via RDP) por enquanto pra essa funcionalidade especifica.",
-        "Ainda nao implementado", "OK", "Information") | Out-Null
 }
 
 # ============================================================

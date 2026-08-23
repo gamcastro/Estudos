@@ -11,7 +11,6 @@
     C:\Users\029342881104\.claude\plans\splendid-enchanting-mochi.md para o
     desenho completo da migracao por fases.
 
-    FASE 0: infraestrutura de teste de conexao (Get-TesteConexaoServidor).
     FASE 1: leituras de planilha Google (Zonas, Grupos-Sistemas,
     Campanhas, Resultados-Campanhas) - request/resposta simples, sem
     efeito colateral, sem polling. Cada uma tinha uma chamada a Add-Log no
@@ -158,23 +157,6 @@ $script:SistemasEleitoraisExtra = @(
     [PSCustomObject]@{ Chave = "TRANSPORTADOR-HMG"; NomeVersaoAtual = "TRANSPORTADOR HOMOLOGAÇÃO"; Propriedade = "VersaoTransportadorHmg";  Coluna = "TransportadorHmg";  Titulo = "Transportador Homologacao"; Largura = 150; ComNomeAmigavel = $false; NaGradePrincipal = $false }
     [PSCustomObject]@{ Chave = "CERTIFICADO P12";   NomeVersaoAtual = "CERTIFICADO P12";   Propriedade = "VersaoCertificadoP12";    Coluna = "CertificadoP12";    Titulo = "Certificado P12";           Largura = 150; ComNomeAmigavel = $false; NaGradePrincipal = $false }
 )
-
-function Get-TesteConexaoServidor {
-    <#
-        Prova de vida simples: confirma que o VisaoServidor.ps1 foi
-        carregado e executado DE VERDADE no runspace remoto (nao no
-        cliente) - devolve o hostname/usuario/hora vistos DAQUELE lado.
-        Usada por VisaoRemoting.psm1/VisaoCliente.ps1 pra validar a
-        conexao e o ciclo de reconexao antes de mover qualquer logica
-        real pra ca.
-    #>
-    [PSCustomObject]@{
-        Hostname      = $env:COMPUTERNAME
-        Usuario       = whoami
-        DataHoraUtc   = (Get-Date).ToUniversalTime()
-        PID_Processo  = $PID
-    }
-}
 
 # ============================================================
 # ZONAS ELEITORAIS
