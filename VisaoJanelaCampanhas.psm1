@@ -456,6 +456,29 @@ function Import-ResultadosCampanhasNaJanela {
     Update-GridRelatorioCampanhas -ComboCampanha $ComboCampanha -GridRel $GridRel -LblStatus $LblStatus -Filtro $Filtro
 }
 
+function Get-LinhasVerificadasCampanha {
+    <#
+        Pega SO A ULTIMA linha de cada zona (do array bruto ja buscado
+        por Import-ResultadosCampanhasNaJanela) pra uma campanha - SEM
+        aplicar o filtro Aptas/Nao Aptas. Usado tanto pra popular a
+        grade (Update-GridRelatorioCampanhas) quanto pra Show-
+        RelatorioCampanhaHtml conseguir saber se a campanha tem ALGUMA
+        zona verificada mesmo quando o filtro atual zera a grade (ex:
+        filtro "Nao Aptas" com todas as zonas aptas - grade vazia nao
+        deveria impedir gerar um relatorio dizendo "sem pendencias").
+    #>
+    param(
+        [Parameter(Mandatory)][array]$Dados,
+        [Parameter(Mandatory)][string]$CampanhaNome
+    )
+    $ultimaPorZona = [ordered]@{}
+    foreach ($linha in $Dados) {
+        if ($linha.Campanha -ne $CampanhaNome) { continue }
+        $ultimaPorZona[$linha.Zona] = $linha
+    }
+    return @($ultimaPorZona.Values | Sort-Object { $zn = 0; [void][int]::TryParse($_.Zona, [ref]$zn); $zn })
+}
+
 function Update-GridRelatorioCampanhas {
     <#
         Filtra $GridRel.Tag.Dados (ja buscado antes por
@@ -475,13 +498,7 @@ function Update-GridRelatorioCampanhas {
     $todos = @($resp.Dados)
     $campanhaNome = $ComboCampanha.SelectedItem
 
-    $ultimaPorZona = [ordered]@{}
-    foreach ($linha in $todos) {
-        if ($linha.Campanha -ne $campanhaNome) { continue }
-        $ultimaPorZona[$linha.Zona] = $linha
-    }
-
-    $linhasOrdenadas = @($ultimaPorZona.Values | Sort-Object { $zn = 0; [void][int]::TryParse($_.Zona, [ref]$zn); $zn })
+    $linhasOrdenadas = Get-LinhasVerificadasCampanha -Dados $todos -CampanhaNome $campanhaNome
     $prontas = 0
     foreach ($linha in $linhasOrdenadas) {
         $statusTxt = if ($linha.Total -le 0) { "Sem maquina com SIS" } elseif ($linha.Aptas -gt 0) { "Apta" } else { "Nenhuma apta" }
@@ -515,40 +532,79 @@ function Show-RelatorioCampanhaHtml {
     param(
         [System.Windows.Forms.ComboBox]$ComboCampanha,
         [System.Windows.Forms.DataGridView]$GridRel,
+        [string]$Filtro = "Todas",
         [scriptblock]$AoLog = $null
     )
     if (-not $AoLog) { $AoLog = { param($Texto, $Cor) } }
 
-    if ($ComboCampanha.SelectedIndex -lt 0 -or $GridRel.Rows.Count -eq 0) {
+    $campanhaNome = $ComboCampanha.SelectedItem
+    $resp = $GridRel.Tag
+    $linhasVerificadas = if ($resp -and $resp.Ok -and $campanhaNome) { Get-LinhasVerificadasCampanha -Dados @($resp.Dados) -CampanhaNome $campanhaNome } else { @() }
+
+    if ($ComboCampanha.SelectedIndex -lt 0 -or $linhasVerificadas.Count -eq 0) {
         [System.Windows.Forms.MessageBox]::Show("Nao ha resultados pra gerar relatorio - escolha uma campanha com pelo menos 1 zona verificada.", "Relatorio de Campanhas", "OK", "Warning") | Out-Null
         return
     }
-    $campanhaNome = $ComboCampanha.SelectedItem
 
     $linhasHtml = New-Object System.Collections.Generic.List[string]
     $prontas = 0
     $totalMaquinasAptas = 0
     $totalMaquinasComSis = 0
-    foreach ($row in $GridRel.Rows) {
-        $zona = [System.Net.WebUtility]::HtmlEncode("$($row.Cells['Zona'].Value)")
-        $sede = [System.Net.WebUtility]::HtmlEncode("$($row.Cells['Sede'].Value)")
-        $total = [int]$row.Cells["Total"].Value
-        $aptas = [int]$row.Cells["Aptas"].Value
-        $status = [System.Net.WebUtility]::HtmlEncode("$($row.Cells['Status'].Value)")
-        $maquinasAptas = [System.Net.WebUtility]::HtmlEncode("$($row.Cells['MaquinasAptas'].Value)")
-        $dataHora = [System.Net.WebUtility]::HtmlEncode("$($row.Cells['UltimaVerificacao'].Value)")
-        $tecnico = [System.Net.WebUtility]::HtmlEncode("$($row.Cells['Tecnico'].Value)")
-        $totalMaquinasComSis += $total
-        $totalMaquinasAptas += $aptas
-        if ($status -eq "Apta") { $prontas++ }
-        $corClasse = switch ($status) { "Apta" { "ok" }; default { "ruim" } }
-        $linhasHtml.Add("<tr><td>$zona</td><td>$sede</td><td class=`"num`">$total</td><td class=`"num`">$aptas</td><td class=`"$corClasse`">$status</td><td>$maquinasAptas</td><td>$dataHora</td><td>$tecnico</td></tr>")
+    $blocoResultados = ""
+
+    if ($GridRel.Rows.Count -eq 0) {
+        # O filtro Aptas/Nao Aptas atual zerou a grade, mas a campanha
+        # TEM zonas verificadas ($linhasVerificadas, ja confirmado
+        # acima) - gera o relatorio mesmo assim, com um aviso no lugar
+        # da tabela em vez de bloquear. Achado ao vivo: filtro "Nao
+        # Aptas" com 100% das zonas aptas mostrava "sem resultados",
+        # confuso pro tecnico que queria justamente confirmar que nao ha
+        # pendencia nenhuma.
+        foreach ($linha in $linhasVerificadas) {
+            $totalMaquinasComSis += [int]$linha.Total
+            $totalMaquinasAptas += [int]$linha.Aptas
+            if ($linha.Aptas -gt 0) { $prontas++ }
+        }
+        $totalZonas = $linhasVerificadas.Count
+        $mensagemFiltro = switch ($Filtro) {
+            "NaoAptas" { "Nenhuma zona pendente encontrada com o filtro atual (Nao Aptas) - todas as $totalZonas zona(s) verificada(s) ja estao aptas para esta campanha." }
+            "Aptas" { "Nenhuma zona apta encontrada com o filtro atual (Aptas) - das $totalZonas zona(s) verificada(s), nenhuma tem maquina apta ainda para esta campanha." }
+            default { "Nenhuma zona corresponde ao filtro atual." }
+        }
+        $blocoResultados = "<div class=`"sem-pendencias`">$([System.Net.WebUtility]::HtmlEncode($mensagemFiltro))</div>"
+    }
+    else {
+        foreach ($row in $GridRel.Rows) {
+            $zona = [System.Net.WebUtility]::HtmlEncode("$($row.Cells['Zona'].Value)")
+            $sede = [System.Net.WebUtility]::HtmlEncode("$($row.Cells['Sede'].Value)")
+            $total = [int]$row.Cells["Total"].Value
+            $aptas = [int]$row.Cells["Aptas"].Value
+            $status = [System.Net.WebUtility]::HtmlEncode("$($row.Cells['Status'].Value)")
+            $maquinasAptas = [System.Net.WebUtility]::HtmlEncode("$($row.Cells['MaquinasAptas'].Value)")
+            $dataHora = [System.Net.WebUtility]::HtmlEncode("$($row.Cells['UltimaVerificacao'].Value)")
+            $tecnico = [System.Net.WebUtility]::HtmlEncode("$($row.Cells['Tecnico'].Value)")
+            $totalMaquinasComSis += $total
+            $totalMaquinasAptas += $aptas
+            if ($status -eq "Apta") { $prontas++ }
+            $corClasse = switch ($status) { "Apta" { "ok" }; default { "ruim" } }
+            $linhasHtml.Add("<tr><td>$zona</td><td>$sede</td><td class=`"num`">$total</td><td class=`"num`">$aptas</td><td class=`"$corClasse`">$status</td><td>$maquinasAptas</td><td>$dataHora</td><td>$tecnico</td></tr>")
+        }
+        $totalZonas = $GridRel.Rows.Count
+        $blocoResultados = @"
+  <table>
+    <thead>
+      <tr><th>Zona</th><th>Sede</th><th>Total c/ SIS</th><th>Aptas</th><th>Status</th><th>Maquinas Aptas</th><th>Ultima Verificacao</th><th>Tecnico</th></tr>
+    </thead>
+    <tbody>
+      $($linhasHtml -join "`r`n      ")
+    </tbody>
+  </table>
+"@
     }
 
     $campanhaEnc = [System.Net.WebUtility]::HtmlEncode($campanhaNome)
     $geradoEm = Get-Date -Format "dd/MM/yyyy"
     $horaGerado = Get-Date -Format "HH:mm:ss"
-    $totalZonas = $GridRel.Rows.Count
 
     # Brasao oficial embutido como base64 - deixa o HTML AUTOSSUFICIENTE.
     # $PSScriptRoot aqui e a pasta deste MODULO (mesma pasta de
@@ -587,6 +643,7 @@ function Show-RelatorioCampanhaHtml {
   td.num { text-align: center; }
   td.ok { color: #007f00; font-weight: bold; }
   td.ruim { color: #dc3545; font-weight: bold; }
+  .sem-pendencias { background: #eaf4ea; border: 1px solid #b7dcb7; border-radius: 6px; padding: 18px; font-size: 14px; text-align: center; color: #1e5f27; font-weight: 600; }
   .rodape { margin-top: 14px; font-size: 10px; color: #888; }
   @media print { .rodape { position: fixed; bottom: 0; } }
 </style>
@@ -608,16 +665,9 @@ function Show-RelatorioCampanhaHtml {
   </div>
   <div class="resumo">
     <b>$prontas</b> de <b>$totalZonas</b> zona(s) verificada(s) com pelo menos 1 maquina pronta para esta campanha.
-    Total de <b>$totalMaquinasAptas</b> maquina(s) apta(s) de <b>$totalMaquinasComSis</b> com SIS instalado nas zonas listadas.
+    Total de <b>$totalMaquinasAptas</b> maquina(s) apta(s) de <b>$totalMaquinasComSis</b> com SIS instalado nas zonas verificadas.
   </div>
-  <table>
-    <thead>
-      <tr><th>Zona</th><th>Sede</th><th>Total c/ SIS</th><th>Aptas</th><th>Status</th><th>Maquinas Aptas</th><th>Ultima Verificacao</th><th>Tecnico</th></tr>
-    </thead>
-    <tbody>
-      $($linhasHtml -join "`r`n      ")
-    </tbody>
-  </table>
+  $blocoResultados
   <div class="rodape">Gerado pela ferramenta Visao - TRE-MA em $geradoEm $horaGerado.</div>
 </body>
 </html>
@@ -743,7 +793,7 @@ function Show-JanelaRelatorioCampanhas {
     $btnPdfRel.Height = 28
     $btnPdfRel.Anchor = "Bottom,Right"
     $dlg.Controls.Add($btnPdfRel)
-    $btnPdfRel.Add_Click({ Show-RelatorioCampanhaHtml -ComboCampanha $comboCampanhaRel -GridRel $gridRel -AoLog $AoLog }.GetNewClosure())
+    $btnPdfRel.Add_Click({ Show-RelatorioCampanhaHtml -ComboCampanha $comboCampanhaRel -GridRel $gridRel -Filtro (Get-FiltroRelatorioCampanhas -RadioAptas $radioAptasRel -RadioNaoAptas $radioNaoAptasRel) -AoLog $AoLog }.GetNewClosure())
 
     $comboCampanhaRel.Add_SelectedIndexChanged({ Update-GridRelatorioCampanhas -ComboCampanha $comboCampanhaRel -GridRel $gridRel -LblStatus $lblStatusRel -Filtro (Get-FiltroRelatorioCampanhas -RadioAptas $radioAptasRel -RadioNaoAptas $radioNaoAptasRel) }.GetNewClosure())
     $btnAtualizarRel.Add_Click({ Import-ResultadosCampanhasNaJanela -ComboCampanha $comboCampanhaRel -GridRel $gridRel -LblStatus $lblStatusRel -Filtro (Get-FiltroRelatorioCampanhas -RadioAptas $radioAptasRel -RadioNaoAptas $radioNaoAptasRel) -AoLog $AoLog }.GetNewClosure())
