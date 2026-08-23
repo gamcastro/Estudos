@@ -200,6 +200,16 @@ function Get-PercentualRobocopyDoLog {
         robocopy ainda esta com ele aberto pra escrita nesse momento -
         Get-Content sozinho pode esbarrar em erro de compartilhamento
         dependendo do momento exato do polling.
+
+        Aceita PONTO OU VIRGULA como separador decimal no regex (ex:
+        "45,5%" - Windows em portugues do Brasil, que e o padrao nas
+        estacoes do TRE-MA, formata porcentagem do robocopy com virgula,
+        nao ponto) - e converte pra double via CultureInfo.InvariantCulture
+        depois de normalizar a virgula pra ponto, em vez de deixar o
+        cast [double] usar a cultura da THREAD atual (que poderia
+        interpretar errado um valor com ponto se a cultura local for
+        pt-BR, ou vice-versa) - assim funciona igual em qualquer
+        estacao, independente da configuracao regional do Windows.
     #>
     param([string]$CaminhoLog)
     if (-not (Test-Path -LiteralPath $CaminhoLog)) { return $null }
@@ -215,9 +225,14 @@ function Get-PercentualRobocopyDoLog {
     } catch {
         return $null
     }
-    $casamentos = [regex]::Matches($conteudo, '(\d+(?:\.\d+)?)\s*%')
+    $casamentos = [regex]::Matches($conteudo, '(\d+(?:[.,]\d+)?)\s*%')
     if ($casamentos.Count -eq 0) { return $null }
-    return [double]$casamentos[$casamentos.Count - 1].Groups[1].Value
+    $valorTexto = $casamentos[$casamentos.Count - 1].Groups[1].Value -replace ',', '.'
+    $valorConvertido = 0.0
+    if (-not [double]::TryParse($valorTexto, [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$valorConvertido)) {
+        return $null
+    }
+    return $valorConvertido
 }
 
 function Copy-ArquivoComRobocopy {
@@ -275,25 +290,28 @@ function Copy-ArquivoComRobocopy {
         $cronometro = [System.Diagnostics.Stopwatch]::StartNew()
         $proximaAtualizacao = [System.Diagnostics.Stopwatch]::StartNew()
         $ultimoPercentualNotificado = -1
+        $ultimoPercentualConhecido = $null
         if ($AoAtualizarStatus) { & $AoAtualizarStatus "Copiando '$NomePacote' (robocopy, $mbTotal MB) ha $(Format-DuracaoLegivel 0)..." }
         while (-not $processo.HasExited) {
             [System.Windows.Forms.Application]::DoEvents()
             Start-Sleep -Milliseconds 200
 
-            if ($AoAtualizarPercentual) {
-                $percentualAtual = Get-PercentualRobocopyDoLog -CaminhoLog $logSaida
-                if ($null -ne $percentualAtual) {
-                    $percentualInteiro = [Math]::Min(100, [Math]::Round($percentualAtual))
-                    if ($percentualInteiro -ne $ultimoPercentualNotificado) {
-                        $ultimoPercentualNotificado = $percentualInteiro
-                        & $AoAtualizarPercentual $percentualInteiro
-                    }
-                }
+            # Le o percentual TODO tick (nao so quando $AoAtualizarPercentual
+            # existe) porque o texto de status abaixo tambem mostra o
+            # numero - visivel mesmo se ninguem estiver de olho na barra.
+            $percentualAtual = Get-PercentualRobocopyDoLog -CaminhoLog $logSaida
+            if ($null -ne $percentualAtual) {
+                $ultimoPercentualConhecido = [Math]::Min(100, [Math]::Round($percentualAtual))
+            }
+            if ($AoAtualizarPercentual -and $null -ne $ultimoPercentualConhecido -and $ultimoPercentualConhecido -ne $ultimoPercentualNotificado) {
+                $ultimoPercentualNotificado = $ultimoPercentualConhecido
+                & $AoAtualizarPercentual $ultimoPercentualConhecido
             }
 
             if ($proximaAtualizacao.Elapsed.TotalSeconds -ge 3) {
                 $proximaAtualizacao.Restart()
-                if ($AoAtualizarStatus) { & $AoAtualizarStatus "Copiando '$NomePacote' (robocopy, $mbTotal MB) ha $(Format-DuracaoLegivel $cronometro.Elapsed.TotalSeconds)..." }
+                $percentualTexto = if ($null -ne $ultimoPercentualConhecido) { " - $ultimoPercentualConhecido%" } else { "" }
+                if ($AoAtualizarStatus) { & $AoAtualizarStatus "Copiando '$NomePacote' (robocopy, $mbTotal MB)$percentualTexto ha $(Format-DuracaoLegivel $cronometro.Elapsed.TotalSeconds)..." }
             }
         }
         $processo.WaitForExit()
