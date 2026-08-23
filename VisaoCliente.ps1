@@ -32,7 +32,10 @@ Import-Module (Join-Path $PSScriptRoot "VisaoJanelaCampanhas.psm1") -Force
 Import-Module (Join-Path $PSScriptRoot "VisaoJanelaAdmin.psm1") -Force
 
 $script:NomeFerramenta = "Visao"
-$script:VersaoFerramenta = "2.0"
+# Mantida em sincronia com o ModuleVersion do manifesto Visao.psd1 toda
+# vez que o modulo e republicado (ver projeto_distribuicao_visao) - so
+# pra exibicao no titulo da janela, nao afeta nenhuma logica.
+$script:VersaoFerramenta = "2.0.5"
 
 # ============================================================
 # ESTADO GLOBAL (client-side) - equivalente ao topo do
