@@ -369,28 +369,16 @@ function Invoke-ComandoRemoto {
 # polling).
 #
 # Get-ZonasRemoto/Get-GruposSistemasRemoto/Get-CampanhasRemoto/
-# Get-ResultadosCampanhasRemoto NAO vivem mais aqui - migradas pra
+# Get-ResultadosCampanhasRemoto/Resolve-RedeDaZonaRemoto/
+# Test-RedeEhCompartilhadaRemoto NAO vivem mais aqui - migradas pra
 # VisaoPlanilhas.psm1 em 2026-08-24 (leem a planilha CSV publicada
 # DIRETO da estacao do tecnico, sem passar pelo POLICY-SERVER - decisao
-# com o usuario, ver cabecalho de VisaoPlanilhas.psm1). Resolve-RedeDaZonaRemoto/
-# Test-RedeEhCompartilhadaRemoto continuam aqui porque sao parte da
-# logica de VARREDURA (resolvem qual rede escanear), nao leitura solta.
+# com o usuario, ver cabecalho de VisaoPlanilhas.psm1). As duas ultimas
+# entraram na migracao numa segunda passada - dependiam de um efeito
+# colateral que o Get-ZonasRemoto ANTIGO tinha no servidor (populava
+# $script:TabelaZonas la), que quebrou "Iniciar Varredura" quando so as
+# 4 leituras foram migradas na primeira passada.
 # ============================================================
-function Resolve-RedeDaZonaRemoto {
-    <#
-        Devolve um PSCustomObject simples (nao-array) - atravessa o
-        remoting sem precisar do contorno JSON (so array de PSCustomObject
-        tem o bug, ver comentario em Get-ResultadosCampanhas).
-    #>
-    param([Parameter(Mandatory)][int]$Zona)
-    Invoke-ComandoRemoto -ScriptBlock { param($z) Resolve-RedeDaZona -Zona $z } -ArgumentList @($Zona)
-}
-
-function Test-RedeEhCompartilhadaRemoto {
-    param([Parameter(Mandatory)][string]$Prefixo)
-    Invoke-ComandoRemoto -ScriptBlock { param($p) Test-RedeEhCompartilhada -Prefixo $p } -ArgumentList @($Prefixo)
-}
-
 function Get-VersoesRemoto {
     <#
         Import-TabelaVersoes do lado servidor devolve uma STRING JSON
@@ -653,7 +641,7 @@ function Set-ConfigEnvioDriveRemoto {
     Invoke-ComandoRemoto -ScriptBlock { param($u, $t) Set-ConfigEnvioDrive -UrlWebApp $u -Token $t } -ArgumentList @($UrlWebApp, $Token)
 }
 
-Export-ModuleMember -Function Connect-ServidorVisao, Disconnect-ServidorVisao, Invoke-ComandoRemoto, Get-IdSessaoAtualVisao, Resolve-RedeDaZonaRemoto, Test-RedeEhCompartilhadaRemoto, Start-VarreduraRemota, Get-VarreduraNovosResultadosRemoto, Get-VersoesRemoto, Get-SistemasEleitoraisExtraRemoto, Start-BaixarPacoteRemoto, Get-StatusPacoteRemoto, Send-AtualizacaoZonaRemoto, Send-ResultadoCampanhaZonaRemoto, Send-ArquivoParaGoogleDriveRemoto, Get-MaquinasDesligadasOcsRemoto, Invoke-LigarWolRemoto, Get-ConfigVersoesRemoto, Set-ConfigVersoesRemoto, Get-ConfigZonasWebAppRemoto, Set-ConfigZonasWebAppRemoto, Get-ConfigCampanhasWebAppRemoto, Set-ConfigCampanhasWebAppRemoto, Get-ConfigEnvioDriveRemoto, Set-ConfigEnvioDriveRemoto
+Export-ModuleMember -Function Connect-ServidorVisao, Disconnect-ServidorVisao, Invoke-ComandoRemoto, Get-IdSessaoAtualVisao, Start-VarreduraRemota, Get-VarreduraNovosResultadosRemoto, Get-VersoesRemoto, Get-SistemasEleitoraisExtraRemoto, Start-BaixarPacoteRemoto, Get-StatusPacoteRemoto, Send-AtualizacaoZonaRemoto, Send-ResultadoCampanhaZonaRemoto, Send-ArquivoParaGoogleDriveRemoto, Get-MaquinasDesligadasOcsRemoto, Invoke-LigarWolRemoto, Get-ConfigVersoesRemoto, Set-ConfigVersoesRemoto, Get-ConfigZonasWebAppRemoto, Set-ConfigZonasWebAppRemoto, Get-ConfigCampanhasWebAppRemoto, Set-ConfigCampanhasWebAppRemoto, Get-ConfigEnvioDriveRemoto, Set-ConfigEnvioDriveRemoto
 
 # NOTA: as consultas ao AD (Usuarios da ZE, status do Instalador) NAO
 # passam por aqui - ver VisaoAD.psm1. Nao sao trafego de varredura, e

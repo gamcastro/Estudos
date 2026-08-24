@@ -565,7 +565,7 @@ function Atualizar-MaximoZona {
 function Update-LabelSedeInfo {
     $zona = [int]$numZona.Value
     try {
-        $resolucao = Resolve-RedeDaZonaRemoto -Zona $zona
+        $resolucao = Resolve-RedeDaZonaRemoto -Zona $zona -Zonas $script:Estado.Zonas
     } catch {
         $lblSedeInfo.Text = "Sede: -    Rede a varrer: (erro ao consultar o servidor)"
         $lblSedeInfo.ForeColor = [System.Drawing.Color]::FromArgb(220, 53, 69)
@@ -716,7 +716,7 @@ $btnIniciar.Add_Click({
     [System.Windows.Forms.Application]::DoEvents()
 
     try {
-        $resolucao = Resolve-RedeDaZonaRemoto -Zona $zona
+        $resolucao = Resolve-RedeDaZonaRemoto -Zona $zona -Zonas $script:Estado.Zonas
     } catch {
         [System.Windows.Forms.MessageBox]::Show("Falha ao resolver a rede da zona: $($_.Exception.Message)", "Erro", "OK", "Error") | Out-Null
         $btnIniciar.Enabled = $true
@@ -745,7 +745,7 @@ $btnIniciar.Add_Click({
     }
 
     try {
-        $script:Estado.RedeCompartilhada = Test-RedeEhCompartilhadaRemoto -Prefixo $baseIP
+        $script:Estado.RedeCompartilhada = Test-RedeEhCompartilhadaRemoto -Prefixo $baseIP -Zonas $script:Estado.Zonas
     } catch {
         $script:Estado.RedeCompartilhada = $false
         Add-Log "[AVISO] Falha ao verificar se a rede e compartilhada: $($_.Exception.Message)" "Yellow"
@@ -1186,7 +1186,7 @@ $btnVerificarCampanhaZona.Add_Click({
     }
     $linhasComSis = @($grid.Rows | Where-Object { $_.Tag -and $_.Tag.VersaoSis -and $_.Tag.VersaoSis -ne "-" } | ForEach-Object { $_.Tag })
     try {
-        $resolucaoZona = Resolve-RedeDaZonaRemoto -Zona $script:Estado.ZonaAtual
+        $resolucaoZona = Resolve-RedeDaZonaRemoto -Zona $script:Estado.ZonaAtual -Zonas $script:Estado.Zonas
     } catch {
         $resolucaoZona = $null
     }

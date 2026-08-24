@@ -43,6 +43,21 @@
     falhar, usa a ultima copia baixada com sucesso NESTA maquina.
     Resultados de Campanhas continua SEM cache local, igual a versao
     anterior (e um historico que so faz sentido buscado fresco).
+
+    Resolve-RedeDaZonaRemoto/Test-RedeEhCompartilhadaRemoto (usadas por
+    "Iniciar Varredura") TAMBEM foram trazidas pra ca (portadas de
+    Resolve-RedeDaZona/Test-RedeEhCompartilhada em VisaoServidor.ps1) -
+    achado ao vivo (2026-08-24): a primeira versao desta migracao so
+    trouxe as 4 leituras e deixou essas duas no servidor, o que quebrou
+    "Iniciar Varredura" na hora (toda zona virava "nao encontrada na
+    planilha") - elas dependiam de um EFEITO COLATERAL que o
+    Get-ZonasRemoto ANTIGO (via remoting) tinha: populava
+    $script:TabelaZonas no PROPRIO SERVIDOR de passagem, que essas duas
+    funcoes liam depois. Sem mais nada chamando o Import-TabelaZonas do
+    servidor, essa tabela nunca mais era populada. Corrigido migrando as
+    duas junto - agora recebem a lista de zonas JA CARREGADA (
+    $script:Estado.Zonas, ja populado na conexao) como parametro, em vez
+    de ler um estado de servidor.
 #>
 
 $script:UrlPlanilhaZonasCSV = "https://docs.google.com/spreadsheets/d/1_2aZhFgplRqCdPVV_lq4XJT9wgqkfbZpEFZRu1Zu9_I/export?format=csv&gid=0"
@@ -245,4 +260,98 @@ function Get-ResultadosCampanhasRemoto {
     }
 }
 
-Export-ModuleMember -Function Get-ZonasRemoto, Get-GruposSistemasRemoto, Get-CampanhasRemoto, Get-ResultadosCampanhasRemoto
+function Remove-AcentosLocal {
+    param([string]$Texto)
+    if (-not $Texto) { return "" }
+    $normalizado = $Texto.Normalize([System.Text.NormalizationForm]::FormD)
+    $sb = New-Object System.Text.StringBuilder
+    foreach ($c in $normalizado.ToCharArray()) {
+        if ([System.Globalization.CharUnicodeInfo]::GetUnicodeCategory($c) -ne [System.Globalization.UnicodeCategory]::NonSpacingMark) {
+            [void]$sb.Append($c)
+        }
+    }
+    return $sb.ToString().Normalize([System.Text.NormalizationForm]::FormC)
+}
+
+function ConvertTo-PrefixoRedeLocal {
+    <#
+        Converte uma rede no formato "10.198.4.0/24" (como vem da coluna
+        "Rede Padrao"/"Substituta" da planilha) para o prefixo "10.198.4."
+        que o resto da ferramenta usa internamente pra montar IPs (ex:
+        "10.198.4.15"). Tambem aceita "10.198.4.0" sem mascara, ou
+        "10.198.4" (3 octetos, atalho comum). Devolve $null se vier vazio
+        ou nao reconhecer o formato.
+    #>
+    param([string]$Rede)
+    if (-not $Rede) { return $null }
+    $Rede = $Rede.Trim()
+    if (-not $Rede) { return $null }
+    if ($Rede.EndsWith(".") -and ($Rede -notmatch '/')) { return $Rede }
+
+    $semMascara = ($Rede -split '/')[0].TrimEnd('.')
+    $partes = $semMascara -split '\.'
+    if ($partes.Count -eq 4) { return "$($partes[0]).$($partes[1]).$($partes[2])." }
+    if ($partes.Count -eq 3) { return "$($partes[0]).$($partes[1]).$($partes[2])." }
+    return $null
+}
+
+function Resolve-RedeDaZonaRemoto {
+    <#
+        Decide o prefixo de rede a varrer pra uma zona, nesta ordem de
+        prioridade: (1) coluna "Substituta" da planilha, (2) coluna
+        "Rede Padrao", (3) se a planilha nao tiver essa zona, calcula
+        como o original ja fazia (10.11.81. pra Sao Luis, 10.198.<zona>.
+        pro resto). $Zonas e o array ja carregado por Get-ZonasRemoto
+        (normalmente $script:Estado.Zonas, ja populado na conexao) - NAO
+        busca a planilha de novo a cada chamada.
+    #>
+    param(
+        [Parameter(Mandatory)][int]$Zona,
+        [object[]]$Zonas = @()
+    )
+
+    $zonaInfo = $Zonas | Where-Object { $_.Zona -eq $Zona } | Select-Object -First 1
+    $sede = if ($zonaInfo) { $zonaInfo.Sede } else { $null }
+
+    $prefixoSubstituta = if ($zonaInfo) { ConvertTo-PrefixoRedeLocal $zonaInfo.Substituta } else { $null }
+    if ($prefixoSubstituta) {
+        return [PSCustomObject]@{ Prefixo = $prefixoSubstituta; Origem = "Substituta (planilha)"; Sede = $sede; Observacao = $zonaInfo.Observacao; EhSubstituta = $true }
+    }
+
+    $prefixoPadrao = if ($zonaInfo) { ConvertTo-PrefixoRedeLocal $zonaInfo.RedePadrao } else { $null }
+    if ($prefixoPadrao) {
+        return [PSCustomObject]@{ Prefixo = $prefixoPadrao; Origem = "Rede Padrao (planilha)"; Sede = $sede; Observacao = $null; EhSubstituta = $false }
+    }
+
+    $sedeSemAcento = (Remove-AcentosLocal $sede).ToUpper().Trim()
+    if ($sedeSemAcento -eq "SAO LUIS") {
+        return [PSCustomObject]@{ Prefixo = "10.11.81."; Origem = "Sao Luis (calculado, planilha incompleta)"; Sede = $sede; Observacao = $null; EhSubstituta = $false }
+    }
+
+    return [PSCustomObject]@{ Prefixo = "10.198.$Zona."; Origem = "Padrao interior (calculado, planilha incompleta)"; Sede = $sede; Observacao = $null; EhSubstituta = $false }
+}
+
+function Test-RedeEhCompartilhadaRemoto {
+    <#
+        Uma rede e "compartilhada" quando mais de uma zona eleitoral
+        resolve pro mesmo prefixo (varias zonas no mesmo predio/rede).
+        $Zonas mesmo array ja carregado - ver Resolve-RedeDaZonaRemoto.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Prefixo,
+        [object[]]$Zonas = @()
+    )
+    if (-not $Prefixo) { return $false }
+
+    $contagem = 0
+    foreach ($z in $Zonas) {
+        $res = Resolve-RedeDaZonaRemoto -Zona $z.Zona -Zonas $Zonas
+        if ($res.Prefixo -eq $Prefixo) {
+            $contagem++
+            if ($contagem -gt 1) { return $true }
+        }
+    }
+    return $false
+}
+
+Export-ModuleMember -Function Get-ZonasRemoto, Get-GruposSistemasRemoto, Get-CampanhasRemoto, Get-ResultadosCampanhasRemoto, Resolve-RedeDaZonaRemoto, Test-RedeEhCompartilhadaRemoto
