@@ -24,6 +24,7 @@ Add-Type -AssemblyName Microsoft.VisualBasic
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
 Import-Module (Join-Path $PSScriptRoot "VisaoRemoting.psm1") -Force
+Import-Module (Join-Path $PSScriptRoot "VisaoPlanilhas.psm1") -Force
 Import-Module (Join-Path $PSScriptRoot "VisaoAD.psm1") -Force
 Import-Module (Join-Path $PSScriptRoot "VisaoPacotes.psm1") -Force
 Import-Module (Join-Path $PSScriptRoot "VisaoAcoesLocais.psm1") -Force

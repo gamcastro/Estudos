@@ -366,34 +366,16 @@ function Invoke-ComandoRemoto {
 
 # ============================================================
 # FASE 1: leituras de planilha Google (request/resposta simples, sem
-# polling) - cada uma so encaminha pra funcao equivalente do
-# VisaoServidor.ps1 via Invoke-ComandoRemoto.
+# polling).
+#
+# Get-ZonasRemoto/Get-GruposSistemasRemoto/Get-CampanhasRemoto/
+# Get-ResultadosCampanhasRemoto NAO vivem mais aqui - migradas pra
+# VisaoPlanilhas.psm1 em 2026-08-24 (leem a planilha CSV publicada
+# DIRETO da estacao do tecnico, sem passar pelo POLICY-SERVER - decisao
+# com o usuario, ver cabecalho de VisaoPlanilhas.psm1). Resolve-RedeDaZonaRemoto/
+# Test-RedeEhCompartilhadaRemoto continuam aqui porque sao parte da
+# logica de VARREDURA (resolvem qual rede escanear), nao leitura solta.
 # ============================================================
-function Get-ZonasRemoto {
-    <#
-        Import-TabelaZonas do lado servidor devolve uma STRING JSON
-        (Zonas e um array de PSCustomObject - mesmo bug de serializacao
-        de sempre). Aqui desserializa de volta; .Zonas vem como array
-        normal do PowerShell, cada item com .Zona (int) embutido - Fase E
-        (Gerenciar Zonas) usa isso pra montar a grade editavel.
-    #>
-    param([switch]$ForcarCache)
-    $json = Invoke-ComandoRemoto -ScriptBlock { param($f) Import-TabelaZonas -ForcarCache:$f } -ArgumentList @($ForcarCache.IsPresent)
-    return ($json | ConvertFrom-Json)
-}
-
-function Get-GruposSistemasRemoto {
-    <#
-        Import-TabelaGruposSistemas do lado servidor devolve uma STRING
-        JSON. Aqui desserializa de volta - .GruposSistemas vem como
-        PSCustomObject (converter pra Hashtable do lado cliente antes de
-        indexar por chave, mesmo padrao de TabelaVersoes/VersaoAtualPorSistema).
-    #>
-    param([switch]$ForcarCache)
-    $json = Invoke-ComandoRemoto -ScriptBlock { param($f) Import-TabelaGruposSistemas -ForcarCache:$f } -ArgumentList @($ForcarCache.IsPresent)
-    return ($json | ConvertFrom-Json)
-}
-
 function Resolve-RedeDaZonaRemoto {
     <#
         Devolve um PSCustomObject simples (nao-array) - atravessa o
@@ -407,20 +389,6 @@ function Resolve-RedeDaZonaRemoto {
 function Test-RedeEhCompartilhadaRemoto {
     param([Parameter(Mandatory)][string]$Prefixo)
     Invoke-ComandoRemoto -ScriptBlock { param($p) Test-RedeEhCompartilhada -Prefixo $p } -ArgumentList @($Prefixo)
-}
-
-function Get-CampanhasRemoto {
-    <#
-        Import-TabelaCampanhas do lado servidor devolve uma STRING JSON
-        (Campanhas e uma lista de PSCustomObject, cada uma com Requisitos
-        aninhado - mesmo bug de serializacao de sempre). Aqui desserializa
-        de volta; o objeto devolvido tem .Campanhas como array normal do
-        PowerShell (cada item com .Nome/.Requisitos), pronto pra popular
-        um ComboBox/conferir requisitos no cliente.
-    #>
-    param([switch]$ForcarCache)
-    $json = Invoke-ComandoRemoto -ScriptBlock { param($f) Import-TabelaCampanhas -ForcarCache:$f } -ArgumentList @($ForcarCache.IsPresent)
-    return ($json | ConvertFrom-Json)
 }
 
 function Get-VersoesRemoto {
@@ -456,23 +424,6 @@ function Get-SistemasEleitoraisExtraRemoto {
 # em VisaoServidor.ps1 acima de $script:EstadoPacotes). So o DOWNLOAD
 # do Google Drive fica aqui (Start-BaixarPacoteRemoto/
 # Get-StatusPacoteRemoto, mais abaixo).
-
-function Get-ResultadosCampanhasRemoto {
-    <#
-        Get-ResultadosCampanhas do lado servidor devolve uma STRING JSON,
-        nao um objeto direto - ver o comentario extenso dela em
-        VisaoServidor.ps1 (bug confirmado de PS Remoting nesse servidor
-        especifico com array de PSCustomObject cruzando a fronteira).
-        Aqui e so desserializar de volta pro objeto que o resto do
-        cliente espera. $AoAtualizarStatus (opcional) repassado pra
-        Invoke-ComandoRemoto - ver comentario dela (achado da tela de
-        Relatorio de Campanhas ficando sem feedback nenhum numa espera
-        longa).
-    #>
-    param([scriptblock]$AoAtualizarStatus = $null)
-    $json = Invoke-ComandoRemoto -ScriptBlock { Get-ResultadosCampanhas } -AoAtualizarStatus $AoAtualizarStatus
-    return ($json | ConvertFrom-Json)
-}
 
 # ============================================================
 # FASE 4/5: varredura de rede - padrao de POLLING sobre a sessao
@@ -702,7 +653,7 @@ function Set-ConfigEnvioDriveRemoto {
     Invoke-ComandoRemoto -ScriptBlock { param($u, $t) Set-ConfigEnvioDrive -UrlWebApp $u -Token $t } -ArgumentList @($UrlWebApp, $Token)
 }
 
-Export-ModuleMember -Function Connect-ServidorVisao, Disconnect-ServidorVisao, Invoke-ComandoRemoto, Get-IdSessaoAtualVisao, Get-ZonasRemoto, Get-GruposSistemasRemoto, Get-CampanhasRemoto, Get-ResultadosCampanhasRemoto, Resolve-RedeDaZonaRemoto, Test-RedeEhCompartilhadaRemoto, Start-VarreduraRemota, Get-VarreduraNovosResultadosRemoto, Get-VersoesRemoto, Get-SistemasEleitoraisExtraRemoto, Start-BaixarPacoteRemoto, Get-StatusPacoteRemoto, Send-AtualizacaoZonaRemoto, Send-ResultadoCampanhaZonaRemoto, Send-ArquivoParaGoogleDriveRemoto, Get-MaquinasDesligadasOcsRemoto, Invoke-LigarWolRemoto, Get-ConfigVersoesRemoto, Set-ConfigVersoesRemoto, Get-ConfigZonasWebAppRemoto, Set-ConfigZonasWebAppRemoto, Get-ConfigCampanhasWebAppRemoto, Set-ConfigCampanhasWebAppRemoto, Get-ConfigEnvioDriveRemoto, Set-ConfigEnvioDriveRemoto
+Export-ModuleMember -Function Connect-ServidorVisao, Disconnect-ServidorVisao, Invoke-ComandoRemoto, Get-IdSessaoAtualVisao, Resolve-RedeDaZonaRemoto, Test-RedeEhCompartilhadaRemoto, Start-VarreduraRemota, Get-VarreduraNovosResultadosRemoto, Get-VersoesRemoto, Get-SistemasEleitoraisExtraRemoto, Start-BaixarPacoteRemoto, Get-StatusPacoteRemoto, Send-AtualizacaoZonaRemoto, Send-ResultadoCampanhaZonaRemoto, Send-ArquivoParaGoogleDriveRemoto, Get-MaquinasDesligadasOcsRemoto, Invoke-LigarWolRemoto, Get-ConfigVersoesRemoto, Set-ConfigVersoesRemoto, Get-ConfigZonasWebAppRemoto, Set-ConfigZonasWebAppRemoto, Get-ConfigCampanhasWebAppRemoto, Set-ConfigCampanhasWebAppRemoto, Get-ConfigEnvioDriveRemoto, Set-ConfigEnvioDriveRemoto
 
 # NOTA: as consultas ao AD (Usuarios da ZE, status do Instalador) NAO
 # passam por aqui - ver VisaoAD.psm1. Nao sao trafego de varredura, e
