@@ -341,8 +341,18 @@ function Show-JanelaSistemasEleitorais {
     $dlg.Add_Shown({ & $recarregarPacotesSis -Grid $gridSis -Itens $itens -Resultado2 $Resultado -LblCarregando $lblCarregandoSis }.GetNewClosure())
     $btnAtualizarSis.Add_Click({ & $recarregarPacotesSis -Grid $gridSis -Itens $itens -Resultado2 $Resultado -LblCarregando $lblCarregandoSis }.GetNewClosure())
     $btnTransferidorInstseg.Add_Click({
+        # Alias LOCAL de $AoLog, atribuido AQUI (closure de primeiro
+        # nivel) - o callback -AoAtualizarStatus abaixo e um SEGUNDO
+        # .GetNewClosure() aninhado dentro deste, e usar $AoLog direto
+        # de dentro dele nao seria confiavel (Descoberta critica no5/no6,
+        # ja documentada neste mesmo arquivo em outros callbacks como
+        # $callbackDownload/$callbackCopia/$callbackHash) - confirmado
+        # ao vivo (2026-08-24) que sem o alias local, $AoLog chega nulo
+        # la dentro e "& $null ..." quebra com "a expressao depois de
+        # '&' produziu um objeto invalido".
+        $aoLogLocal = $AoLog
         try {
-            $resultadoAcao = Invoke-AcaoAbrirTransferidorInstseg -IP $Resultado.IP -AoAtualizarStatus { param($t) & $AoLog $t "Cyan" }.GetNewClosure()
+            $resultadoAcao = Invoke-AcaoAbrirTransferidorInstseg -IP $Resultado.IP -AoAtualizarStatus { param($t) & $aoLogLocal $t "Cyan" }.GetNewClosure()
             if ($resultadoAcao.Sucesso) {
                 & $AoLog $resultadoAcao.Mensagem "Cyan"
             } else {
