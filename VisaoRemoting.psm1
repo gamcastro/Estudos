@@ -105,15 +105,23 @@ function Connect-ServidorVisao {
         NAO e codigo nosso, e o proprio WinRM tentando se recuperar
         sozinho de uma queda de rede ENQUANTO um comando ja estava em
         andamento (diferente de abrir sessao nova, que e o que
-        OpenTimeout cobre). Esse mecanismo roda ANTES de qualquer
-        excecao chegar no nosso try/catch - a reconexao propria do
-        Invoke-ComandoRemoto so age DEPOIS que o WinRM desiste. Sem
-        configurar, o padrao usa MaxConnectionRetryCount=4 (cada
-        tentativa ~1min, daí os "4 minutos" batendo exato com o
-        relatado). Reduzido pra 1 - da uma chance rapida de
-        autorrecuperação pra blips curtos de rede, mas sem prender a UI
-        por minutos antes da NOSSA reconexao (mais rapida, ja com
-        OpenTimeout curto) assumir.
+        OpenTimeout cobre). MaxConnectionRetryCount foi setado pra 1
+        aqui, mas isso NAO encurta essa janela de 4 minutos (testado ao
+        vivo de novo em 2026-08-24 na versao 2.0.19, com o print
+        mostrando o mesmo contador de 4 minutos) - confirmado via
+        pesquisa que esse parametro rege as tentativas de ABRIR uma
+        conexao nova (o que legitimamente ajuda no cenario original
+        deste comentario), nao a reconexao robusta do WinRM durante uma
+        chamada JA em andamento, que parece nao ser configuravel por
+        nenhuma API publica do PowerShell (confirmado tambem por um
+        issue sem solucao no repositorio oficial do PowerShell no
+        GitHub com o mesmo resultado). Mantido em 1 mesmo assim porque
+        ainda e correto pro proposito documentado acima (idle/queda
+        antes de abrir sessao nova) - so nao e mais tratado como fix
+        pro sintoma dos "4 minutos". Ver Invoke-ComandoRemotoJob (fix
+        de verdade pra esse sintoma: nao trava a UI enquanto o WinRM
+        tenta se recuperar sozinho, em vez de tentar encurtar algo que
+        nao da pra encurtar).
     #>
     if ($script:PSSessionServidor -and $script:PSSessionServidor.State -eq [System.Management.Automation.Runspaces.RunspaceState]::Opened) {
         return $true
@@ -160,18 +168,72 @@ function Get-IdSessaoAtualVisao {
     return $script:IdSessaoAtual
 }
 
+function Invoke-ComandoRemotoJob {
+    <#
+        Roda Invoke-Command -AsJob na sessao e espera o resultado
+        bombeando a fila de mensagens do WinForms (Application]::DoEvents,
+        mesmo padrao ja usado no polling do robocopy em
+        Copy-ArquivoComRobocopy) em vez de bloquear a thread de UI com
+        um Invoke-Command sincrono direto.
+
+        Existe por causa de um achado ao vivo (2026-08-24): quando a
+        rede cai NO MEIO de uma chamada ja em andamento, o proprio WinRM
+        tenta se reconectar sozinho por ate ~4 minutos ANTES de
+        qualquer excecao chegar ate o PowerShell (mensagem nativa "A
+        conexao de rede... foi interrompida. Tentando reconexao por ate
+        4 minutos..."). Confirmado ao vivo (e por um issue aberto no
+        proprio repositorio do PowerShell no GitHub com o mesmo
+        resultado) que NENHUM parametro de New-PSSessionOption
+        (OpenTimeout/OperationTimeout/IdleTimeout/MaxConnectionRetryCount)
+        encurta essa janela - nao e configuravel pelas APIs publicas do
+        PowerShell. Como nao da pra deixar essa espera mais curta, a
+        alternativa e nao deixar ela TRAVAR a janela inteira enquanto
+        dura: com -AsJob + DoEvents, o resto da GUI continua respondendo
+        durante a espera (e, no caso comum de a reconexao nativa do
+        WinRM ter sucesso sozinha, a operacao original SIMPLESMENTE
+        CONTINUA e devolve o resultado normal - abortar mais cedo por
+        conta propria jogaria fora uma chamada que ia dar certo).
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [System.Management.Automation.Runspaces.PSSession]$Sessao,
+        [Parameter(Mandatory)]
+        [scriptblock]$ScriptBlock,
+        [object[]]$ArgumentList = @()
+    )
+
+    $job = Invoke-Command -Session $Sessao -ScriptBlock $ScriptBlock -ArgumentList $ArgumentList -AsJob -ErrorAction Stop
+    try {
+        while ($job.State -eq [System.Management.Automation.JobState]::Running -or $job.State -eq [System.Management.Automation.JobState]::NotStarted) {
+            [System.Windows.Forms.Application]::DoEvents()
+            Start-Sleep -Milliseconds 150
+        }
+        return Receive-Job -Job $job -ErrorAction Stop
+    }
+    finally {
+        Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Invoke-ComandoRemoto {
     <#
         Wrapper que TODA chamada remota do cliente deve usar em vez de
         Invoke-Command direto - confere o estado da sessao antes de usar
         e, se estiver quebrada/fechada, tenta reconectar (e recarregar o
         VisaoServidor.ps1) UMA VEZ antes de repetir a chamada. Se a
-        propria chamada falhar por erro de TRANSPORTE remoto (sessao
-        caiu no meio), tambem tenta reconectar+repetir uma vez.
+        propria chamada falhar e a sessao tiver caido de verdade (ver
+        Invoke-ComandoRemotoJob), tambem tenta reconectar+repetir uma
+        vez.
 
         Erros vindos de DENTRO do scriptblock (ex: uma excecao que a
         propria funcao remota lancou de proposito) NAO acionam reconexao
-        - so propagam pra quem chamou, normal.
+        - so propagam pra quem chamou, normal. A distincao e feita pelo
+        ESTADO da sessao depois da falha (Opened = foi erro de logica,
+        qualquer outra coisa = a sessao caiu de verdade) em vez de casar
+        o TIPO da excecao - Receive-Job (usado por Invoke-ComandoRemotoJob)
+        nao necessariamente preserva o mesmo tipo de excecao
+        (PSRemotingTransportException) que um Invoke-Command direto
+        preservava, entao checar o estado e mais confiavel.
 
         Devolve o que o scriptblock remoto devolver. Lanca excecao
         ([System.InvalidOperationException], mensagem em pt-BR, clara e
@@ -192,18 +254,17 @@ function Invoke-ComandoRemoto {
     }
 
     try {
-        return Invoke-Command -Session $script:PSSessionServidor -ScriptBlock $ScriptBlock -ArgumentList $ArgumentList -ErrorAction Stop
-    } catch [System.Management.Automation.Remoting.PSRemotingTransportException] {
-        # Erro de TRANSPORTE (sessao caiu, WinRM parou de responder etc.) -
-        # so esse tipo de erro justifica tentar reconectar; um erro de
-        # LOGICA vindo de dentro do scriptblock remoto e outro tipo de
-        # excecao e cai no catch generico abaixo, propagando normal.
-        Registrar-LogConexao "Sessao perdida durante operacao remota (erro de transporte): $($_.Exception.Message)"
+        return Invoke-ComandoRemotoJob -Sessao $script:PSSessionServidor -ScriptBlock $ScriptBlock -ArgumentList $ArgumentList
+    } catch {
+        if ($script:PSSessionServidor -and $script:PSSessionServidor.State -eq [System.Management.Automation.Runspaces.RunspaceState]::Opened) {
+            throw
+        }
+        Registrar-LogConexao "Sessao perdida durante operacao remota: $($_.Exception.Message)"
         if (-not (Connect-ServidorVisao)) {
             throw [System.InvalidOperationException]::new("Conexao com o POLICY-SERVER perdida e nao foi possivel reconectar. Verifique a rede/VPN e tente novamente.")
         }
         try {
-            return Invoke-Command -Session $script:PSSessionServidor -ScriptBlock $ScriptBlock -ArgumentList $ArgumentList -ErrorAction Stop
+            return Invoke-ComandoRemotoJob -Sessao $script:PSSessionServidor -ScriptBlock $ScriptBlock -ArgumentList $ArgumentList
         } catch {
             throw [System.InvalidOperationException]::new("Conexao com o POLICY-SERVER foi perdida durante a operacao. Se estava no meio de uma varredura, ela ficou incompleta - inicie de novo.")
         }
