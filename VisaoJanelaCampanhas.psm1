@@ -427,13 +427,16 @@ function Import-ResultadosCampanhasNaJanela {
     }
 
     if ($resp.Ok) {
-        # Campanhas de teste enviadas durante o desenvolvimento/migracao
-        # desta ferramenta - ficaram gravadas na planilha real junto com
-        # os resultados de verdade dos tecnicos. Filtradas aqui (nao
-        # apagadas da planilha) pra nao aparecerem em lugar nenhum do
-        # relatorio. Se aparecer campanha de teste nova no futuro,
-        # adicionar o nome aqui.
-        $campanhasDeTeste = @('Simulado TDTOT 4', 'TESTE-MIGRACAO-FASE7')
+        # TESTE-MIGRACAO-FASE7 foi um resultado enviado durante a migracao
+        # desta ferramenta pra uma campanha que nunca existiu de verdade
+        # na aba CAMPANHAS da planilha (diferente de "Simulado TDTOT 4",
+        # que E uma campanha real cadastrada la, com requisitos de
+        # verdade - essa continua aparecendo normalmente). Filtrada aqui
+        # (nao apagada da planilha) pra nao aparecer no relatorio. Se
+        # aparecer outro resultado de teste parecido no futuro (enviado
+        # pra uma campanha que nao esta na aba CAMPANHAS), adicionar o
+        # nome aqui.
+        $campanhasDeTeste = @('TESTE-MIGRACAO-FASE7')
         $resp.Dados = @($resp.Dados | Where-Object { $_.Campanha -notin $campanhasDeTeste })
     }
     $GridRel.Tag = $resp
