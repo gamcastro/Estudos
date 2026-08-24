@@ -218,7 +218,8 @@ function Invoke-ComandoRemotoJob {
         [System.Management.Automation.Runspaces.PSSession]$Sessao,
         [Parameter(Mandatory)]
         [scriptblock]$ScriptBlock,
-        [object[]]$ArgumentList = @()
+        [object[]]$ArgumentList = @(),
+        [scriptblock]$AoAtualizarStatus = $null
     )
 
     $job = Invoke-Command -Session $Sessao -ScriptBlock $ScriptBlock -ArgumentList $ArgumentList -AsJob -ErrorAction Stop
@@ -231,7 +232,9 @@ function Invoke-ComandoRemotoJob {
 
             $segundosDecorridos = $cronometro.Elapsed.TotalSeconds
             if ($segundosDecorridos -ge $proximoAvisoEspera) {
-                Registrar-LogConexao "Ainda aguardando resposta do servidor apos $([math]::Round($segundosDecorridos))s (WinRM pode estar tentando se reconectar sozinho em segundo plano)."
+                $textoAviso = "Ainda aguardando resposta do servidor apos $([math]::Round($segundosDecorridos))s (WinRM pode estar tentando se reconectar sozinho em segundo plano)."
+                Registrar-LogConexao $textoAviso
+                if ($AoAtualizarStatus) { & $AoAtualizarStatus $textoAviso }
                 $proximoAvisoEspera += 30
             }
 
@@ -308,11 +311,24 @@ function Invoke-ComandoRemoto {
         job terminou, porque isso so aconteceria depois que a segunda
         (que esta esperando ela) retornasse. Rejeitar na hora evita esse
         ciclo por completo.
+
+        $AoAtualizarStatus (opcional) e repassado pra
+        Invoke-ComandoRemotoJob - achado ao vivo (2026-08-24): tecnico
+        ficou preso na janela "Relatorio de Campanhas" com o texto
+        estatico "Buscando resultados..." (sem nenhuma atualizacao) e o
+        botao Fechar sem efeito ate a chamada interna terminar - teve
+        que matar o processo. O limite de 5 minutos ja evitava travar
+        pra sempre, mas sem NENHUM feedback visivel na tela, uma espera
+        legitima de so alguns segundos ja parece travamento total pro
+        tecnico. Quem chamar pode passar um callback que atualiza um
+        Label da propria tela com o mesmo aviso que ja ia so pro
+        Conexao.log.
     #>
     param(
         [Parameter(Mandatory)]
         [scriptblock]$ScriptBlock,
-        [object[]]$ArgumentList = @()
+        [object[]]$ArgumentList = @(),
+        [scriptblock]$AoAtualizarStatus = $null
     )
 
     if ($script:SessaoOcupada) {
@@ -327,7 +343,7 @@ function Invoke-ComandoRemoto {
         }
 
         try {
-            return Invoke-ComandoRemotoJob -Sessao $script:PSSessionServidor -ScriptBlock $ScriptBlock -ArgumentList $ArgumentList
+            return Invoke-ComandoRemotoJob -Sessao $script:PSSessionServidor -ScriptBlock $ScriptBlock -ArgumentList $ArgumentList -AoAtualizarStatus $AoAtualizarStatus
         } catch {
             if ($script:PSSessionServidor -and $script:PSSessionServidor.State -eq [System.Management.Automation.Runspaces.RunspaceState]::Opened) {
                 throw
@@ -337,7 +353,7 @@ function Invoke-ComandoRemoto {
                 throw [System.InvalidOperationException]::new("Conexao com o POLICY-SERVER perdida e nao foi possivel reconectar. Verifique a rede/VPN e tente novamente.")
             }
             try {
-                return Invoke-ComandoRemotoJob -Sessao $script:PSSessionServidor -ScriptBlock $ScriptBlock -ArgumentList $ArgumentList
+                return Invoke-ComandoRemotoJob -Sessao $script:PSSessionServidor -ScriptBlock $ScriptBlock -ArgumentList $ArgumentList -AoAtualizarStatus $AoAtualizarStatus
             } catch {
                 throw [System.InvalidOperationException]::new("Conexao com o POLICY-SERVER foi perdida durante a operacao. Se estava no meio de uma varredura, ela ficou incompleta - inicie de novo.")
             }
@@ -448,9 +464,13 @@ function Get-ResultadosCampanhasRemoto {
         VisaoServidor.ps1 (bug confirmado de PS Remoting nesse servidor
         especifico com array de PSCustomObject cruzando a fronteira).
         Aqui e so desserializar de volta pro objeto que o resto do
-        cliente espera.
+        cliente espera. $AoAtualizarStatus (opcional) repassado pra
+        Invoke-ComandoRemoto - ver comentario dela (achado da tela de
+        Relatorio de Campanhas ficando sem feedback nenhum numa espera
+        longa).
     #>
-    $json = Invoke-ComandoRemoto -ScriptBlock { Get-ResultadosCampanhas }
+    param([scriptblock]$AoAtualizarStatus = $null)
+    $json = Invoke-ComandoRemoto -ScriptBlock { Get-ResultadosCampanhas } -AoAtualizarStatus $AoAtualizarStatus
     return ($json | ConvertFrom-Json)
 }
 

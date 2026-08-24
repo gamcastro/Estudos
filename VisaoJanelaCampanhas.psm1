@@ -421,7 +421,18 @@ function Import-ResultadosCampanhasNaJanela {
     [System.Windows.Forms.Application]::DoEvents()
 
     try {
-        $resp = Get-ResultadosCampanhasRemoto
+        # Achado ao vivo (2026-08-24): sem feedback nenhum aqui, uma
+        # espera longa (rede lenta, WinRM tentando se reconectar sozinho
+        # - ver comentario de Invoke-ComandoRemotoJob) deixava o texto
+        # estatico em "Buscando resultados..." indefinidamente, e o
+        # tecnico nao tinha como saber se ainda estava tentando ou se
+        # tinha travado de verdade - teve que matar o processo. Agora
+        # mostra o mesmo aviso que ja ia so pro Conexao.log.
+        $resp = Get-ResultadosCampanhasRemoto -AoAtualizarStatus {
+            param($t)
+            $LblStatus.Text = $t
+            [System.Windows.Forms.Application]::DoEvents()
+        }.GetNewClosure()
     } catch {
         $resp = [PSCustomObject]@{ Ok = $false; Erro = $_.Exception.Message; Dados = @() }
     }
