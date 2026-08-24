@@ -218,6 +218,14 @@ $btnContaSenhaLaps.Height = 28
 $btnContaSenhaLaps.Anchor = "Bottom,Left"
 $form.Controls.Add($btnContaSenhaLaps)
 
+$btnTransferidorInstseg = New-Object System.Windows.Forms.Button
+$btnTransferidorInstseg.Text = "Transferidor Instseg"
+$btnTransferidorInstseg.Location = New-Object System.Drawing.Point(1025, 611)
+$btnTransferidorInstseg.Width = 160
+$btnTransferidorInstseg.Height = 28
+$btnTransferidorInstseg.Anchor = "Bottom,Left"
+$form.Controls.Add($btnTransferidorInstseg)
+
 $btnUsuariosZona = New-Object System.Windows.Forms.Button
 $btnUsuariosZona.Text = "Usuarios da ZE 1"
 $btnUsuariosZona.Location = New-Object System.Drawing.Point(710, 43)
@@ -1146,6 +1154,20 @@ $btnContaSenhaLaps.Add_Click({
     } catch {
         Add-Log "[ERRO] Falha ao abrir ContraSenha-LAPS: $($_.Exception.Message)" "OrangeRed"
         [System.Windows.Forms.MessageBox]::Show("Falha ao abrir ContraSenha-LAPS:`r`n$($_.Exception.Message)", "Erro", "OK", "Error") | Out-Null
+    }
+}.GetNewClosure())
+$btnTransferidorInstseg.Add_Click({
+    try {
+        $resultadoAcao = Invoke-AcaoAbrirTransferidorInstseg -AoAtualizarStatus { param($t) Add-Log $t "Cyan" }.GetNewClosure()
+        if ($resultadoAcao.Sucesso) {
+            Add-Log $resultadoAcao.Mensagem "Cyan"
+        } else {
+            Add-Log "[ERRO] $($resultadoAcao.Mensagem)" "OrangeRed"
+            [System.Windows.Forms.MessageBox]::Show($resultadoAcao.Mensagem, "Transferidor Instseg", "OK", "Error") | Out-Null
+        }
+    } catch {
+        Add-Log "[ERRO] Falha ao abrir o Transferidor Instseg: $($_.Exception.Message)" "OrangeRed"
+        [System.Windows.Forms.MessageBox]::Show("Falha ao abrir o Transferidor Instseg:`r`n$($_.Exception.Message)", "Erro", "OK", "Error") | Out-Null
     }
 }.GetNewClosure())
 $btnUsuariosZona.Add_Click({
