@@ -193,6 +193,25 @@ function Invoke-ComandoRemotoJob {
         WinRM ter sucesso sozinha, a operacao original SIMPLESMENTE
         CONTINUA e devolve o resultado normal - abortar mais cedo por
         conta propria jogaria fora uma chamada que ia dar certo).
+
+        Achado ao vivo nº2 (2026-08-24): tecnico relatou a ferramenta
+        parecendo travar de vez ("teve que fechar a aplicacao") ao
+        iniciar uma varredura logo apos usar o botao ContraSenha-LAPS/
+        Transferidor Instseg - sem NENHUMA mensagem de erro, so silencio
+        total. Suspeita (nao 100% confirmada - o log da ferramenta nao
+        mostra o que acontece DENTRO desta espera): a espera acima nao
+        tinha limite nenhum - se o job nunca saisse de Running/NotStarted
+        (rede realmente ruim, nao so um blip curto), a ferramenta ficava
+        "tecnicamente respondendo" (DoEvents continua rodando, a janela
+        nao trava pro Windows) mas visualmente PARADA pra sempre, sem
+        nenhum feedback nem erro - pro tecnico, indistinguivel de
+        travado de verdade. Adicionado um limite maximo (5 minutos, bem
+        acima do teto de ~4min do proprio WinRM, pra nunca abortar uma
+        reconexao nativa que ia dar certo sozinha) que desiste e lanca
+        erro claro, alem de avisos periodicos no Conexao.log durante
+        esperas longas - da visibilidade de verdade (antes so tinhamos
+        log de ANTES/DEPOIS de cada chamada, nada de dentro de uma
+        chamada trava).
     #>
     param(
         [Parameter(Mandatory)]
@@ -203,10 +222,31 @@ function Invoke-ComandoRemotoJob {
     )
 
     $job = Invoke-Command -Session $Sessao -ScriptBlock $ScriptBlock -ArgumentList $ArgumentList -AsJob -ErrorAction Stop
+    $cronometro = [System.Diagnostics.Stopwatch]::StartNew()
+    $proximoAvisoEspera = 15
     try {
         while ($job.State -eq [System.Management.Automation.JobState]::Running -or $job.State -eq [System.Management.Automation.JobState]::NotStarted) {
             [System.Windows.Forms.Application]::DoEvents()
             Start-Sleep -Milliseconds 150
+
+            $segundosDecorridos = $cronometro.Elapsed.TotalSeconds
+            if ($segundosDecorridos -ge $proximoAvisoEspera) {
+                Registrar-LogConexao "Ainda aguardando resposta do servidor apos $([math]::Round($segundosDecorridos))s (WinRM pode estar tentando se reconectar sozinho em segundo plano)."
+                $proximoAvisoEspera += 30
+            }
+
+            if ($segundosDecorridos -ge 300) {
+                Stop-Job -Job $job -ErrorAction SilentlyContinue
+                Registrar-LogConexao "Chamada abortada apos 300s sem resposta - forcando sessao a ser considerada perdida."
+                # Forca a sessao a ser tratada como morta (nao so lanca o
+                # erro) - o Invoke-ComandoRemoto que chamou isto decide
+                # se reconecta com base no ESTADO da sessao depois da
+                # falha; sem isto, uma sessao que ainda "parece" Opened
+                # (mesmo travada de verdade) nao acionaria a reconexao
+                # automatica na proxima tentativa do tecnico.
+                Disconnect-ServidorVisao
+                throw [System.TimeoutException]::new("O POLICY-SERVER nao respondeu em 5 minutos - a conexao foi considerada perdida.")
+            }
         }
         return Receive-Job -Job $job -ErrorAction Stop
     }
