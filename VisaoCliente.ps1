@@ -633,7 +633,7 @@ $timer.Add_Tick({
 
 function Invoke-TickVarredura {
     try {
-        $resposta = Get-VarreduraNovosResultadosRemoto -IdSessaoEsperado $script:Estado.IdSessaoVarredura
+        $resposta = Get-VarreduraNovosResultadosRemoto -IdSessaoEsperado $script:Estado.IdSessaoVarredura -AoAtualizarStatus { param($t) Add-Log $t "Gray" }
     } catch {
         $timer.Stop()
         Add-Log "[ERRO] Falha ao consultar progresso da varredura: $($_.Exception.Message)" "OrangeRed"
@@ -777,7 +777,7 @@ $btnIniciar.Add_Click({
     $progressBar.Value = 0
 
     try {
-        $script:Estado.IdSessaoVarredura = Start-VarreduraRemota -Ips $ips -Zona $zona -RedeCompartilhada $script:Estado.RedeCompartilhada
+        $script:Estado.IdSessaoVarredura = Start-VarreduraRemota -Ips $ips -Zona $zona -RedeCompartilhada $script:Estado.RedeCompartilhada -AoAtualizarStatus { param($t) Add-Log $t "Gray" }.GetNewClosure()
     } catch {
         Add-Log "[ERRO] Falha ao iniciar a varredura no servidor: $($_.Exception.Message)" "OrangeRed"
         $numZona.Enabled = $true

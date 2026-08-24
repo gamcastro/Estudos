@@ -435,9 +435,10 @@ function Start-VarreduraRemota {
         [string[]]$Ips,
         [Parameter(Mandatory)]
         [int]$Zona,
-        [bool]$RedeCompartilhada = $false
+        [bool]$RedeCompartilhada = $false,
+        [scriptblock]$AoAtualizarStatus = $null
     )
-    Invoke-ComandoRemoto -ScriptBlock { param($i, $z, $rc) Start-VarreduraZona -Ips $i -Zona $z -RedeCompartilhada $rc } -ArgumentList @($Ips, $Zona, $RedeCompartilhada) | Out-Null
+    Invoke-ComandoRemoto -ScriptBlock { param($i, $z, $rc) Start-VarreduraZona -Ips $i -Zona $z -RedeCompartilhada $rc } -ArgumentList @($Ips, $Zona, $RedeCompartilhada) -AoAtualizarStatus $AoAtualizarStatus | Out-Null
     return $script:IdSessaoAtual
 }
 
@@ -465,14 +466,15 @@ function Get-VarreduraNovosResultadosRemoto {
     #>
     param(
         [Parameter(Mandatory)]
-        [guid]$IdSessaoEsperado
+        [guid]$IdSessaoEsperado,
+        [scriptblock]$AoAtualizarStatus = $null
     )
 
     if ($script:IdSessaoAtual -ne $IdSessaoEsperado) {
         return [PSCustomObject]@{ Novos = @(); Concluidos = 0; Total = 0; EmAndamento = $false; SessaoPerdida = $true }
     }
 
-    $json = Invoke-ComandoRemoto -ScriptBlock { Get-VarreduraNovosResultados }
+    $json = Invoke-ComandoRemoto -ScriptBlock { Get-VarreduraNovosResultados } -AoAtualizarStatus $AoAtualizarStatus
 
     if ($script:IdSessaoAtual -ne $IdSessaoEsperado) {
         return [PSCustomObject]@{ Novos = @(); Concluidos = 0; Total = 0; EmAndamento = $false; SessaoPerdida = $true }
