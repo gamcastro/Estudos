@@ -342,7 +342,7 @@ function Show-JanelaSistemasEleitorais {
     $btnAtualizarSis.Add_Click({ & $recarregarPacotesSis -Grid $gridSis -Itens $itens -Resultado2 $Resultado -LblCarregando $lblCarregandoSis }.GetNewClosure())
     $btnTransferidorInstseg.Add_Click({
         try {
-            $resultadoAcao = Invoke-AcaoAbrirTransferidorInstseg -AoAtualizarStatus { param($t) & $AoLog $t "Cyan" }.GetNewClosure()
+            $resultadoAcao = Invoke-AcaoAbrirTransferidorInstseg -IP $Resultado.IP -AoAtualizarStatus { param($t) & $AoLog $t "Cyan" }.GetNewClosure()
             if ($resultadoAcao.Sucesso) {
                 & $AoLog $resultadoAcao.Mensagem "Cyan"
             } else {

@@ -224,6 +224,7 @@ function Invoke-AcaoAbrirExecutavelExternoComCache {
     #>
     param(
         [Parameter(Mandatory)][string]$NomeArquivo,
+        [string]$Argumentos = "",
         [scriptblock]$AoAtualizarStatus = $null
     )
 
@@ -255,7 +256,7 @@ function Invoke-AcaoAbrirExecutavelExternoComCache {
     }
 
     try {
-        Invoke-ShellExecuteExterno -Caminho $caminhoLocal
+        Invoke-ShellExecuteExterno -Caminho $caminhoLocal -Argumentos $Argumentos
         return [PSCustomObject]@{ Sucesso = $true; Mensagem = "Abrindo $NomeArquivo..." }
     } catch {
         return [PSCustomObject]@{ Sucesso = $false; Mensagem = "Falha ao abrir $NomeArquivo`: $($_.Exception.Message)" }
@@ -268,8 +269,18 @@ function Invoke-AcaoAbrirContaSenhaLaps {
 }
 
 function Invoke-AcaoAbrirTransferidorInstseg {
-    param([scriptblock]$AoAtualizarStatus = $null)
-    Invoke-AcaoAbrirExecutavelExternoComCache -NomeArquivo 'TransferidorInstseg.exe' -AoAtualizarStatus $AoAtualizarStatus
+    <#
+        $IP (opcional) e passado como argumento posicional simples pro
+        TransferidorInstseg.exe - confirmado ao vivo (2026-08-24, via
+        automacao de UI/UIAutomationClient) que o programa aceita o IP
+        assim (`TransferidorInstseg.exe <ip>`, sem prefixo tipo --ip=) e
+        preenche sozinho o campo "Computador/IP" ja aberto.
+    #>
+    param(
+        [string]$IP = "",
+        [scriptblock]$AoAtualizarStatus = $null
+    )
+    Invoke-AcaoAbrirExecutavelExternoComCache -NomeArquivo 'TransferidorInstseg.exe' -Argumentos $IP -AoAtualizarStatus $AoAtualizarStatus
 }
 
 # ============================================================
