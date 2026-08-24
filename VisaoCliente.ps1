@@ -89,6 +89,7 @@ $script:Estado = @{
     Zonas                        = @()     # preenchido via Get-ZonasRemoto (.Zonas) - ver VisaoJanelaAdmin.psm1 (Gerenciar Zonas)
     GruposSistemas               = @{}     # preenchido via Get-GruposSistemasRemoto (.GruposSistemas) - ver VisaoJanelaAdmin.psm1 (Usuarios da ZE)
     LinhaContextoAtual           = $null   # linha do grid selecionada pro menu de contexto (setada no MouseDown, lida no Add_Opening - dois closures separados)
+    TickVarreduraEmAndamento     = $false  # guarda de reentrancia do timer de polling - ver comentario no Add_Tick
 }
 
 function ConvertTo-HashtableLocal {
@@ -596,6 +597,27 @@ $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 750
 
 $timer.Add_Tick({
+    # Guarda de reentrancia: desde que Invoke-ComandoRemoto passou a usar
+    # DoEvents (nao trava mais a UI durante uma chamada remota), uma
+    # mensagem WM_TIMER que ja estava na fila do Windows ANTES de
+    # $timer.Stop() ainda pode ser entregue - inclusive DEPOIS do "not
+    # EmAndamento" abaixo, enquanto Invoke-BuscarDesligadosOcs (que
+    # tambem faz chamadas remotas) ainda esta rodando como continuacao
+    # deste MESMO tick. Sem essa guarda, esse tick "fantasma" tentava
+    # uma SEGUNDA chamada remota concorrente com a que ja estava em voo
+    # e quebrava com "pipeline ja esta em execucao" (achado ao vivo,
+    # 2026-08-24: varredura + relatorio de campanha + iniciar varredura
+    # de outra zona logo em seguida).
+    if ($script:Estado.TickVarreduraEmAndamento) { return }
+    $script:Estado.TickVarreduraEmAndamento = $true
+    try {
+        Invoke-TickVarredura
+    } finally {
+        $script:Estado.TickVarreduraEmAndamento = $false
+    }
+}.GetNewClosure())
+
+function Invoke-TickVarredura {
     try {
         $resposta = Get-VarreduraNovosResultadosRemoto -IdSessaoEsperado $script:Estado.IdSessaoVarredura
     } catch {
@@ -666,7 +688,7 @@ $timer.Add_Tick({
         $btnCancelar.Enabled = $false
         $numZona.Enabled = $true
     }
-}.GetNewClosure())
+}
 
 # ============================================================
 # EVENTO: Iniciar Varredura

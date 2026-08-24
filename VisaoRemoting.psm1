@@ -240,6 +240,34 @@ function Invoke-ComandoRemoto {
         consistente) se nao conseguir nem depois de tentar reconectar -
         pensado pra virar uma unica mensagem de erro exibida no cliente,
         em vez de cada tela inventar o proprio texto.
+
+        Bloqueia chamadas concorrentes ($script:SessaoOcupada) - achado
+        ao vivo (2026-08-24), no dia seguinte a Invoke-ComandoRemotoJob
+        passar a usar DoEvents (ver comentario dela): como isso bombeia
+        a fila de mensagens do Windows enquanto espera, um handler
+        DIFERENTE (ex: o tick do Timer da varredura - mesmo depois de
+        $timer.Stop(), uma mensagem WM_TIMER que ja estava na fila antes
+        do Stop() ainda pode ser entregue) podia disparar uma SEGUNDA
+        chamada remota enquanto a primeira ainda estava em voo. Um unico
+        Runspace/sessao so processa 1 pipeline por vez - a segunda
+        chamada quebrava com "O pipeline nao foi executado porque um
+        pipeline ja esta em execucao" (reproduzido ao vivo: varredura +
+        relatorio de campanha + iniciar varredura de outra zona logo em
+        seguida).
+
+        A causa raiz (tick fantasma do Timer) foi corrigida na origem -
+        ver guarda de reentrancia no handler do Timer em VisaoCliente.ps1.
+        Aqui fica so uma rede de seguranca: uma segunda chamada concorrente
+        (de qualquer origem, nao so o Timer) e REJEITADA na hora com uma
+        excecao clara, em vez de ESPERAR - tentar esperar bombeando
+        DoEvents aqui dentro criava um DEADLOCK real (testado ao vivo):
+        se a segunda chamada e disparada de DENTRO de um handler que a
+        primeira chamada acionou via seu proprio DoEvents (like o Timer
+        tick), a segunda fica empilhada DENTRO do mesmo DoEvents da
+        primeira - a primeira nunca volta a rodar pra perceber que seu
+        job terminou, porque isso so aconteceria depois que a segunda
+        (que esta esperando ela) retornasse. Rejeitar na hora evita esse
+        ciclo por completo.
     #>
     param(
         [Parameter(Mandatory)]
@@ -247,27 +275,36 @@ function Invoke-ComandoRemoto {
         [object[]]$ArgumentList = @()
     )
 
-    if (-not $script:PSSessionServidor -or $script:PSSessionServidor.State -ne [System.Management.Automation.Runspaces.RunspaceState]::Opened) {
-        if (-not (Connect-ServidorVisao)) {
-            throw [System.InvalidOperationException]::new("Nao foi possivel conectar ao POLICY-SERVER. Verifique a rede/VPN e tente novamente.")
-        }
+    if ($script:SessaoOcupada) {
+        throw [System.InvalidOperationException]::new("Ja ha uma chamada remota em andamento - aguarde terminar e tente de novo.")
     }
-
+    $script:SessaoOcupada = $true
     try {
-        return Invoke-ComandoRemotoJob -Sessao $script:PSSessionServidor -ScriptBlock $ScriptBlock -ArgumentList $ArgumentList
-    } catch {
-        if ($script:PSSessionServidor -and $script:PSSessionServidor.State -eq [System.Management.Automation.Runspaces.RunspaceState]::Opened) {
-            throw
+        if (-not $script:PSSessionServidor -or $script:PSSessionServidor.State -ne [System.Management.Automation.Runspaces.RunspaceState]::Opened) {
+            if (-not (Connect-ServidorVisao)) {
+                throw [System.InvalidOperationException]::new("Nao foi possivel conectar ao POLICY-SERVER. Verifique a rede/VPN e tente novamente.")
+            }
         }
-        Registrar-LogConexao "Sessao perdida durante operacao remota: $($_.Exception.Message)"
-        if (-not (Connect-ServidorVisao)) {
-            throw [System.InvalidOperationException]::new("Conexao com o POLICY-SERVER perdida e nao foi possivel reconectar. Verifique a rede/VPN e tente novamente.")
-        }
+
         try {
             return Invoke-ComandoRemotoJob -Sessao $script:PSSessionServidor -ScriptBlock $ScriptBlock -ArgumentList $ArgumentList
         } catch {
-            throw [System.InvalidOperationException]::new("Conexao com o POLICY-SERVER foi perdida durante a operacao. Se estava no meio de uma varredura, ela ficou incompleta - inicie de novo.")
+            if ($script:PSSessionServidor -and $script:PSSessionServidor.State -eq [System.Management.Automation.Runspaces.RunspaceState]::Opened) {
+                throw
+            }
+            Registrar-LogConexao "Sessao perdida durante operacao remota: $($_.Exception.Message)"
+            if (-not (Connect-ServidorVisao)) {
+                throw [System.InvalidOperationException]::new("Conexao com o POLICY-SERVER perdida e nao foi possivel reconectar. Verifique a rede/VPN e tente novamente.")
+            }
+            try {
+                return Invoke-ComandoRemotoJob -Sessao $script:PSSessionServidor -ScriptBlock $ScriptBlock -ArgumentList $ArgumentList
+            } catch {
+                throw [System.InvalidOperationException]::new("Conexao com o POLICY-SERVER foi perdida durante a operacao. Se estava no meio de uma varredura, ela ficou incompleta - inicie de novo.")
+            }
         }
+    }
+    finally {
+        $script:SessaoOcupada = $false
     }
 }
 
