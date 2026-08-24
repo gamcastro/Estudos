@@ -22,14 +22,17 @@
       (VisaoRemoting.psm1) - foi justamente um relato de travamento no
       "Relatorio de Campanhas" que motivou essa migracao.
 
-    As ESCRITAS (enviar resultado de campanha, atualizar zona, enviar
-    CVC ao Drive) CONTINUAM centralizadas no POLICY-SERVER de proposito -
-    usam um token de autenticacao de verdade (Google Apps Script Web
-    App) que hoje so existe no servidor; descentralizar isso exigiria
-    distribuir esse token pra cada estacao, uma decisao de seguranca que
-    nao foi tomada ainda. Ver Send-AtualizacaoZonaRemoto/
-    Send-ResultadoCampanhaZonaRemoto/Send-ArquivoParaGoogleDriveRemoto em
-    VisaoRemoting.psm1 - ficam como estao.
+    ATUALIZACAO (2026-08-24, decisao explicita do usuario): o ENVIO de
+    resultado de campanha (Send-ResultadoCampanhaZonaRemoto) TAMBEM foi
+    migrado pra ca, e por isso o token do Apps Script (RESULTADOS-
+    CAMPANHAS) passou a ser distribuido dentro deste modulo - decisao
+    consciente do usuario apos eu explicar o risco (o token fica em texto
+    puro em todas as estacoes, qualquer um com acesso a maquina do
+    tecnico ou ao pacote no PSRepo consegue le-lo) porque os dados de
+    RESULTADOS-CAMPANHAS nao sao sensiveis. Send-AtualizacaoZonaRemoto/
+    Send-ArquivoParaGoogleDriveRemoto (zonas/CVC) CONTINUAM centralizadas
+    no POLICY-SERVER - essa decisao foi so pra campanhas, nao foi
+    generalizada pras outras escritas. Ver VisaoRemoting.psm1.
 
     Mesma assinatura/formato de retorno das funcoes antigas (que viviam
     em VisaoRemoting.psm1) de proposito - substituicao "encaixa no
@@ -64,6 +67,15 @@ $script:UrlPlanilhaZonasCSV = "https://docs.google.com/spreadsheets/d/1_2aZhFgpl
 $script:UrlPlanilhaGruposSistemasCSV = "https://docs.google.com/spreadsheets/d/1_2aZhFgplRqCdPVV_lq4XJT9wgqkfbZpEFZRu1Zu9_I/export?format=csv&gid=634558318"
 $script:UrlPlanilhaCampanhasCSV = "https://docs.google.com/spreadsheets/d/1_2aZhFgplRqCdPVV_lq4XJT9wgqkfbZpEFZRu1Zu9_I/gviz/tq?tqx=out:csv&sheet=CAMPANHAS"
 $script:UrlPlanilhaResultadosCampanhasCSV = "https://docs.google.com/spreadsheets/d/1_2aZhFgplRqCdPVV_lq4XJT9wgqkfbZpEFZRu1Zu9_I/gviz/tq?tqx=out:csv&sheet=RESULTADOS-CAMPANHAS"
+
+# Token do Apps Script (RESULTADOS-CAMPANHAS) distribuido de proposito
+# neste modulo - decisao explicita do usuario em 2026-08-24, dado que os
+# dados desta aba nao sao sensiveis. NAO usar este mesmo padrao pra
+# atualizacao de Zonas nem envio de CVC (Send-AtualizacaoZonaRemoto/
+# Send-ArquivoParaGoogleDriveRemoto) sem uma decisao explicita igual -
+# essas continuam centralizadas no POLICY-SERVER, ver VisaoRemoting.psm1.
+$script:UrlWebAppCampanhas = "https://script.google.com/macros/s/AKfycbxcI7FfmnoWEjuOnO32WkaLwg-AiFxCSAXvdfiET9e29mrYvPx5QHRTIeRdU7yrGT3Z4A/exec"
+$script:TokenWebAppCampanhas = "Super@dmin2025"
 
 $script:PastaCachePlanilhas = Join-Path $env:LOCALAPPDATA 'SuporteTI\Visao\CachePlanilhas'
 $script:ArquivoZonasCache = Join-Path $script:PastaCachePlanilhas 'zonas_cache.csv'
@@ -354,4 +366,74 @@ function Test-RedeEhCompartilhadaRemoto {
     return $false
 }
 
-Export-ModuleMember -Function Get-ZonasRemoto, Get-GruposSistemasRemoto, Get-CampanhasRemoto, Get-ResultadosCampanhasRemoto, Resolve-RedeDaZonaRemoto, Test-RedeEhCompartilhadaRemoto
+function Send-ResultadoCampanhaZonaRemoto {
+    <#
+        Manda o resultado JA CALCULADO de uma verificacao de campanha por
+        HTTP POST direto ao Web App do Apps Script, que acrescenta uma
+        linha na aba RESULTADOS-CAMPANHAS da planilha - portada quase sem
+        mudanca de VisaoServidor.ps1 (Send-ResultadoCampanhaZona), so
+        trocando Get-ConfigCampanhasWebApp (le de um arquivo local no
+        servidor) pelas constantes $script:UrlWebAppCampanhas/
+        $script:TokenWebAppCampanhas deste modulo, e a verificacao de
+        "gravou mesmo assim apesar do erro HTTP" reaproveitando
+        Get-ResultadosCampanhasRemoto (a leitura, ja migrada acima) em
+        vez de chamar a funcao equivalente do servidor.
+
+        Mesmo nome/formato de retorno da versao antiga de proposito -
+        nenhum lugar que ja chamava esta funcao precisou mudar.
+    #>
+    param(
+        [Parameter(Mandatory)][int]$Zona,
+        [Parameter(Mandatory)][string]$NomeCampanha,
+        [Parameter(Mandatory)][int]$Total,
+        [Parameter(Mandatory)][int]$Aptas,
+        [string]$MaquinasAptas = "",
+        [string]$Tecnico = $env:USERNAME,
+        [string]$Sede = ""
+    )
+
+    $sedeTxt = $Sede
+    $zonaPad = "{0:D3}" -f $Zona
+
+    try {
+        $corpo = @{
+            token         = $script:TokenWebAppCampanhas
+            zona          = $zonaPad
+            sede          = $sedeTxt
+            campanha      = $NomeCampanha
+            total         = $Total
+            aptas         = $Aptas
+            tecnico       = $Tecnico
+            maquinasAptas = $MaquinasAptas
+        } | ConvertTo-Json -Compress
+        # 60s (nao 20s) de proposito - a PRIMEIRA chamada a um Web App
+        # recem-implantado (ou muito tempo ocioso) pode demorar bem mais
+        # que o normal pro Google "esquentar" o ambiente de execucao -
+        # ja confirmado ao vivo nesta ferramenta.
+        $corpoBytesUtf8 = [System.Text.Encoding]::UTF8.GetBytes($corpo)
+        $resp = Invoke-RestMethod -Uri $script:UrlWebAppCampanhas -Method Post -Body $corpoBytesUtf8 -ContentType "application/json; charset=utf-8" -TimeoutSec 60
+    } catch {
+        # O Web App do Apps Script as vezes devolve erro HTTP MESMO
+        # quando o doPost ja gravou certinho - confere se gravou mesmo
+        # assim antes de considerar falha de verdade.
+        $todosVerificacao = Get-ResultadosCampanhasRemoto
+        $gravouMesmoAssim = $null
+        if ($todosVerificacao.Ok) {
+            $gravouMesmoAssim = $todosVerificacao.Dados | Where-Object {
+                $_.Zona -eq $zonaPad -and $_.Campanha -eq $NomeCampanha -and $_.Total -eq $Total -and $_.Aptas -eq $Aptas -and $_.Tecnico -eq $Tecnico
+            } | Select-Object -Last 1
+        }
+        if ($gravouMesmoAssim) {
+            return [PSCustomObject]@{ Ok = $true; Mensagem = "Resultado enviado com sucesso (o aviso de erro foi um falso alarme - conferido na planilha)." }
+        }
+        return [PSCustomObject]@{ Ok = $false; Mensagem = "Falha ao enviar resultado da campanha '$NomeCampanha' (zona $zonaPad): $($_.Exception.Message)" }
+    }
+
+    if (-not $resp.ok) {
+        return [PSCustomObject]@{ Ok = $false; Mensagem = "Planilha recusou o resultado da campanha '$NomeCampanha' (zona $zonaPad): $($resp.erro)" }
+    }
+
+    return [PSCustomObject]@{ Ok = $true; Mensagem = "Resultado da campanha '$NomeCampanha' (zona $zonaPad - $sedeTxt, $Aptas de $Total aptas) enviado para a planilha." }
+}
+
+Export-ModuleMember -Function Get-ZonasRemoto, Get-GruposSistemasRemoto, Get-CampanhasRemoto, Get-ResultadosCampanhasRemoto, Resolve-RedeDaZonaRemoto, Test-RedeEhCompartilhadaRemoto, Send-ResultadoCampanhaZonaRemoto

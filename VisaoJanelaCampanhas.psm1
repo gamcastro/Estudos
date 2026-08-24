@@ -447,7 +447,7 @@ function Import-ResultadosCampanhasNaJanela {
         # aparecer outro resultado de teste parecido no futuro (enviado
         # pra uma campanha que nao esta na aba CAMPANHAS), adicionar o
         # nome aqui.
-        $campanhasDeTeste = @('TESTE-MIGRACAO-FASE7', '__TESTE_DIAGNOSTICO_SEDE__')
+        $campanhasDeTeste = @('TESTE-MIGRACAO-FASE7', '__TESTE_DIAGNOSTICO_SEDE__', 'TESTE-MIGRACAO-OCS-CAMPANHAS')
         $resp.Dados = @($resp.Dados | Where-Object { $_.Campanha -notin $campanhasDeTeste })
     }
     $GridRel.Tag = $resp

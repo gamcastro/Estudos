@@ -527,6 +527,12 @@ function Get-StatusPacoteRemoto {
 # server-side) - cada wrapper so encaminha pra funcao equivalente do
 # VisaoServidor.ps1, que ja devolve um PSCustomObject simples
 # {Ok; Mensagem} (nao-array, atravessa sem contorno JSON).
+#
+# Send-ResultadoCampanhaZonaRemoto NAO vive mais aqui - migrada pra
+# VisaoPlanilhas.psm1 em 2026-08-24 (decisao explicita do usuario:
+# RESULTADOS-CAMPANHAS nao e sensivel, token distribuido no pacote do
+# modulo). Send-AtualizacaoZonaRemoto/Send-ArquivoParaGoogleDriveRemoto
+# (zonas/CVC) CONTINUAM aqui - essa decisao foi so pra campanhas.
 # ============================================================
 function Send-AtualizacaoZonaRemoto {
     param(
@@ -535,19 +541,6 @@ function Send-AtualizacaoZonaRemoto {
         [string]$Observacao = ""
     )
     Invoke-ComandoRemoto -ScriptBlock { param($z, $s, $o) Send-AtualizacaoZonaViaAppsScript -Zona $z -Substituta $s -Observacao $o } -ArgumentList @($Zona, $Substituta, $Observacao)
-}
-
-function Send-ResultadoCampanhaZonaRemoto {
-    param(
-        [Parameter(Mandatory)][int]$Zona,
-        [Parameter(Mandatory)][string]$NomeCampanha,
-        [Parameter(Mandatory)][int]$Total,
-        [Parameter(Mandatory)][int]$Aptas,
-        [string]$MaquinasAptas = "",
-        [string]$Tecnico = $env:USERNAME,
-        [string]$Sede = ""
-    )
-    Invoke-ComandoRemoto -ScriptBlock { param($z, $c, $t, $a, $m, $tec, $s) Send-ResultadoCampanhaZona -Zona $z -NomeCampanha $c -Total $t -Aptas $a -MaquinasAptas $m -Tecnico $tec -Sede $s } -ArgumentList @($Zona, $NomeCampanha, $Total, $Aptas, $MaquinasAptas, $Tecnico, $Sede)
 }
 
 function Send-ArquivoParaGoogleDriveRemoto {
@@ -568,27 +561,15 @@ function Send-ArquivoParaGoogleDriveRemoto {
 }
 
 # ============================================================
-# FASE B: maquinas desligadas via OCS + Wake-on-LAN - request/resposta
-# unico, sem polling.
+# FASE B: Wake-on-LAN - request/resposta unico, sem polling.
+#
+# Get-MaquinasDesligadasOcsRemoto NAO vive mais aqui - migrada pra
+# VisaoOcs.psm1 em 2026-08-24 (chamada HTTP sem autenticacao, tecnico
+# confirmado na mesma rede do servidor OCS - nao precisa mais do
+# POLICY-SERVER de passagem). Invoke-LigarWolRemoto CONTINUA aqui - WoL
+# manda um pacote de broadcast direcionado, mesma categoria da
+# varredura, fica no servidor de proposito.
 # ============================================================
-function Get-MaquinasDesligadasOcsRemoto {
-    <#
-        $ResultadosOnline vai como ARGUMENTO de entrada (nao retorno) -
-        confirmado ao vivo que array de PSCustomObject como parametro de
-        Invoke-Command atravessa sem o contorno JSON (o bug conhecido e
-        so em VALOR DE RETORNO). Ja a resposta do servidor (Correcoes/
-        Desligadas) usa o contorno JSON de sempre, por ser retorno.
-    #>
-    param(
-        [Parameter(Mandatory)][int]$Zona,
-        [bool]$RedeCompartilhada = $false,
-        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$ResultadosOnline,
-        [string]$PrefixoRede = ""
-    )
-    $json = Invoke-ComandoRemoto -ScriptBlock { param($z, $rc, $r, $p) Get-MaquinasDesligadasOcs -Zona $z -RedeCompartilhada $rc -ResultadosOnline $r -PrefixoRede $p } -ArgumentList @($Zona, $RedeCompartilhada, $ResultadosOnline, $PrefixoRede)
-    return ($json | ConvertFrom-Json)
-}
-
 function Invoke-LigarWolRemoto {
     param(
         [Parameter(Mandatory)][int]$HardwareId,
@@ -643,7 +624,7 @@ function Set-ConfigEnvioDriveRemoto {
     Invoke-ComandoRemoto -ScriptBlock { param($u, $t) Set-ConfigEnvioDrive -UrlWebApp $u -Token $t } -ArgumentList @($UrlWebApp, $Token)
 }
 
-Export-ModuleMember -Function Connect-ServidorVisao, Disconnect-ServidorVisao, Invoke-ComandoRemoto, Get-IdSessaoAtualVisao, Start-VarreduraRemota, Get-VarreduraNovosResultadosRemoto, Get-VersoesRemoto, Get-SistemasEleitoraisExtraRemoto, Start-BaixarPacoteRemoto, Get-StatusPacoteRemoto, Send-AtualizacaoZonaRemoto, Send-ResultadoCampanhaZonaRemoto, Send-ArquivoParaGoogleDriveRemoto, Get-MaquinasDesligadasOcsRemoto, Invoke-LigarWolRemoto, Get-ConfigVersoesRemoto, Set-ConfigVersoesRemoto, Get-ConfigZonasWebAppRemoto, Set-ConfigZonasWebAppRemoto, Get-ConfigCampanhasWebAppRemoto, Set-ConfigCampanhasWebAppRemoto, Get-ConfigEnvioDriveRemoto, Set-ConfigEnvioDriveRemoto
+Export-ModuleMember -Function Connect-ServidorVisao, Disconnect-ServidorVisao, Invoke-ComandoRemoto, Get-IdSessaoAtualVisao, Start-VarreduraRemota, Get-VarreduraNovosResultadosRemoto, Get-VersoesRemoto, Get-SistemasEleitoraisExtraRemoto, Start-BaixarPacoteRemoto, Get-StatusPacoteRemoto, Send-AtualizacaoZonaRemoto, Send-ArquivoParaGoogleDriveRemoto, Invoke-LigarWolRemoto, Get-ConfigVersoesRemoto, Set-ConfigVersoesRemoto, Get-ConfigZonasWebAppRemoto, Set-ConfigZonasWebAppRemoto, Get-ConfigCampanhasWebAppRemoto, Set-ConfigCampanhasWebAppRemoto, Get-ConfigEnvioDriveRemoto, Set-ConfigEnvioDriveRemoto
 
 # NOTA: as consultas ao AD (Usuarios da ZE, status do Instalador) NAO
 # passam por aqui - ver VisaoAD.psm1. Nao sao trafego de varredura, e

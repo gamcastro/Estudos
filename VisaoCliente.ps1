@@ -25,6 +25,7 @@ Add-Type -AssemblyName Microsoft.VisualBasic
 
 Import-Module (Join-Path $PSScriptRoot "VisaoRemoting.psm1") -Force
 Import-Module (Join-Path $PSScriptRoot "VisaoPlanilhas.psm1") -Force
+Import-Module (Join-Path $PSScriptRoot "VisaoOcs.psm1") -Force
 Import-Module (Join-Path $PSScriptRoot "VisaoAD.psm1") -Force
 Import-Module (Join-Path $PSScriptRoot "VisaoPacotes.psm1") -Force
 Import-Module (Join-Path $PSScriptRoot "VisaoAcoesLocais.psm1") -Force
@@ -523,7 +524,7 @@ function Invoke-BuscarDesligadosOcs {
         # ja carregado) e manda pronto pro servidor, que nao tem mais como
         # resolver isso sozinho (ver comentario em Get-MaquinasDesligadasOcs).
         $prefixoRedeAtual = (Resolve-RedeDaZonaRemoto -Zona $script:Estado.ZonaAtual -Zonas $script:Estado.Zonas).Prefixo
-        $resposta = Get-MaquinasDesligadasOcsRemoto -Zona $script:Estado.ZonaAtual -RedeCompartilhada $script:Estado.RedeCompartilhada -ResultadosOnline $online -PrefixoRede $prefixoRedeAtual
+        $resposta = Get-MaquinasDesligadasOcsRemoto -Zona $script:Estado.ZonaAtual -RedeCompartilhada $script:Estado.RedeCompartilhada -ResultadosOnline $online -PrefixoRede $prefixoRedeAtual -SistemasEleitoraisExtra $script:Estado.SistemasEleitoraisExtra
     } catch {
         Add-Log "[AVISO] Falha ao consultar o OCS Inventory: $($_.Exception.Message)" "Yellow"
         return
