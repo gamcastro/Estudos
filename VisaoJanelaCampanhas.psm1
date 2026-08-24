@@ -425,6 +425,17 @@ function Import-ResultadosCampanhasNaJanela {
     } catch {
         $resp = [PSCustomObject]@{ Ok = $false; Erro = $_.Exception.Message; Dados = @() }
     }
+
+    if ($resp.Ok) {
+        # Campanhas de teste enviadas durante o desenvolvimento/migracao
+        # desta ferramenta - ficaram gravadas na planilha real junto com
+        # os resultados de verdade dos tecnicos. Filtradas aqui (nao
+        # apagadas da planilha) pra nao aparecerem em lugar nenhum do
+        # relatorio. Se aparecer campanha de teste nova no futuro,
+        # adicionar o nome aqui.
+        $campanhasDeTeste = @('Simulado TDTOT 4', 'TESTE-MIGRACAO-FASE7')
+        $resp.Dados = @($resp.Dados | Where-Object { $_.Campanha -notin $campanhasDeTeste })
+    }
     $GridRel.Tag = $resp
 
     if (-not $resp.Ok) {
