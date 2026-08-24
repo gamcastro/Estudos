@@ -359,7 +359,7 @@ function Show-JanelaVerificarCampanhaZona {
 
         $dlg.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
         try {
-            $resp = Send-ResultadoCampanhaZonaRemoto -Zona $Zona -NomeCampanha $campanhaSel.Nome -Total $totalEnvio -Aptas $aptasEnvio -MaquinasAptas $maquinasAptasTxt
+            $resp = Send-ResultadoCampanhaZonaRemoto -Zona $Zona -NomeCampanha $campanhaSel.Nome -Total $totalEnvio -Aptas $aptasEnvio -MaquinasAptas $maquinasAptasTxt -Sede $Sede
             if ($resp.Ok) {
                 & $AoLog $resp.Mensagem "Cyan"
                 [System.Windows.Forms.MessageBox]::Show("Resultado enviado com sucesso.", "Enviar Resultado", "OK", "Information") | Out-Null
@@ -447,7 +447,7 @@ function Import-ResultadosCampanhasNaJanela {
         # aparecer outro resultado de teste parecido no futuro (enviado
         # pra uma campanha que nao esta na aba CAMPANHAS), adicionar o
         # nome aqui.
-        $campanhasDeTeste = @('TESTE-MIGRACAO-FASE7')
+        $campanhasDeTeste = @('TESTE-MIGRACAO-FASE7', '__TESTE_DIAGNOSTICO_SEDE__')
         $resp.Dados = @($resp.Dados | Where-Object { $_.Campanha -notin $campanhasDeTeste })
     }
     $GridRel.Tag = $resp

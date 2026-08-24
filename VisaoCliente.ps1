@@ -519,7 +519,11 @@ function Invoke-BuscarDesligadosOcs {
     $grid.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
     try {
         $online = @($script:Resultados | Where-Object { $_.Online })
-        $resposta = Get-MaquinasDesligadasOcsRemoto -Zona $script:Estado.ZonaAtual -RedeCompartilhada $script:Estado.RedeCompartilhada -ResultadosOnline $online
+        # Resolve local (sem tocar rede - so opera sobre $script:Estado.Zonas
+        # ja carregado) e manda pronto pro servidor, que nao tem mais como
+        # resolver isso sozinho (ver comentario em Get-MaquinasDesligadasOcs).
+        $prefixoRedeAtual = (Resolve-RedeDaZonaRemoto -Zona $script:Estado.ZonaAtual -Zonas $script:Estado.Zonas).Prefixo
+        $resposta = Get-MaquinasDesligadasOcsRemoto -Zona $script:Estado.ZonaAtual -RedeCompartilhada $script:Estado.RedeCompartilhada -ResultadosOnline $online -PrefixoRede $prefixoRedeAtual
     } catch {
         Add-Log "[AVISO] Falha ao consultar o OCS Inventory: $($_.Exception.Message)" "Yellow"
         return

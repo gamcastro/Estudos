@@ -544,9 +544,10 @@ function Send-ResultadoCampanhaZonaRemoto {
         [Parameter(Mandatory)][int]$Total,
         [Parameter(Mandatory)][int]$Aptas,
         [string]$MaquinasAptas = "",
-        [string]$Tecnico = $env:USERNAME
+        [string]$Tecnico = $env:USERNAME,
+        [string]$Sede = ""
     )
-    Invoke-ComandoRemoto -ScriptBlock { param($z, $c, $t, $a, $m, $tec) Send-ResultadoCampanhaZona -Zona $z -NomeCampanha $c -Total $t -Aptas $a -MaquinasAptas $m -Tecnico $tec } -ArgumentList @($Zona, $NomeCampanha, $Total, $Aptas, $MaquinasAptas, $Tecnico)
+    Invoke-ComandoRemoto -ScriptBlock { param($z, $c, $t, $a, $m, $tec, $s) Send-ResultadoCampanhaZona -Zona $z -NomeCampanha $c -Total $t -Aptas $a -MaquinasAptas $m -Tecnico $tec -Sede $s } -ArgumentList @($Zona, $NomeCampanha, $Total, $Aptas, $MaquinasAptas, $Tecnico, $Sede)
 }
 
 function Send-ArquivoParaGoogleDriveRemoto {
@@ -581,9 +582,10 @@ function Get-MaquinasDesligadasOcsRemoto {
     param(
         [Parameter(Mandatory)][int]$Zona,
         [bool]$RedeCompartilhada = $false,
-        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$ResultadosOnline
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$ResultadosOnline,
+        [string]$PrefixoRede = ""
     )
-    $json = Invoke-ComandoRemoto -ScriptBlock { param($z, $rc, $r) Get-MaquinasDesligadasOcs -Zona $z -RedeCompartilhada $rc -ResultadosOnline $r } -ArgumentList @($Zona, $RedeCompartilhada, $ResultadosOnline)
+    $json = Invoke-ComandoRemoto -ScriptBlock { param($z, $rc, $r, $p) Get-MaquinasDesligadasOcs -Zona $z -RedeCompartilhada $rc -ResultadosOnline $r -PrefixoRede $p } -ArgumentList @($Zona, $RedeCompartilhada, $ResultadosOnline, $PrefixoRede)
     return ($json | ConvertFrom-Json)
 }
 

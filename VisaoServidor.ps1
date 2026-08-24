@@ -1498,7 +1498,12 @@ function Send-ResultadoCampanhaZona {
         [Parameter(Mandatory)][int]$Total,
         [Parameter(Mandatory)][int]$Aptas,
         [string]$MaquinasAptas = "",
-        [Parameter(Mandatory)][string]$Tecnico
+        [Parameter(Mandatory)][string]$Tecnico,
+        # Sede JA RESOLVIDA pelo cliente - ver comentario identico em
+        # Get-MaquinasDesligadasOcs sobre $script:TabelaZonas ficar vazio
+        # neste servidor desde 2026-08-24 (sem isto, $sedeTxt sempre
+        # vinha vazio, gravando a coluna Sede em branco na planilha).
+        [string]$Sede = ""
     )
 
     $cfg = Get-ConfigCampanhasWebApp
@@ -1506,8 +1511,7 @@ function Send-ResultadoCampanhaZona {
         return [PSCustomObject]@{ Ok = $false; Mensagem = "Envio de resultado de campanha ainda nao configurado neste servidor ($script:ArquivoConfigCampanhasWebApp)." }
     }
 
-    $resolucaoZona = Resolve-RedeDaZona -Zona $Zona
-    $sedeTxt = if ($resolucaoZona.Sede) { $resolucaoZona.Sede } else { "" }
+    $sedeTxt = $Sede
     $zonaPad = "{0:D3}" -f $Zona
 
     try {
@@ -1744,14 +1748,22 @@ function Get-MaquinasDesligadasOcs {
         [int]$Zona,
         [bool]$RedeCompartilhada = $false,
         [Parameter(Mandatory)]
-        [object[]]$ResultadosOnline
+        [object[]]$ResultadosOnline,
+        # Prefixo JA RESOLVIDO pelo cliente (Resolve-RedeDaZonaRemoto, que
+        # desde 2026-08-24 roda no cliente com a tabela de zonas de
+        # verdade) - NAO resolver de novo aqui com Resolve-RedeDaZona/
+        # $script:TabelaZonas, que fica vazio neste servidor desde que
+        # Import-TabelaZonas parou de ser chamado por aqui (achado ao
+        # vivo: Zona 67 usa uma rede Substituta - 10.198.9.x - diferente
+        # do calculo padrao 10.198.67.x; sem este parametro, a busca no
+        # OCS procurava no prefixo ERRADO e sempre devolvia 0 resultados).
+        [string]$PrefixoRede = ""
     )
 
     $zonaPad = "{0:D3}" -f $Zona
     $padroes = @("ZMA$zonaPad", "CMA$zonaPad", "ZE-$zonaPad", "ZE$zonaPad")
-    $resolucaoAtual = Resolve-RedeDaZona -Zona $Zona
 
-    $comps = Get-OcsComputadoresPorIp -PrefixoRede $resolucaoAtual.Prefixo
+    $comps = Get-OcsComputadoresPorIp -PrefixoRede $PrefixoRede
 
     # Corrige o Hostname (e Modelo/VersaoSis/sistemas extra, se ainda "-")
     # de quem respondeu a varredura mas ficou sem nome resolvido - cruza
