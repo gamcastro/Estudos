@@ -148,6 +148,14 @@ function Show-JanelaSistemasEleitorais {
     $btnAtualizarSis.Anchor = "Top,Left"
     $painelRodape.Controls.Add($btnAtualizarSis)
 
+    $btnTransferidorInstseg = New-Object System.Windows.Forms.Button
+    $btnTransferidorInstseg.Text = "Transferidor Instseg"
+    $btnTransferidorInstseg.Location = New-Object System.Drawing.Point(162, 60)
+    $btnTransferidorInstseg.Width = 150
+    $btnTransferidorInstseg.Height = 28
+    $btnTransferidorInstseg.Anchor = "Top,Left"
+    $painelRodape.Controls.Add($btnTransferidorInstseg)
+
     $btnFecharSis = New-Object System.Windows.Forms.Button
     $btnFecharSis.Text = "Fechar"
     $btnFecharSis.Location = New-Object System.Drawing.Point(1170, 60)
@@ -332,6 +340,20 @@ function Show-JanelaSistemasEleitorais {
     # senao a janela nao aparece na tela ate a busca de rede terminar.
     $dlg.Add_Shown({ & $recarregarPacotesSis -Grid $gridSis -Itens $itens -Resultado2 $Resultado -LblCarregando $lblCarregandoSis }.GetNewClosure())
     $btnAtualizarSis.Add_Click({ & $recarregarPacotesSis -Grid $gridSis -Itens $itens -Resultado2 $Resultado -LblCarregando $lblCarregandoSis }.GetNewClosure())
+    $btnTransferidorInstseg.Add_Click({
+        try {
+            $resultadoAcao = Invoke-AcaoAbrirTransferidorInstseg -AoAtualizarStatus { param($t) & $AoLog $t "Cyan" }.GetNewClosure()
+            if ($resultadoAcao.Sucesso) {
+                & $AoLog $resultadoAcao.Mensagem "Cyan"
+            } else {
+                & $AoLog "[ERRO] $($resultadoAcao.Mensagem)" "OrangeRed"
+                [System.Windows.Forms.MessageBox]::Show($resultadoAcao.Mensagem, "Transferidor Instseg", "OK", "Error") | Out-Null
+            }
+        } catch {
+            & $AoLog "[ERRO] Falha ao abrir o Transferidor Instseg: $($_.Exception.Message)" "OrangeRed"
+            [System.Windows.Forms.MessageBox]::Show("Falha ao abrir o Transferidor Instseg:`r`n$($_.Exception.Message)", "Erro", "OK", "Error") | Out-Null
+        }
+    }.GetNewClosure())
 
     $gridSis.Add_CellContentClick({
         param($sender, $e)
