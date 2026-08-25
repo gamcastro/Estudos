@@ -233,7 +233,7 @@ function Invoke-AcaoAbrirExecutavelExternoComCache {
         return [PSCustomObject]@{ Sucesso = $false; Mensagem = "$NomeArquivo nao encontrado em '$caminhoOrigem' - verifique a rede/VPN." }
     }
 
-    $pastaCacheLocal = Join-Path $env:LOCALAPPDATA 'SuporteTI\Visao\Ferramentas'
+    $pastaCacheLocal = Join-Path $env:LOCALAPPDATA 'SuporteTI\VisaoHomolog\Ferramentas'
     if (-not (Test-Path -LiteralPath $pastaCacheLocal)) {
         New-Item -Path $pastaCacheLocal -ItemType Directory -Force | Out-Null
     }

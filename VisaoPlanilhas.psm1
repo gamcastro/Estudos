@@ -42,7 +42,7 @@
 
     Cache local POR ESTACAO (antes era compartilhado entre todos os
     tecnicos, guardado no POLICY-SERVER) em
-    %LOCALAPPDATA%\SuporteTI\Visao\CachePlanilhas\ - se a busca online
+    %LOCALAPPDATA%\SuporteTI\VisaoHomolog\CachePlanilhas\ - se a busca online
     falhar, usa a ultima copia baixada com sucesso NESTA maquina.
     Resultados de Campanhas continua SEM cache local, igual a versao
     anterior (e um historico que so faz sentido buscado fresco).
@@ -77,7 +77,7 @@ $script:UrlPlanilhaResultadosCampanhasCSV = "https://docs.google.com/spreadsheet
 $script:UrlWebAppCampanhas = "https://script.google.com/macros/s/AKfycbxcI7FfmnoWEjuOnO32WkaLwg-AiFxCSAXvdfiET9e29mrYvPx5QHRTIeRdU7yrGT3Z4A/exec"
 $script:TokenWebAppCampanhas = "Super@dmin2025"
 
-$script:PastaCachePlanilhas = Join-Path $env:LOCALAPPDATA 'SuporteTI\Visao\CachePlanilhas'
+$script:PastaCachePlanilhas = Join-Path $env:LOCALAPPDATA 'SuporteTI\VisaoHomolog\CachePlanilhas'
 $script:ArquivoZonasCache = Join-Path $script:PastaCachePlanilhas 'zonas_cache.csv'
 $script:ArquivoGruposSistemasCache = Join-Path $script:PastaCachePlanilhas 'grupos_sistemas_cache.csv'
 $script:ArquivoCampanhasCache = Join-Path $script:PastaCachePlanilhas 'campanhas_cache.csv'
