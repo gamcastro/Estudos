@@ -47,18 +47,40 @@ function Registrar-LogConexao {
         acontece, sem depender do tecnico "pegar no flagrante" e
         descrever o que viu. Guarda so as ultimas 200 linhas.
     #>
+    <#
+        Achado ao vivo (2026-08-25): o Set-Content abaixo pode falhar com
+        "O fluxo nao era legivel" (ArgumentException) quando duas
+        chamadas tentam ler/escrever este MESMO arquivo quase ao mesmo
+        tempo (ex: aviso periodico do polling da varredura + Connect-
+        ServidorVisao reconectando em paralelo) - e um erro NAO-
+        TERMINANTE por padrao no Set-Content, entao o "catch {}" simples
+        que existia antes NAO pegava (so aparecia em vermelho no console
+        e seguia em frente) - confirmado ao vivo que isso escapou sem
+        tratamento e derrubou a aplicacao inteira. -ErrorAction Stop em
+        ambos + ate 3 tentativas com pequena pausa resolve a colisao
+        pontual sem mudar o formato do log.
+    #>
     param([string]$Linha)
     try {
         if (-not (Test-Path -LiteralPath $script:PastaLogVisao)) {
             New-Item -Path $script:PastaLogVisao -ItemType Directory -Force | Out-Null
         }
         $linhaComData = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') - $Linha"
-        $linhasExistentes = @()
-        if (Test-Path -LiteralPath $script:ArquivoLogConexao) {
-            $linhasExistentes = @(Get-Content -LiteralPath $script:ArquivoLogConexao -ErrorAction SilentlyContinue)
+
+        for ($tentativa = 1; $tentativa -le 3; $tentativa++) {
+            try {
+                $linhasExistentes = @()
+                if (Test-Path -LiteralPath $script:ArquivoLogConexao) {
+                    $linhasExistentes = @(Get-Content -LiteralPath $script:ArquivoLogConexao -ErrorAction Stop)
+                }
+                $linhasFinais = @($linhasExistentes + $linhaComData) | Select-Object -Last 200
+                Set-Content -LiteralPath $script:ArquivoLogConexao -Value $linhasFinais -Encoding utf8 -Force -ErrorAction Stop
+                break
+            } catch {
+                if ($tentativa -eq 3) { throw }
+                Start-Sleep -Milliseconds 50
+            }
         }
-        $linhasFinais = @($linhasExistentes + $linhaComData) | Select-Object -Last 200
-        Set-Content -LiteralPath $script:ArquivoLogConexao -Value $linhasFinais -Encoding utf8 -Force
     } catch {}
 }
 
@@ -485,6 +507,135 @@ function Get-VarreduraNovosResultadosRemoto {
 }
 
 # ============================================================
+# Polling da varredura SEM DoEvents aninhado (2026-08-25) - ver
+# project_crash_winrm_reconexao na memoria do projeto.
+#
+# Get-VarreduraNovosResultadosRemoto (acima) e Invoke-ComandoRemoto
+# esperam SINCRONAMENTE bombeando Application.DoEvents() - correto pra
+# chamadas disparadas por um clique (uma vez so), mas quando chamado de
+# DENTRO do Timer.Tick da varredura (a cada 750ms), o proprio DoEvents()
+# pode despachar o PROXIMO tick do MESMO Timer enquanto o atual ainda
+# esta esperando - empilhando chamadas cada vez mais fundo durante uma
+# espera longa (15s-300s). Confirmado ao vivo como causa provavel de
+# dois crashes reais da aplicacao inteira (AccessViolationException
+# nativa em WSManReconnectShellCommandEx, e um erro de Set-Content
+# escapando do proprio catch - ver Registrar-LogConexao) - os dois SO
+# aconteceram com uma varredura em andamento, nunca em chamadas de
+# clique unico.
+#
+# As duas funcoes abaixo existem SO pro polling da varredura (chamadas
+# de Invoke-TickVarredura, VisaoCliente.ps1) - substituem Get-
+# VarreduraNovosResultadosRemoto NESSE caminho especifico. Diferente do
+# padrao normal (que devolve o resultado direto), aqui o TIMER e quem
+# dirige a espera: Start-...Async dispara e devolve NA HORA (sem
+# esperar nada), e cada tick seguinte chama Test-...Async so pra
+# CONFERIR se ja terminou - nenhuma das duas chama DoEvents() em
+# nenhum momento. Simplificacao deliberada em relacao a Invoke-
+# ComandoRemoto: se a chamada falhar, NAO tenta reconectar+repetir
+# sozinha (só devolve o erro) - quem chama (Invoke-TickVarredura) ja
+# trata isso reiniciando a varredura, e Get-VarreduraNovosResultadosRemoto
+# ja teria decidido "SessaoPerdida" no mesmo cenario mesmo com retry.
+# ============================================================
+function Start-VarreduraNovosResultadosRemotoAsync {
+    <#
+        Dispara a checagem de progresso (Invoke-Command -AsJob) e
+        devolve IMEDIATAMENTE - nao espera nada. Mesma checagem de
+        IdSessaoEsperado de Get-VarreduraNovosResultadosRemoto, feita
+        ANTES de disparar (se a sessao ja mudou, nem chama o servidor).
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [guid]$IdSessaoEsperado
+    )
+
+    if ($script:IdSessaoAtual -ne $IdSessaoEsperado) {
+        return [PSCustomObject]@{ SessaoPerdidaImediato = $true; Estado = $null; IdSessaoEsperado = $IdSessaoEsperado }
+    }
+
+    if ($script:SessaoOcupada) {
+        throw [System.InvalidOperationException]::new("Ja ha uma chamada remota em andamento - aguarde terminar e tente de novo.")
+    }
+    if (-not $script:PSSessionServidor -or $script:PSSessionServidor.State -ne [System.Management.Automation.Runspaces.RunspaceState]::Opened) {
+        if (-not (Connect-ServidorVisao)) {
+            throw [System.InvalidOperationException]::new("Nao foi possivel conectar ao POLICY-SERVER. Verifique a rede/VPN e tente novamente.")
+        }
+    }
+
+    $script:SessaoOcupada = $true
+    try {
+        $job = Invoke-Command -Session $script:PSSessionServidor -ScriptBlock { Get-VarreduraNovosResultados } -AsJob -ErrorAction Stop
+    } catch {
+        $script:SessaoOcupada = $false
+        throw
+    }
+
+    return [PSCustomObject]@{
+        SessaoPerdidaImediato = $false
+        IdSessaoEsperado      = $IdSessaoEsperado
+        Job                   = $job
+        Cronometro            = [System.Diagnostics.Stopwatch]::StartNew()
+        ProximoAvisoEspera    = 15
+    }
+}
+
+function Test-VarreduraNovosResultadosRemotoAsync {
+    <#
+        Chamada a cada tick do Timer - devolve na hora, sem esperar nada
+        (so olha o estado ATUAL do job). .Concluido indica se ja da pra
+        processar (sucesso ou erro definitivo); enquanto $false, quem
+        chama so tenta de novo no proximo tick.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        $EstadoAsync,
+        [scriptblock]$AoAtualizarStatus = $null
+    )
+
+    $job = $EstadoAsync.Job
+    $rodando = ($job.State -eq [System.Management.Automation.JobState]::Running -or $job.State -eq [System.Management.Automation.JobState]::NotStarted)
+
+    if ($rodando) {
+        $segundosDecorridos = $EstadoAsync.Cronometro.Elapsed.TotalSeconds
+        if ($segundosDecorridos -ge $EstadoAsync.ProximoAvisoEspera) {
+            $textoAviso = "Ainda aguardando resposta do servidor apos $([math]::Round($segundosDecorridos))s (WinRM pode estar tentando se reconectar sozinho em segundo plano)."
+            Registrar-LogConexao $textoAviso
+            if ($AoAtualizarStatus) { & $AoAtualizarStatus $textoAviso }
+            $EstadoAsync.ProximoAvisoEspera += 30
+        }
+
+        if ($segundosDecorridos -ge 300) {
+            Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+            Registrar-LogConexao "Chamada abortada apos 300s sem resposta - forcando sessao a ser considerada perdida."
+            Disconnect-ServidorVisao
+            $script:SessaoOcupada = $false
+            return [PSCustomObject]@{ Concluido = $true; Erro = [System.TimeoutException]::new("O POLICY-SERVER nao respondeu em 5 minutos - a conexao foi considerada perdida."); Resposta = $null }
+        }
+
+        return [PSCustomObject]@{ Concluido = $false; Erro = $null; Resposta = $null }
+    }
+
+    try {
+        try {
+            $json = Receive-Job -Job $job -ErrorAction Stop
+        } finally {
+            $script:SessaoOcupada = $false
+            Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+        }
+    } catch {
+        return [PSCustomObject]@{ Concluido = $true; Erro = $_.Exception; Resposta = $null }
+    }
+
+    if ($script:IdSessaoAtual -ne $EstadoAsync.IdSessaoEsperado) {
+        $respostaPerdida = [PSCustomObject]@{ Novos = @(); Concluidos = 0; Total = 0; EmAndamento = $false; SessaoPerdida = $true }
+        return [PSCustomObject]@{ Concluido = $true; Erro = $null; Resposta = $respostaPerdida }
+    }
+
+    $obj = $json | ConvertFrom-Json
+    $resposta = $obj | Add-Member -NotePropertyName SessaoPerdida -NotePropertyValue $false -PassThru
+    return [PSCustomObject]@{ Concluido = $true; Erro = $null; Resposta = $resposta }
+}
+
+# ============================================================
 # FASE 6: download de pacote (SO download - a copia final pro InstSeg
 # roda direto no cliente, ver VisaoPacotes.psm1 e a nota grande em
 # VisaoServidor.ps1). Mesmo padrao "dispara sem esperar + poll" da
@@ -626,7 +777,7 @@ function Set-ConfigEnvioDriveRemoto {
     Invoke-ComandoRemoto -ScriptBlock { param($u, $t) Set-ConfigEnvioDrive -UrlWebApp $u -Token $t } -ArgumentList @($UrlWebApp, $Token)
 }
 
-Export-ModuleMember -Function Connect-ServidorVisao, Disconnect-ServidorVisao, Invoke-ComandoRemoto, Get-IdSessaoAtualVisao, Start-VarreduraRemota, Get-VarreduraNovosResultadosRemoto, Get-VersoesRemoto, Get-SistemasEleitoraisExtraRemoto, Start-BaixarPacoteRemoto, Get-StatusPacoteRemoto, Send-AtualizacaoZonaRemoto, Send-ArquivoParaGoogleDriveRemoto, Invoke-LigarWolRemoto, Get-ConfigVersoesRemoto, Set-ConfigVersoesRemoto, Get-ConfigZonasWebAppRemoto, Set-ConfigZonasWebAppRemoto, Get-ConfigCampanhasWebAppRemoto, Set-ConfigCampanhasWebAppRemoto, Get-ConfigEnvioDriveRemoto, Set-ConfigEnvioDriveRemoto
+Export-ModuleMember -Function Connect-ServidorVisao, Disconnect-ServidorVisao, Invoke-ComandoRemoto, Get-IdSessaoAtualVisao, Start-VarreduraRemota, Get-VarreduraNovosResultadosRemoto, Start-VarreduraNovosResultadosRemotoAsync, Test-VarreduraNovosResultadosRemotoAsync, Get-VersoesRemoto, Get-SistemasEleitoraisExtraRemoto, Start-BaixarPacoteRemoto, Get-StatusPacoteRemoto, Send-AtualizacaoZonaRemoto, Send-ArquivoParaGoogleDriveRemoto, Invoke-LigarWolRemoto, Get-ConfigVersoesRemoto, Set-ConfigVersoesRemoto, Get-ConfigZonasWebAppRemoto, Set-ConfigZonasWebAppRemoto, Get-ConfigCampanhasWebAppRemoto, Set-ConfigCampanhasWebAppRemoto, Get-ConfigEnvioDriveRemoto, Set-ConfigEnvioDriveRemoto
 
 # NOTA: as consultas ao AD (Usuarios da ZE, status do Instalador) NAO
 # passam por aqui - ver VisaoAD.psm1. Nao sao trafego de varredura, e

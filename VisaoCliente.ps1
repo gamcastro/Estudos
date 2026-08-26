@@ -92,6 +92,8 @@ $script:Estado = @{
     GruposSistemas               = @{}     # preenchido via Get-GruposSistemasRemoto (.GruposSistemas) - ver VisaoJanelaAdmin.psm1 (Usuarios da ZE)
     LinhaContextoAtual           = $null   # linha do grid selecionada pro menu de contexto (setada no MouseDown, lida no Add_Opening - dois closures separados)
     TickVarreduraEmAndamento     = $false  # guarda de reentrancia do timer de polling - ver comentario no Add_Tick
+    EsperaAsyncVarredura         = $null   # chamada remota do polling em voo (Start/Test-VarreduraNovosResultadosRemotoAsync) - null quando nao ha nenhuma pendente
+    VarreduraCancelada           = $false  # cancelamento pedido mas adiado ate a checagem em voo terminar - ver EVENTO: Cancelar
 }
 
 function ConvertTo-HashtableLocal {
@@ -632,16 +634,68 @@ $timer.Add_Tick({
 }.GetNewClosure())
 
 function Invoke-TickVarredura {
-    try {
-        $resposta = Get-VarreduraNovosResultadosRemoto -IdSessaoEsperado $script:Estado.IdSessaoVarredura -AoAtualizarStatus { param($t) Add-Log $t "Gray" }
-    } catch {
+    <#
+        Modelo NAO-BLOQUEANTE de proposito (2026-08-25) - ver
+        Start/Test-VarreduraNovosResultadosRemotoAsync em
+        VisaoRemoting.psm1. Cada tick SO dispara a checagem (se nao
+        houver nenhuma em voo) ou SO confere se a que ja estava em voo
+        terminou - nunca bloqueia esperando, nunca chama DoEvents() de
+        dentro deste handler. Isso elimina de proposito o padrao de
+        DoEvents() aninhado (Timer.Tick chamando DoEvents que podia
+        disparar o PROPRIO Timer de novo, empilhando cada vez mais
+        fundo durante uma espera longa) - confirmado ao vivo como causa
+        provavel de dois crashes reais da aplicacao (AccessViolationException
+        nativa em WSManReconnectShellCommandEx, e um erro de Set-Content
+        escapando do proprio catch), ambos SO durante varredura em
+        andamento. Ver project_crash_winrm_reconexao na memoria do
+        projeto.
+    #>
+    if (-not $script:Estado.EsperaAsyncVarredura) {
+        try {
+            $inicio = Start-VarreduraNovosResultadosRemotoAsync -IdSessaoEsperado $script:Estado.IdSessaoVarredura
+        } catch {
+            $timer.Stop()
+            Add-Log "[ERRO] Falha ao consultar progresso da varredura: $($_.Exception.Message)" "OrangeRed"
+            $btnIniciar.Enabled = $true
+            $btnCancelar.Enabled = $false
+            $numZona.Enabled = $true
+            return
+        }
+        if ($inicio.SessaoPerdidaImediato) {
+            $timer.Stop()
+            Add-Log "[ERRO] Conexao com o POLICY-SERVER foi perdida durante a varredura - incompleta, inicie de novo." "OrangeRed"
+            $btnIniciar.Enabled = $true
+            $btnCancelar.Enabled = $false
+            $numZona.Enabled = $true
+            return
+        }
+        # So dispara - o resultado so chega num tick FUTURO (proximo
+        # Test-VarreduraNovosResultadosRemotoAsync que devolver Concluido).
+        $script:Estado.EsperaAsyncVarredura = $inicio
+        return
+    }
+
+    $status = Test-VarreduraNovosResultadosRemotoAsync -EstadoAsync $script:Estado.EsperaAsyncVarredura -AoAtualizarStatus { param($t) Add-Log $t "Gray" }
+    if (-not $status.Concluido) { return }
+
+    $script:Estado.EsperaAsyncVarredura = $null
+
+    if ($script:Estado.VarreduraCancelada) {
+        $script:Estado.VarreduraCancelada = $false
+        Concluir-CancelamentoVarredura
+        return
+    }
+
+    if ($status.Erro) {
         $timer.Stop()
-        Add-Log "[ERRO] Falha ao consultar progresso da varredura: $($_.Exception.Message)" "OrangeRed"
+        Add-Log "[ERRO] Falha ao consultar progresso da varredura: $($status.Erro.Message)" "OrangeRed"
         $btnIniciar.Enabled = $true
         $btnCancelar.Enabled = $false
         $numZona.Enabled = $true
         return
     }
+
+    $resposta = $status.Resposta
 
     if ($resposta.SessaoPerdida) {
         $timer.Stop()
@@ -775,6 +829,11 @@ $btnIniciar.Add_Click({
     $ips = 1..254 | ForEach-Object { "$baseIP$_" }
     $progressBar.Maximum = $ips.Count
     $progressBar.Value = 0
+    # Limpa qualquer resquicio de uma varredura anterior cancelada com uma
+    # checagem assincrona ainda em voo (rara, mas evita o polling novo
+    # confundir com o resultado de uma checagem antiga - ver comentario
+    # em Invoke-TickVarredura).
+    $script:Estado.EsperaAsyncVarredura = $null
 
     try {
         $script:Estado.IdSessaoVarredura = Start-VarreduraRemota -Ips $ips -Zona $zona -RedeCompartilhada $script:Estado.RedeCompartilhada -AoAtualizarStatus { param($t) Add-Log $t "Gray" }.GetNewClosure()
@@ -798,7 +857,7 @@ $btnIniciar.Add_Click({
 # poucos segundos de qualquer forma, entao o custo de deixar terminar
 # em segundo plano e baixo). Ver plano da Fase A.
 # ============================================================
-$btnCancelar.Add_Click({
+function Concluir-CancelamentoVarredura {
     $timer.Stop()
     Add-Log "=== Varredura cancelada pelo usuario (o servidor pode levar mais alguns segundos pra terminar em segundo plano) ===" "OrangeRed"
     $lblStatus.Text = "Cancelado."
@@ -808,6 +867,24 @@ $btnCancelar.Add_Click({
     $ativos = @($script:Resultados | Where-Object { $_.Online })
     $btnExportar.Enabled = ($ativos.Count -gt 0 -or $script:MaquinasDesligadasOcs.Count -gt 0)
     $btnVerificarCampanhaZona.Enabled = $btnExportar.Enabled
+}
+
+$btnCancelar.Add_Click({
+    if ($script:Estado.EsperaAsyncVarredura) {
+        # Ha uma checagem remota em voo (Start/Test-VarreduraNovosResultadosRemotoAsync,
+        # VisaoRemoting.psm1) - nao da pra parar o Timer agora: ele e o
+        # UNICO lugar que ainda vai chamar Test-VarreduraNovosResultadosRemotoAsync
+        # de novo pra perceber que ela terminou e liberar
+        # $script:SessaoOcupada. Parar aqui deixaria isso preso pra
+        # sempre, travando qualquer chamada remota futura. So marca o
+        # pedido - Invoke-TickVarredura finaliza de verdade assim que a
+        # checagem pendente concluir (sucesso, erro ou timeout).
+        $script:Estado.VarreduraCancelada = $true
+        $btnCancelar.Enabled = $false
+        Add-Log "Cancelando... aguardando a checagem em andamento terminar." "Gray"
+        return
+    }
+    Concluir-CancelamentoVarredura
 }.GetNewClosure())
 
 # ============================================================
