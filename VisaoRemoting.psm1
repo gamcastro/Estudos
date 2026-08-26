@@ -234,6 +234,30 @@ function Invoke-ComandoRemotoJob {
         esperas longas - da visibilidade de verdade (antes so tinhamos
         log de ANTES/DEPOIS de cada chamada, nada de dentro de uma
         chamada trava).
+
+        Achado ao vivo nº4, o mais critico (2026-08-26): confirmado via
+        pilha de excecao COMPLETA capturada ao vivo que o crash real
+        (AccessViolationException em WSManReconnectShellCommandEx, ja
+        documentado antes) acontece especificamente DENTRO de Stop-Job/
+        Remove-Job quando chamados sobre um job cujo transporte WinRM
+        ainda esta tentando se reconectar sozinho - Remove-Job (mesmo so
+        de limpeza, SEM -Force) e Stop-Job chamam internamente
+        PSRemotingJob.StopJob(), que por sua vez tenta uma "conexao" com
+        o job antes de pará-lo de verdade - se o transporte nativo
+        estiver numa reconexao ja em andamento (rede instavel de
+        verdade, nao precisa nem ser provocado - confirmado ao vivo
+        SEM nenhuma queda de rede forcada, so instabilidade real da
+        rede), essa segunda tentativa de conexao crasha o processo
+        inteiro (excecao de estado corrompido, NENHUM try/catch pega).
+        Por isso o limite de 300s abaixo NAO chama mais Stop-Job nem
+        Remove-Job no job que estourou o prazo - so abandona a
+        referencia (o job fica orfao, nunca mais tocado; o custo e um
+        pequeno vazamento de memoria nesse cenario raro, aceitavel
+        comparado a derrubar a aplicacao inteira) e desconecta a SESSAO
+        (Disconnect-ServidorVisao, que usa Remove-PSSession - operacao
+        DIFERENTE, nao implicada neste crash) pra garantir uma conexao
+        nova na proxima tentativa. Ver project_crash_winrm_reconexao na
+        memoria do projeto.
     #>
     param(
         [Parameter(Mandatory)]
@@ -247,6 +271,7 @@ function Invoke-ComandoRemotoJob {
     $job = Invoke-Command -Session $Sessao -ScriptBlock $ScriptBlock -ArgumentList $ArgumentList -AsJob -ErrorAction Stop
     $cronometro = [System.Diagnostics.Stopwatch]::StartNew()
     $proximoAvisoEspera = 15
+    $abandonarJob = $false
     try {
         while ($job.State -eq [System.Management.Automation.JobState]::Running -or $job.State -eq [System.Management.Automation.JobState]::NotStarted) {
             [System.Windows.Forms.Application]::DoEvents()
@@ -261,8 +286,8 @@ function Invoke-ComandoRemotoJob {
             }
 
             if ($segundosDecorridos -ge 300) {
-                Stop-Job -Job $job -ErrorAction SilentlyContinue
-                Registrar-LogConexao "Chamada abortada apos 300s sem resposta - forcando sessao a ser considerada perdida."
+                $abandonarJob = $true
+                Registrar-LogConexao "Chamada abortada apos 300s sem resposta - forcando sessao a ser considerada perdida (job abandonado sem Stop-Job/Remove-Job, ver comentario acima)."
                 # Forca a sessao a ser tratada como morta (nao so lanca o
                 # erro) - o Invoke-ComandoRemoto que chamou isto decide
                 # se reconecta com base no ESTADO da sessao depois da
@@ -276,7 +301,12 @@ function Invoke-ComandoRemotoJob {
         return Receive-Job -Job $job -ErrorAction Stop
     }
     finally {
-        Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+        # So remove o job se ele CHEGOU sozinho a um estado terminal (nao
+        # Running/NotStarted) - nunca com -Force, nunca no caso de
+        # $abandonarJob (ver achado nº4 acima).
+        if (-not $abandonarJob) {
+            Remove-Job -Job $job -ErrorAction SilentlyContinue
+        }
     }
 }
 
@@ -604,8 +634,15 @@ function Test-VarreduraNovosResultadosRemotoAsync {
         }
 
         if ($segundosDecorridos -ge 300) {
-            Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
-            Registrar-LogConexao "Chamada abortada apos 300s sem resposta - forcando sessao a ser considerada perdida."
+            # NAO chama Stop-Job/Remove-Job aqui de proposito - job
+            # abandonado (referencia solta, nunca mais tocado). Ver achado
+            # nº4 no comentario de Invoke-ComandoRemotoJob: Stop-Job/
+            # Remove-Job num job cujo transporte WinRM ainda esta tentando
+            # se reconectar sozinho e o que causa o AccessViolationException
+            # real (confirmado ao vivo, 2026-08-26) - nao vale o risco so
+            # pra evitar um pequeno vazamento de memoria num cenario ja
+            # raro (5min+ sem resposta).
+            Registrar-LogConexao "Chamada abortada apos 300s sem resposta - forcando sessao a ser considerada perdida (job abandonado sem Stop-Job/Remove-Job)."
             Disconnect-ServidorVisao
             $script:SessaoOcupada = $false
             return [PSCustomObject]@{ Concluido = $true; Erro = [System.TimeoutException]::new("O POLICY-SERVER nao respondeu em 5 minutos - a conexao foi considerada perdida."); Resposta = $null }
@@ -619,7 +656,10 @@ function Test-VarreduraNovosResultadosRemotoAsync {
             $json = Receive-Job -Job $job -ErrorAction Stop
         } finally {
             $script:SessaoOcupada = $false
-            Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+            # Sem -Force de proposito - o job ja esta num estado terminal
+            # aqui ($rodando confirmado $false acima), entao nao ha nada
+            # pra "parar" de verdade. Ver achado nº4 acima.
+            Remove-Job -Job $job -ErrorAction SilentlyContinue
         }
     } catch {
         return [PSCustomObject]@{ Concluido = $true; Erro = $_.Exception; Resposta = $null }
