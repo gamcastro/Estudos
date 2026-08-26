@@ -107,6 +107,37 @@ function Registrar-AvisosNativosJob {
     return $avisos.Count
 }
 
+function Wait-RunspaceDisponivelParaNovoComando {
+    <#
+        Achado ao vivo (2026-08-27, depois do keepalive comecar a
+        disparar chamadas a cada ~60s na MESMA sessao): o job.State de
+        um Invoke-Command -AsJob anterior pode virar um estado terminal
+        (Completed/Failed) um instante ANTES da Runspace subjacente
+        (PSSession.Runspace.RunspaceAvailability) realmente voltar a
+        "Available" - se um NOVO Invoke-Command -AsJob for disparado
+        nessa janela estreita (ex: keepalive terminando bem na hora que
+        o tecnico clica "Iniciar Varredura", ou um retry quase imediato
+        depois do aviso "Ja ha uma chamada remota em andamento"), o
+        proprio WinRM/PSRP rejeita na hora com "O pipeline nao foi
+        executado porque um pipeline ja esta em execucao" - um erro
+        RARO antes do keepalive existir (as chamadas ficavam bem mais
+        espacadas), que passou a acontecer com chamadas costurando uma
+        atras da outra na mesma sessao. Espera curta (no maximo ~2s,
+        SEM DoEvents de proposito - ver historico de bugs de DoEvents
+        aninhado) ate a Runspace realmente ficar disponivel de novo
+        antes de tentar o proximo Invoke-Command -AsJob - na pratica
+        deve resolver em bem menos de 1s; se estourar os 2s, so segue
+        em frente mesmo assim (deixa o proprio Invoke-Command decidir).
+    #>
+    param([Parameter(Mandatory)]$Sessao)
+
+    $cronometro = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($Sessao.Runspace -and $Sessao.Runspace.RunspaceAvailability -ne [System.Management.Automation.Runspaces.RunspaceAvailability]::Available) {
+        if ($cronometro.Elapsed.TotalSeconds -ge 2) { return }
+        Start-Sleep -Milliseconds 50
+    }
+}
+
 function Connect-ServidorVisao {
     <#
         Abre (ou reabre) a sessao persistente com o POLICY-SERVER e
@@ -291,6 +322,7 @@ function Invoke-ComandoRemotoJob {
         [scriptblock]$AoAtualizarStatus = $null
     )
 
+    Wait-RunspaceDisponivelParaNovoComando -Sessao $Sessao
     $job = Invoke-Command -Session $Sessao -ScriptBlock $ScriptBlock -ArgumentList $ArgumentList -AsJob -ErrorAction Stop
     $cronometro = [System.Diagnostics.Stopwatch]::StartNew()
     $proximoAvisoEspera = 15
@@ -619,6 +651,7 @@ function Start-VarreduraNovosResultadosRemotoAsync {
 
     $script:SessaoOcupada = $true
     try {
+        Wait-RunspaceDisponivelParaNovoComando -Sessao $script:PSSessionServidor
         $job = Invoke-Command -Session $script:PSSessionServidor -ScriptBlock { Get-VarreduraNovosResultados } -AsJob -ErrorAction Stop
     } catch {
         $script:SessaoOcupada = $false
@@ -742,6 +775,7 @@ function Start-ChamadaRemotaAssincrona {
 
     $script:SessaoOcupada = $true
     try {
+        Wait-RunspaceDisponivelParaNovoComando -Sessao $script:PSSessionServidor
         $job = Invoke-Command -Session $script:PSSessionServidor -ScriptBlock $ScriptBlock -ArgumentList $ArgumentList -AsJob -ErrorAction Stop
     } catch {
         $script:SessaoOcupada = $false
