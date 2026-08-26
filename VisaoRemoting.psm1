@@ -676,6 +676,89 @@ function Test-VarreduraNovosResultadosRemotoAsync {
 }
 
 # ============================================================
+# KEEPALIVE (2026-08-27) - Start/Test-ChamadaRemotaAssincrona sao a
+# versao GENERICA (qualquer ScriptBlock) de Start/Test-
+# VarreduraNovosResultadosRemotoAsync acima - mesma base seguranca (sem
+# DoEvents, sem Stop-Job/Remove-Job -Force num job ainda rodando), sem
+# nada especifico de varredura. Usadas por um Timer proprio no cliente
+# (VisaoCliente.ps1) que dispara uma chamada leve pro servidor a cada
+# ~60s enquanto a ferramenta esta ociosa, pra manter a conexao TCP
+# subjacente "viva" - confirmado ao vivo (2026-08-27) que a conexao cai
+# por INATIVIDADE mesmo sem nenhuma acao do tecnico (so ficar parado
+# ~4min ja reproduziu, com ou sem antivirus, sem abrir nenhuma janela)
+# - provavelmente algum dispositivo de rede intermediario (firewall/NAT)
+# derrubando conexoes TCP ociosas. Nao elimina o problema por completo
+# (uma queda NO MEIO de uma operacao ativa ainda pode acontecer), mas
+# deve cobrir o caso mais comum de ociosidade entre uma acao e outra.
+# ============================================================
+function Start-ChamadaRemotaAssincrona {
+    <#
+        Versao GENERICA de Start-VarreduraNovosResultadosRemotoAsync -
+        dispara qualquer ScriptBlock via Invoke-Command -AsJob e devolve
+        NA HORA, sem esperar nada.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [scriptblock]$ScriptBlock,
+        [object[]]$ArgumentList = @()
+    )
+
+    if ($script:SessaoOcupada) {
+        throw [System.InvalidOperationException]::new("Ja ha uma chamada remota em andamento - aguarde terminar e tente de novo.")
+    }
+    if (-not $script:PSSessionServidor -or $script:PSSessionServidor.State -ne [System.Management.Automation.Runspaces.RunspaceState]::Opened) {
+        if (-not (Connect-ServidorVisao)) {
+            throw [System.InvalidOperationException]::new("Nao foi possivel conectar ao POLICY-SERVER. Verifique a rede/VPN e tente novamente.")
+        }
+    }
+
+    $script:SessaoOcupada = $true
+    try {
+        $job = Invoke-Command -Session $script:PSSessionServidor -ScriptBlock $ScriptBlock -ArgumentList $ArgumentList -AsJob -ErrorAction Stop
+    } catch {
+        $script:SessaoOcupada = $false
+        throw
+    }
+
+    return [PSCustomObject]@{ Job = $job; Cronometro = [System.Diagnostics.Stopwatch]::StartNew() }
+}
+
+function Test-ChamadaRemotaAssincronaConcluida {
+    <#
+        Chamada a cada tick de um Timer - devolve na hora, sem DoEvents()
+        nenhum. Ao estourar o TimeoutSec com o job ainda rodando, o job e
+        ABANDONADO (nunca Stop-Job/Remove-Job) - mesmo principio de
+        Invoke-ComandoRemotoJob (ver comentario grande la).
+    #>
+    param(
+        [Parameter(Mandatory)]
+        $EstadoAsync,
+        [int]$TimeoutSec = 60
+    )
+
+    $job = $EstadoAsync.Job
+    $rodando = ($job.State -eq [System.Management.Automation.JobState]::Running -or $job.State -eq [System.Management.Automation.JobState]::NotStarted)
+
+    if ($rodando) {
+        if ($EstadoAsync.Cronometro.Elapsed.TotalSeconds -ge $TimeoutSec) {
+            $script:SessaoOcupada = $false
+            return [PSCustomObject]@{ Concluido = $true; Sucesso = $false }
+        }
+        return [PSCustomObject]@{ Concluido = $false; Sucesso = $false }
+    }
+
+    $script:SessaoOcupada = $false
+    try {
+        Receive-Job -Job $job -ErrorAction Stop | Out-Null
+        return [PSCustomObject]@{ Concluido = $true; Sucesso = $true }
+    } catch {
+        return [PSCustomObject]@{ Concluido = $true; Sucesso = $false }
+    } finally {
+        Remove-Job -Job $job -ErrorAction SilentlyContinue
+    }
+}
+
+# ============================================================
 # FASE 6: download de pacote (SO download - a copia final pro InstSeg
 # roda direto no cliente, ver VisaoPacotes.psm1 e a nota grande em
 # VisaoServidor.ps1). Mesmo padrao "dispara sem esperar + poll" da
@@ -794,7 +877,7 @@ function Set-ConfigEnvioDriveRemoto {
     Invoke-ComandoRemoto -ScriptBlock { param($u, $t) Set-ConfigEnvioDrive -UrlWebApp $u -Token $t } -ArgumentList @($UrlWebApp, $Token)
 }
 
-Export-ModuleMember -Function Connect-ServidorVisao, Disconnect-ServidorVisao, Invoke-ComandoRemoto, Get-IdSessaoAtualVisao, Start-VarreduraRemota, Get-VarreduraNovosResultadosRemoto, Start-VarreduraNovosResultadosRemotoAsync, Test-VarreduraNovosResultadosRemotoAsync, Get-VersoesRemoto, Get-SistemasEleitoraisExtraRemoto, Start-BaixarPacoteRemoto, Get-StatusPacoteRemoto, Invoke-LigarWolRemoto, Get-ConfigVersoesRemoto, Set-ConfigVersoesRemoto, Get-ConfigZonasWebAppRemoto, Set-ConfigZonasWebAppRemoto, Get-ConfigCampanhasWebAppRemoto, Set-ConfigCampanhasWebAppRemoto, Get-ConfigEnvioDriveRemoto, Set-ConfigEnvioDriveRemoto
+Export-ModuleMember -Function Connect-ServidorVisao, Disconnect-ServidorVisao, Invoke-ComandoRemoto, Get-IdSessaoAtualVisao, Start-VarreduraRemota, Get-VarreduraNovosResultadosRemoto, Start-VarreduraNovosResultadosRemotoAsync, Test-VarreduraNovosResultadosRemotoAsync, Start-ChamadaRemotaAssincrona, Test-ChamadaRemotaAssincronaConcluida, Get-VersoesRemoto, Get-SistemasEleitoraisExtraRemoto, Start-BaixarPacoteRemoto, Get-StatusPacoteRemoto, Invoke-LigarWolRemoto, Get-ConfigVersoesRemoto, Set-ConfigVersoesRemoto, Get-ConfigZonasWebAppRemoto, Set-ConfigZonasWebAppRemoto, Get-ConfigCampanhasWebAppRemoto, Set-ConfigCampanhasWebAppRemoto, Get-ConfigEnvioDriveRemoto, Set-ConfigEnvioDriveRemoto
 
 # NOTA: as consultas ao AD (Usuarios da ZE, status do Instalador) NAO
 # passam por aqui - ver VisaoAD.psm1. Nao sao trafego de varredura, e

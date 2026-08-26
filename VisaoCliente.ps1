@@ -94,6 +94,7 @@ $script:Estado = @{
     TickVarreduraEmAndamento     = $false  # guarda de reentrancia do timer de polling - ver comentario no Add_Tick
     EsperaAsyncVarredura         = $null   # chamada remota do polling em voo (Start/Test-VarreduraNovosResultadosRemotoAsync) - null quando nao ha nenhuma pendente
     VarreduraCancelada           = $false  # cancelamento pedido mas adiado ate a checagem em voo terminar - ver EVENTO: Cancelar
+    EsperaAsyncKeepAlive         = $null   # chamada leve do keepalive em voo (Start/Test-ChamadaRemotaAssincrona) - null quando nao ha nenhuma pendente
 }
 
 function ConvertTo-HashtableLocal {
@@ -757,6 +758,40 @@ function Invoke-TickVarredura {
         $numZona.Enabled = $true
     }
 }
+
+# ============================================================
+# KEEPALIVE (2026-08-27) - confirmado ao vivo que a conexao com o
+# POLICY-SERVER cai por INATIVIDADE (algum dispositivo de rede
+# intermediario, nao codigo nosso) mesmo sem nenhuma acao do tecnico -
+# reproduzido so ficando parado ~4min, com ou sem antivirus, sem abrir
+# nenhuma janela. Este Timer dispara uma chamada bem leve pro servidor
+# a cada 60s enquanto a ferramenta esta ociosa (varredura NAO em
+# andamento), so pra manter a conexao TCP subjacente "viva" - nunca usa
+# DoEvents() nem forca Stop-Job/Remove-Job (ver Start/Test-
+# ChamadaRemotaAssincrona, VisaoRemoting.psm1). Nao dispara durante uma
+# varredura ativa de proposito - o polling dela ja gera trafego
+# constante, nao precisa de mais nada.
+# ============================================================
+$timerKeepAlive = New-Object System.Windows.Forms.Timer
+$timerKeepAlive.Interval = 60000
+$timerKeepAlive.Add_Tick({
+    if ($timer.Enabled) { return }
+
+    if ($script:Estado.EsperaAsyncKeepAlive) {
+        $status = Test-ChamadaRemotaAssincronaConcluida -EstadoAsync $script:Estado.EsperaAsyncKeepAlive
+        if ($status.Concluido) { $script:Estado.EsperaAsyncKeepAlive = $null }
+        return
+    }
+
+    try {
+        $script:Estado.EsperaAsyncKeepAlive = Start-ChamadaRemotaAssincrona -ScriptBlock { Get-Date }
+    } catch {
+        # Silencioso de proposito - se a sessao ainda nao existir, ou
+        # estiver ocupada com outra coisa (ex: Verificar Campanha, Enviar
+        # CVC), so tenta de novo no proximo tick, 60s depois.
+    }
+}.GetNewClosure())
+$timerKeepAlive.Start()
 
 # ============================================================
 # EVENTO: Iniciar Varredura
