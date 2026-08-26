@@ -303,6 +303,36 @@ function Show-JanelaSistemasEleitorais {
         if ($itens[$i].Pacote) { $gridSis.Rows[$i].Cells["StatusPacote"].Value = "Verificando..." }
     }
 
+    # Modelo NAO-BLOQUEANTE de proposito (2026-08-27) - ver Start/Test-
+    # ArquivosInstSegAsync em VisaoPacotes.psm1. Antes, esperava a busca
+    # do InstSeg bombeando DoEvents() de dentro do Add_Shown deste dialog
+    # MODAL - confirmado ao vivo (reproduzido de forma isolada e
+    # repetida) que isso deixava a PROXIMA varredura travando esperando
+    # o WinRM, mesmo depois de corrigir Get-ArquivosInstSeg pra nao
+    # forcar Stop()/Dispose() num pipeline preso (achado insuficiente
+    # sozinho - o proprio aninhamento de DoEvents ja era o problema).
+    # $estadoSis (hashtable, nao variavel solta) e o mesmo padrao de
+    # $script:Estado no VisaoCliente.ps1 - MUTACAO de uma chave atravessa
+    # closures diferentes (Timer.Add_Tick vs Add_Shown/Button.Add_Click),
+    # reatribuicao de uma variavel solta nao atravessaria.
+    $estadoSis = @{ Async = $null }
+
+    $timerPacotesSis = New-Object System.Windows.Forms.Timer
+    $timerPacotesSis.Interval = 150
+    $timerPacotesSis.Add_Tick({
+        if (-not $estadoSis.Async) { $timerPacotesSis.Stop(); return }
+        $status = Test-ArquivosInstSegAsync -EstadoAsync $estadoSis.Async
+        if (-not $status.Concluido) { return }
+
+        $timerPacotesSis.Stop()
+        $estadoSis.Async = $null
+        if ($lblCarregandoSis) { $lblCarregandoSis.Visible = $false }
+
+        for ($i = 0; $i -lt $itens.Count; $i++) {
+            & $popularLinhaPacoteSis -Grid $gridSis -Indice $i -Item $itens[$i] -Resultado2 $Resultado -ArquivosInstSeg $status.Arquivos
+        }
+    }.GetNewClosure())
+
     $recarregarPacotesSis = {
         param([System.Windows.Forms.DataGridView]$Grid, $Itens, $Resultado2, $LblCarregando)
 
@@ -317,21 +347,16 @@ function Show-JanelaSistemasEleitorais {
             $LblCarregando.Text = "Verificando pacotes em \\$($Resultado2.IP)\InstSeg (pode demorar em links de zona lentos)..."
             $LblCarregando.Visible = $true
         }
-        [System.Windows.Forms.Application]::DoEvents()
 
-        $arquivosInstSeg = Get-ArquivosInstSeg -Resultado $Resultado2
-
-        if ($LblCarregando) { $LblCarregando.Visible = $false }
-
-        for ($i = 0; $i -lt $Itens.Count; $i++) {
-            & $popularLinhaPacoteSis -Grid $Grid -Indice $i -Item $Itens[$i] -Resultado2 $Resultado2 -ArquivosInstSeg $arquivosInstSeg
-        }
+        $estadoSis.Async = Start-ArquivosInstSegAsync -Resultado $Resultado2
+        $timerPacotesSis.Start()
     }.GetNewClosure()
 
     # So comeca a buscar o InstSeg DEPOIS da janela ja estar visivel -
     # senao a janela nao aparece na tela ate a busca de rede terminar.
     $dlg.Add_Shown({ & $recarregarPacotesSis -Grid $gridSis -Itens $itens -Resultado2 $Resultado -LblCarregando $lblCarregandoSis }.GetNewClosure())
     $btnAtualizarSis.Add_Click({ & $recarregarPacotesSis -Grid $gridSis -Itens $itens -Resultado2 $Resultado -LblCarregando $lblCarregandoSis }.GetNewClosure())
+    $dlg.Add_FormClosed({ $timerPacotesSis.Stop(); $timerPacotesSis.Dispose() }.GetNewClosure())
 
     $gridSis.Add_CellContentClick({
         param($sender, $e)

@@ -142,6 +142,75 @@ function Get-ArquivosInstSeg {
     }
 }
 
+# ============================================================
+# Versao NAO-BLOQUEANTE de Get-ArquivosInstSeg (2026-08-27) - pra usar
+# de dentro de um dialog MODAL (Show-JanelaSistemasEleitorais), que
+# nunca deve esperar bombeando DoEvents() manualmente. Mesmo motivo ja
+# documentado pro polling da varredura (VisaoRemoting.psm1/
+# Start-VarreduraNovosResultadosRemotoAsync): confirmado ao vivo que
+# esperar com DoEvents() de dentro de um Add_Shown/dialog modal deixava
+# a PROXIMA operacao assincrona (a varredura seguinte) travando -
+# mesmo apos corrigir Get-ArquivosInstSeg pra nao forcar Stop()/Dispose()
+# num pipeline preso (achado anterior, insuficiente sozinho). Quem
+# chama deve dirigir a espera por um Timer proprio, nunca por um loop
+# com DoEvents.
+# ============================================================
+function Start-ArquivosInstSegAsync {
+    <#
+        Dispara a listagem de \\IP\InstSeg em segundo plano e devolve NA
+        HORA (sem esperar nada). Quem chama guarda o retorno e confere
+        depois, tick a tick (Timer proprio), com Test-ArquivosInstSegAsync.
+    #>
+    param($Resultado)
+
+    $raizInstSeg = "\\$($Resultado.IP)\InstSeg"
+    if (-not (Test-Path $raizInstSeg)) {
+        return [PSCustomObject]@{ NaoExiste = $true; Ps = $null; Handle = $null; Cronometro = $null }
+    }
+
+    $scriptBlockListar = {
+        param($Raiz)
+        try { return @(Get-ChildItem -Path $Raiz -File -Recurse -Depth 6 -ErrorAction SilentlyContinue) } catch { return @() }
+    }
+    $ps = [powershell]::Create()
+    [void]$ps.AddScript($scriptBlockListar).AddArgument($raizInstSeg)
+    $handle = $ps.BeginInvoke()
+    return [PSCustomObject]@{ NaoExiste = $false; Ps = $ps; Handle = $handle; Cronometro = [System.Diagnostics.Stopwatch]::StartNew() }
+}
+
+function Test-ArquivosInstSegAsync {
+    <#
+        Chamada a cada tick de um Timer - devolve na hora, sem DoEvents()
+        nenhum. .Concluido indica se ja da pra usar .Arquivos (que pode
+        vir $null tanto por nao existir \\IP\InstSeg quanto por estourar
+        o prazo - mesmo significado de sempre: "nao achei por essa
+        busca", nao erro fatal).
+    #>
+    param($EstadoAsync, [int]$TimeoutSec = 15)
+
+    if ($EstadoAsync.NaoExiste) {
+        return [PSCustomObject]@{ Concluido = $true; Arquivos = $null }
+    }
+
+    if (-not $EstadoAsync.Handle.IsCompleted) {
+        if ($EstadoAsync.Cronometro.Elapsed.TotalSeconds -ge $TimeoutSec) {
+            # Abandona o pipeline preso - NUNCA Stop()/Dispose() aqui, ver
+            # comentario grande em Get-ArquivosInstSeg (o mesmo achado se
+            # aplica igual aqui).
+            return [PSCustomObject]@{ Concluido = $true; Arquivos = $null }
+        }
+        return [PSCustomObject]@{ Concluido = $false; Arquivos = $null }
+    }
+
+    try {
+        return [PSCustomObject]@{ Concluido = $true; Arquivos = @($EstadoAsync.Ps.EndInvoke($EstadoAsync.Handle)) }
+    } catch {
+        return [PSCustomObject]@{ Concluido = $true; Arquivos = $null }
+    } finally {
+        $EstadoAsync.Ps.Dispose()
+    }
+}
+
 function Find-PacoteEmArquivosInstSeg {
     param($Pacote, $ArquivosInstSeg)
     if (-not $ArquivosInstSeg -or -not $Pacote.NomeArquivo) { return $null }
@@ -866,4 +935,4 @@ function Invoke-AcaoEnviarCvcDrive {
     }
 }
 
-Export-ModuleMember -Function Get-CaminhoDestinoUnc, Get-NomeArquivoConhecidoPacote, Get-HashCachePacote, Get-ArquivosInstSeg, Find-PacoteEmArquivosInstSeg, Get-StatusPacoteNoDestino, Format-DuracaoLegivel, Copy-ArquivoComRobocopy, Invoke-AcaoCopiarPacoteJaBaixado, Invoke-AcaoVerificarHashPacote, Invoke-AcaoAbrirPastaPacote, Get-ArquivoCvcMaisRecente, Invoke-AcaoEnviarCvcDrive, Invoke-AcaoGarantirPacoteEmCache
+Export-ModuleMember -Function Get-CaminhoDestinoUnc, Get-NomeArquivoConhecidoPacote, Get-HashCachePacote, Get-ArquivosInstSeg, Start-ArquivosInstSegAsync, Test-ArquivosInstSegAsync, Find-PacoteEmArquivosInstSeg, Get-StatusPacoteNoDestino, Format-DuracaoLegivel, Copy-ArquivoComRobocopy, Invoke-AcaoCopiarPacoteJaBaixado, Invoke-AcaoVerificarHashPacote, Invoke-AcaoAbrirPastaPacote, Get-ArquivoCvcMaisRecente, Invoke-AcaoEnviarCvcDrive, Invoke-AcaoGarantirPacoteEmCache
