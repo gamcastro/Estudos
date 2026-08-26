@@ -724,8 +724,9 @@ function Get-StatusPacoteRemoto {
 # Send-ResultadoCampanhaZonaRemoto NAO vive mais aqui - migrada pra
 # VisaoPlanilhas.psm1 em 2026-08-24 (decisao explicita do usuario:
 # RESULTADOS-CAMPANHAS nao e sensivel, token distribuido no pacote do
-# modulo). Send-AtualizacaoZonaRemoto/Send-ArquivoParaGoogleDriveRemoto
-# (zonas/CVC) CONTINUAM aqui - essa decisao foi so pra campanhas.
+# modulo). Send-ArquivoParaGoogleDriveRemoto (CVC) migrada pelo MESMO
+# motivo em 2026-08-27. Send-AtualizacaoZonaRemoto (zonas) CONTINUA
+# aqui - essa decisao nao foi generalizada pra ela.
 # ============================================================
 function Send-AtualizacaoZonaRemoto {
     param(
@@ -734,23 +735,6 @@ function Send-AtualizacaoZonaRemoto {
         [string]$Observacao = ""
     )
     Invoke-ComandoRemoto -ScriptBlock { param($z, $s, $o) Send-AtualizacaoZonaViaAppsScript -Zona $z -Substituta $s -Observacao $o } -ArgumentList @($Zona, $Substituta, $Observacao)
-}
-
-function Send-ArquivoParaGoogleDriveRemoto {
-    <#
-        $NomeArquivo/$ConteudoBase64 ja vem PRONTO de quem chama - se o
-        arquivo original vive numa maquina de zona (ex: CVC em
-        \\IP\InstSeg\CVC), quem chama precisa te-lo lido DIRETO (sem
-        remoting, mesmo motivo do VisaoPacotes.psm1) antes de chegar
-        aqui. Ver comentario completo em
-        Send-ArquivoParaGoogleDriveViaAppsScript no VisaoServidor.ps1.
-    #>
-    param(
-        [Parameter(Mandatory)][string]$NomeArquivo,
-        [Parameter(Mandatory)][string]$ConteudoBase64,
-        [int]$TimeoutSec = 30
-    )
-    Invoke-ComandoRemoto -ScriptBlock { param($n, $c, $t) Send-ArquivoParaGoogleDriveViaAppsScript -NomeArquivo $n -ConteudoBase64 $c -TimeoutSec $t } -ArgumentList @($NomeArquivo, $ConteudoBase64, $TimeoutSec)
 }
 
 # ============================================================
@@ -817,7 +801,7 @@ function Set-ConfigEnvioDriveRemoto {
     Invoke-ComandoRemoto -ScriptBlock { param($u, $t) Set-ConfigEnvioDrive -UrlWebApp $u -Token $t } -ArgumentList @($UrlWebApp, $Token)
 }
 
-Export-ModuleMember -Function Connect-ServidorVisao, Disconnect-ServidorVisao, Invoke-ComandoRemoto, Get-IdSessaoAtualVisao, Start-VarreduraRemota, Get-VarreduraNovosResultadosRemoto, Start-VarreduraNovosResultadosRemotoAsync, Test-VarreduraNovosResultadosRemotoAsync, Get-VersoesRemoto, Get-SistemasEleitoraisExtraRemoto, Start-BaixarPacoteRemoto, Get-StatusPacoteRemoto, Send-AtualizacaoZonaRemoto, Send-ArquivoParaGoogleDriveRemoto, Invoke-LigarWolRemoto, Get-ConfigVersoesRemoto, Set-ConfigVersoesRemoto, Get-ConfigZonasWebAppRemoto, Set-ConfigZonasWebAppRemoto, Get-ConfigCampanhasWebAppRemoto, Set-ConfigCampanhasWebAppRemoto, Get-ConfigEnvioDriveRemoto, Set-ConfigEnvioDriveRemoto
+Export-ModuleMember -Function Connect-ServidorVisao, Disconnect-ServidorVisao, Invoke-ComandoRemoto, Get-IdSessaoAtualVisao, Start-VarreduraRemota, Get-VarreduraNovosResultadosRemoto, Start-VarreduraNovosResultadosRemotoAsync, Test-VarreduraNovosResultadosRemotoAsync, Get-VersoesRemoto, Get-SistemasEleitoraisExtraRemoto, Start-BaixarPacoteRemoto, Get-StatusPacoteRemoto, Send-AtualizacaoZonaRemoto, Invoke-LigarWolRemoto, Get-ConfigVersoesRemoto, Set-ConfigVersoesRemoto, Get-ConfigZonasWebAppRemoto, Set-ConfigZonasWebAppRemoto, Get-ConfigCampanhasWebAppRemoto, Set-ConfigCampanhasWebAppRemoto, Get-ConfigEnvioDriveRemoto, Set-ConfigEnvioDriveRemoto
 
 # NOTA: as consultas ao AD (Usuarios da ZE, status do Instalador) NAO
 # passam por aqui - ver VisaoAD.psm1. Nao sao trafego de varredura, e

@@ -68,14 +68,17 @@ $script:UrlPlanilhaGruposSistemasCSV = "https://docs.google.com/spreadsheets/d/1
 $script:UrlPlanilhaCampanhasCSV = "https://docs.google.com/spreadsheets/d/1_2aZhFgplRqCdPVV_lq4XJT9wgqkfbZpEFZRu1Zu9_I/gviz/tq?tqx=out:csv&sheet=CAMPANHAS"
 $script:UrlPlanilhaResultadosCampanhasCSV = "https://docs.google.com/spreadsheets/d/1_2aZhFgplRqCdPVV_lq4XJT9wgqkfbZpEFZRu1Zu9_I/gviz/tq?tqx=out:csv&sheet=RESULTADOS-CAMPANHAS"
 
-# Token do Apps Script (RESULTADOS-CAMPANHAS) distribuido de proposito
-# neste modulo - decisao explicita do usuario em 2026-08-24, dado que os
-# dados desta aba nao sao sensiveis. NAO usar este mesmo padrao pra
-# atualizacao de Zonas nem envio de CVC (Send-AtualizacaoZonaRemoto/
-# Send-ArquivoParaGoogleDriveRemoto) sem uma decisao explicita igual -
-# essas continuam centralizadas no POLICY-SERVER, ver VisaoRemoting.psm1.
+# Tokens do Apps Script (RESULTADOS-CAMPANHAS, envio de CVC ao Drive)
+# distribuidos de proposito neste modulo - decisao explicita do usuario:
+# RESULTADOS-CAMPANHAS em 2026-08-24 (dados nao sensiveis), envio de CVC
+# em 2026-08-27 (mesmo raciocinio). NAO usar este mesmo padrao pra
+# atualizacao de Zonas (Send-AtualizacaoZonaRemoto) sem uma decisao
+# explicita igual - essa continua centralizada no POLICY-SERVER, ver
+# VisaoRemoting.psm1.
 $script:UrlWebAppCampanhas = "https://script.google.com/macros/s/AKfycbxcI7FfmnoWEjuOnO32WkaLwg-AiFxCSAXvdfiET9e29mrYvPx5QHRTIeRdU7yrGT3Z4A/exec"
 $script:TokenWebAppCampanhas = "Super@dmin2025"
+$script:UrlWebAppEnvioDrive = "https://script.google.com/macros/s/AKfycbwCNvXKg_QnpvK_kzJq_RajsZ6uNGP4q5TpjR3fH0lr4XNnSJGp-q2Ev6KSRMRMUHak/exec"
+$script:TokenWebAppEnvioDrive = "Super@dmin2026"
 
 $script:PastaCachePlanilhas = Join-Path $env:LOCALAPPDATA 'SuporteTI\VisaoHomolog\CachePlanilhas'
 $script:ArquivoZonasCache = Join-Path $script:PastaCachePlanilhas 'zonas_cache.csv'
@@ -436,4 +439,41 @@ function Send-ResultadoCampanhaZonaRemoto {
     return [PSCustomObject]@{ Ok = $true; Mensagem = "Resultado da campanha '$NomeCampanha' (zona $zonaPad - $sedeTxt, $Aptas de $Total aptas) enviado para a planilha." }
 }
 
-Export-ModuleMember -Function Get-ZonasRemoto, Get-GruposSistemasRemoto, Get-CampanhasRemoto, Get-ResultadosCampanhasRemoto, Resolve-RedeDaZonaRemoto, Test-RedeEhCompartilhadaRemoto, Send-ResultadoCampanhaZonaRemoto
+function Send-ArquivoParaGoogleDriveRemoto {
+    <#
+        Manda um arquivo (nome + conteudo em base64) por HTTP POST direto
+        ao Web App do Apps Script, que grava na pasta do Drive - portada
+        quase sem mudanca de VisaoServidor.ps1 (Send-ArquivoParaGoogleDriveViaAppsScript),
+        so trocando Get-ConfigEnvioDrive (arquivo local no servidor) pelas
+        constantes deste modulo. Mesmo nome/assinatura/retorno da versao
+        antiga de proposito - Invoke-AcaoEnviarCvcDrive (VisaoPacotes.psm1)
+        nao precisou mudar nada.
+
+        O cliente ja lia o arquivo e convertia pra base64 ANTES de chamar
+        a versao antiga (pra nao esbarrar no duplo-salto de Kerberos ao
+        ler \\IP\InstSeg de dentro da sessao do servidor) - aqui so muda
+        que o POST final tambem sai direto do cliente, sem mais o salto
+        pelo POLICY-SERVER.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$NomeArquivo,
+        [Parameter(Mandatory)][string]$ConteudoBase64,
+        [int]$TimeoutSec = 30
+    )
+
+    try {
+        $corpo = @{ token = $script:TokenWebAppEnvioDrive; nomeArquivo = $NomeArquivo; conteudoBase64 = $ConteudoBase64 } | ConvertTo-Json -Compress
+        $corpoBytesUtf8 = [System.Text.Encoding]::UTF8.GetBytes($corpo)
+        $resp = Invoke-RestMethod -Uri $script:UrlWebAppEnvioDrive -Method Post -Body $corpoBytesUtf8 -ContentType "application/json; charset=utf-8" -TimeoutSec $TimeoutSec
+    } catch {
+        return [PSCustomObject]@{ Ok = $false; Mensagem = "Falha ao enviar '$NomeArquivo' via Apps Script: $($_.Exception.Message)"; Url = $null }
+    }
+
+    if (-not $resp.ok) {
+        return [PSCustomObject]@{ Ok = $false; Mensagem = "Apps Script recusou o envio de '$NomeArquivo': $($resp.erro)"; Url = $null }
+    }
+
+    return [PSCustomObject]@{ Ok = $true; Mensagem = "Arquivo '$NomeArquivo' enviado ao Google Drive."; Url = $resp.url }
+}
+
+Export-ModuleMember -Function Get-ZonasRemoto, Get-GruposSistemasRemoto, Get-CampanhasRemoto, Get-ResultadosCampanhasRemoto, Resolve-RedeDaZonaRemoto, Test-RedeEhCompartilhadaRemoto, Send-ResultadoCampanhaZonaRemoto, Send-ArquivoParaGoogleDriveRemoto
