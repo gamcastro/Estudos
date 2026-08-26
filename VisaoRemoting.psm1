@@ -36,7 +36,7 @@ $script:IdSessaoAtual = $null
 # eventos de conexao, pelo mesmo motivo: fica visivel/coletavel pelo
 # suporte sem precisar pegar o tecnico em flagrante com o problema
 # acontecendo ao vivo.
-$script:PastaLogVisao = Join-Path $env:LOCALAPPDATA 'SuporteTI\VisaoHomolog'
+$script:PastaLogVisao = Join-Path $env:LOCALAPPDATA 'SuporteTI\Visao'
 $script:ArquivoLogConexao = Join-Path $script:PastaLogVisao 'Conexao.log'
 
 function Registrar-LogConexao {

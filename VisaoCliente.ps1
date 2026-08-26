@@ -33,7 +33,7 @@ Import-Module (Join-Path $PSScriptRoot "VisaoJanelaPacotes.psm1") -Force
 Import-Module (Join-Path $PSScriptRoot "VisaoJanelaCampanhas.psm1") -Force
 Import-Module (Join-Path $PSScriptRoot "VisaoJanelaAdmin.psm1") -Force
 
-$script:NomeFerramenta = "Visao HOMOLOG"
+$script:NomeFerramenta = "Visao"
 
 # Le a versao DIRETO do manifesto do modulo (Visao.psd1, fica do lado de
 # VisaoCliente.ps1 dentro da pasta instalada pelo Install-Module -
@@ -46,7 +46,7 @@ $script:NomeFerramenta = "Visao HOMOLOG"
 # desenvolvimento/teste direto na pasta do repositorio, sem Visao.psd1
 # do lado).
 $script:VersaoFerramenta = "2.0 (dev)"
-$caminhoManifestoVersao = Join-Path $PSScriptRoot "VisaoHomolog.psd1"
+$caminhoManifestoVersao = Join-Path $PSScriptRoot "Visao.psd1"
 if (Test-Path $caminhoManifestoVersao) {
     try {
         $manifestoVersao = Import-PowerShellDataFile -Path $caminhoManifestoVersao
@@ -1268,7 +1268,7 @@ $btnAtualizarFerramenta.Add_Click({
 
     try {
         Add-Log "Iniciando atualizacao completa da ferramenta - a janela vai fechar e reabrir sozinha em instantes..." "Cyan"
-        $caminhoInstalador = '\\POLICY-SERVER.tre-ma.gov.br\ScanZonas\Instalar-VisaoHomolog.ps1'
+        $caminhoInstalador = '\\POLICY-SERVER.tre-ma.gov.br\ScanZonas\Instalar-Visao.ps1'
         $comandoInstalador = "Start-Sleep -Seconds 3; & '$caminhoInstalador' -ReabrirAoTerminar"
         Start-Process -FilePath "powershell.exe" -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $comandoInstalador)
         $form.Close()
