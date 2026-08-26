@@ -95,6 +95,21 @@ function Get-ArquivosInstSeg {
         era tao visivel la porque a espera ficava dentro de um loop com
         DoEvents (a janela continuava "respondendo" aos cliques, mas o
         fluxo real de baixar/copiar ficava parado do mesmo jeito).
+
+        Achado ao vivo (2026-08-27, reproduzido de forma isolada e
+        repetida): ao estourar o timeout, chamar $ps.Stop() + $ps.Dispose()
+        num pipeline que ainda esta rodando pode deixar a thread/runspace
+        local presa de verdade se o Get-ChildItem estiver bloqueado numa
+        chamada Win32 sincrona nao-cancelavel (link de rede realmente
+        lento/travado) - o Stop() nao interrompe isso de verdade. Isso
+        deixou operacoes assincronas FUTURAS (a varredura seguinte, via
+        Invoke-Command -AsJob) travando esperando o WinRM - mesmo
+        principio ja corrigido pro crash de Stop-Job/Remove-Job -Force
+        (ver VisaoRemoting.psm1/Invoke-ComandoRemotoJob). Por isso, ao
+        estourar o prazo, o pipeline e ABANDONADO (nunca mais tocado, sem
+        Stop() nem Dispose()) em vez de forcado a parar - pequeno
+        vazamento de recurso num cenario raro (link realmente travado),
+        aceitavel em troca de nunca mais travar a ferramenta inteira.
     #>
     param($Resultado, [int]$TimeoutSec = 15)
 
@@ -106,6 +121,7 @@ function Get-ArquivosInstSeg {
         try { return @(Get-ChildItem -Path $Raiz -File -Recurse -Depth 6 -ErrorAction SilentlyContinue) } catch { return @() }
     }
     $ps = [powershell]::Create()
+    $abandonar = $false
     try {
         [void]$ps.AddScript($scriptBlockListar).AddArgument($raizInstSeg)
         $handle = $ps.BeginInvoke()
@@ -115,14 +131,14 @@ function Get-ArquivosInstSeg {
             Start-Sleep -Milliseconds 100
         }
         if (-not $handle.IsCompleted) {
-            $ps.Stop()
+            $abandonar = $true
             return $null
         }
         return @($ps.EndInvoke($handle))
     } catch {
         return $null
     } finally {
-        $ps.Dispose()
+        if (-not $abandonar) { $ps.Dispose() }
     }
 }
 
