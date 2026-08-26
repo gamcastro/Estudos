@@ -84,6 +84,29 @@ function Registrar-LogConexao {
     } catch {}
 }
 
+function Registrar-AvisosNativosJob {
+    <#
+        Um job -AsJob preserva os avisos NATIVOS que o proprio WinRM
+        gera sozinho durante a reconexao robusta (ex: "A conexao de rede
+        com POLICY-SERVER... foi interrompida. Tentando reconexao por
+        ate 4 minutos...") no stream de Warning do job - normalmente so
+        aparecem (sem hora nenhuma) na janela de console atras da GUI,
+        sem nenhum jeito do tecnico saber QUANDO cada um aconteceu de
+        verdade. Aqui pega qualquer aviso NOVO desde a ultima checagem
+        (via $IndiceProcessado, guardado por quem chama no proprio
+        objeto de estado) e grava no Conexao.log (COM timestamp, ja que
+        Registrar-LogConexao sempre adiciona um). Devolve o indice
+        atualizado.
+    #>
+    param($Job, [int]$IndiceProcessado = 0)
+
+    $avisos = @($Job.Warning)
+    for ($i = $IndiceProcessado; $i -lt $avisos.Count; $i++) {
+        Registrar-LogConexao "[WinRM] $($avisos[$i].Message)"
+    }
+    return $avisos.Count
+}
+
 function Connect-ServidorVisao {
     <#
         Abre (ou reabre) a sessao persistente com o POLICY-SERVER e
@@ -272,10 +295,12 @@ function Invoke-ComandoRemotoJob {
     $cronometro = [System.Diagnostics.Stopwatch]::StartNew()
     $proximoAvisoEspera = 15
     $abandonarJob = $false
+    $indiceAvisos = 0
     try {
         while ($job.State -eq [System.Management.Automation.JobState]::Running -or $job.State -eq [System.Management.Automation.JobState]::NotStarted) {
             [System.Windows.Forms.Application]::DoEvents()
             Start-Sleep -Milliseconds 150
+            $indiceAvisos = Registrar-AvisosNativosJob -Job $job -IndiceProcessado $indiceAvisos
 
             $segundosDecorridos = $cronometro.Elapsed.TotalSeconds
             if ($segundosDecorridos -ge $proximoAvisoEspera) {
@@ -298,6 +323,7 @@ function Invoke-ComandoRemotoJob {
                 throw [System.TimeoutException]::new("O POLICY-SERVER nao respondeu em 5 minutos - a conexao foi considerada perdida.")
             }
         }
+        $indiceAvisos = Registrar-AvisosNativosJob -Job $job -IndiceProcessado $indiceAvisos
         return Receive-Job -Job $job -ErrorAction Stop
     }
     finally {
@@ -605,6 +631,7 @@ function Start-VarreduraNovosResultadosRemotoAsync {
         Job                   = $job
         Cronometro            = [System.Diagnostics.Stopwatch]::StartNew()
         ProximoAvisoEspera    = 15
+        IndiceAvisos          = 0
     }
 }
 
@@ -623,6 +650,7 @@ function Test-VarreduraNovosResultadosRemotoAsync {
 
     $job = $EstadoAsync.Job
     $rodando = ($job.State -eq [System.Management.Automation.JobState]::Running -or $job.State -eq [System.Management.Automation.JobState]::NotStarted)
+    $EstadoAsync.IndiceAvisos = Registrar-AvisosNativosJob -Job $job -IndiceProcessado $EstadoAsync.IndiceAvisos
 
     if ($rodando) {
         $segundosDecorridos = $EstadoAsync.Cronometro.Elapsed.TotalSeconds
@@ -720,7 +748,7 @@ function Start-ChamadaRemotaAssincrona {
         throw
     }
 
-    return [PSCustomObject]@{ Job = $job; Cronometro = [System.Diagnostics.Stopwatch]::StartNew() }
+    return [PSCustomObject]@{ Job = $job; Cronometro = [System.Diagnostics.Stopwatch]::StartNew(); IndiceAvisos = 0 }
 }
 
 function Test-ChamadaRemotaAssincronaConcluida {
@@ -738,6 +766,7 @@ function Test-ChamadaRemotaAssincronaConcluida {
 
     $job = $EstadoAsync.Job
     $rodando = ($job.State -eq [System.Management.Automation.JobState]::Running -or $job.State -eq [System.Management.Automation.JobState]::NotStarted)
+    $EstadoAsync.IndiceAvisos = Registrar-AvisosNativosJob -Job $job -IndiceProcessado $EstadoAsync.IndiceAvisos
 
     if ($rodando) {
         if ($EstadoAsync.Cronometro.Elapsed.TotalSeconds -ge $TimeoutSec) {
