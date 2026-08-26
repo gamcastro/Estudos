@@ -68,17 +68,19 @@ $script:UrlPlanilhaGruposSistemasCSV = "https://docs.google.com/spreadsheets/d/1
 $script:UrlPlanilhaCampanhasCSV = "https://docs.google.com/spreadsheets/d/1_2aZhFgplRqCdPVV_lq4XJT9wgqkfbZpEFZRu1Zu9_I/gviz/tq?tqx=out:csv&sheet=CAMPANHAS"
 $script:UrlPlanilhaResultadosCampanhasCSV = "https://docs.google.com/spreadsheets/d/1_2aZhFgplRqCdPVV_lq4XJT9wgqkfbZpEFZRu1Zu9_I/gviz/tq?tqx=out:csv&sheet=RESULTADOS-CAMPANHAS"
 
-# Tokens do Apps Script (RESULTADOS-CAMPANHAS, envio de CVC ao Drive)
-# distribuidos de proposito neste modulo - decisao explicita do usuario:
-# RESULTADOS-CAMPANHAS em 2026-08-24 (dados nao sensiveis), envio de CVC
-# em 2026-08-27 (mesmo raciocinio). NAO usar este mesmo padrao pra
-# atualizacao de Zonas (Send-AtualizacaoZonaRemoto) sem uma decisao
-# explicita igual - essa continua centralizada no POLICY-SERVER, ver
-# VisaoRemoting.psm1.
+# Tokens do Apps Script (RESULTADOS-CAMPANHAS, envio de CVC ao Drive,
+# atualizacao de Zonas) distribuidos de proposito neste modulo - decisao
+# explicita do usuario: RESULTADOS-CAMPANHAS em 2026-08-24 (dados nao
+# sensiveis), envio de CVC e atualizacao de Zonas em 2026-08-27 (mesmo
+# raciocinio - nenhum dos dois e trafego de broadcast). So Wake-on-LAN
+# (Invoke-LigarWolRemoto) CONTINUA centralizado - broadcast de verdade,
+# ver VisaoRemoting.psm1.
 $script:UrlWebAppCampanhas = "https://script.google.com/macros/s/AKfycbxcI7FfmnoWEjuOnO32WkaLwg-AiFxCSAXvdfiET9e29mrYvPx5QHRTIeRdU7yrGT3Z4A/exec"
 $script:TokenWebAppCampanhas = "Super@dmin2025"
 $script:UrlWebAppEnvioDrive = "https://script.google.com/macros/s/AKfycbwCNvXKg_QnpvK_kzJq_RajsZ6uNGP4q5TpjR3fH0lr4XNnSJGp-q2Ev6KSRMRMUHak/exec"
 $script:TokenWebAppEnvioDrive = "Super@dmin2026"
+$script:UrlWebAppZonas = "https://script.google.com/macros/s/AKfycbwLmvFeU4thsQlc1QDio5A5eHEOA30NzP1PtVqwvPRG3n5UqmRyBdsldZXwrlApmW_a/exec"
+$script:TokenWebAppZonas = "Super@dmin2025"
 
 $script:PastaCachePlanilhas = Join-Path $env:LOCALAPPDATA 'SuporteTI\VisaoHomolog\CachePlanilhas'
 $script:ArquivoZonasCache = Join-Path $script:PastaCachePlanilhas 'zonas_cache.csv'
@@ -439,6 +441,55 @@ function Send-ResultadoCampanhaZonaRemoto {
     return [PSCustomObject]@{ Ok = $true; Mensagem = "Resultado da campanha '$NomeCampanha' (zona $zonaPad - $sedeTxt, $Aptas de $Total aptas) enviado para a planilha." }
 }
 
+function Send-AtualizacaoZonaRemoto {
+    <#
+        Manda a Substituta/Observacao de uma zona por HTTP POST direto ao
+        Web App do Apps Script, que grava nas colunas D/E da linha
+        correspondente na planilha "Zonas" - portada quase sem mudanca de
+        VisaoServidor.ps1 (Send-AtualizacaoZonaViaAppsScript), so trocando
+        Get-ConfigZonasWebApp (arquivo local no servidor) pelas constantes
+        deste modulo, e a verificacao de "gravou mesmo assim apesar do
+        erro HTTP" reaproveitando Get-ZonasRemoto (a leitura, ja migrada
+        acima) em vez de Import-TabelaZonas do servidor. Mesmo nome/
+        assinatura/retorno da versao antiga de proposito - Show-GerenciarZonas
+        (VisaoJanelaAdmin.psm1) nao precisou mudar nada.
+    #>
+    param(
+        [Parameter(Mandatory)][int]$Zona,
+        [string]$Substituta = "",
+        [string]$Observacao = ""
+    )
+
+    $zonaPad = "{0:D3}" -f $Zona
+    try {
+        $corpo = @{ token = $script:TokenWebAppZonas; zona = $zonaPad; rede = $Substituta; observacao = $Observacao } | ConvertTo-Json -Compress
+        $corpoBytesUtf8 = [System.Text.Encoding]::UTF8.GetBytes($corpo)
+        $resp = Invoke-RestMethod -Uri $script:UrlWebAppZonas -Method Post -Body $corpoBytesUtf8 -ContentType "application/json; charset=utf-8" -TimeoutSec 20
+    } catch {
+        # O Web App do Apps Script as vezes devolve erro HTTP MESMO
+        # quando o doPost ja gravou certinho - confere se gravou mesmo
+        # assim antes de considerar falha de verdade (mesma logica da
+        # versao antiga, so trocando a fonte de leitura).
+        $todasZonas = Get-ZonasRemoto
+        $gravouMesmoAssim = $false
+        if ($todasZonas.Ok) {
+            $zonaInfo = $todasZonas.Zonas | Where-Object { [int]$_.Zona -eq $Zona } | Select-Object -Last 1
+            $substitutaGravada = if ($zonaInfo -and $zonaInfo.Substituta) { $zonaInfo.Substituta.Trim() } else { "" }
+            $obsGravada = if ($zonaInfo -and $zonaInfo.Observacao) { $zonaInfo.Observacao.Trim() } else { "" }
+            $gravouMesmoAssim = ($substitutaGravada -eq $Substituta.Trim() -and $obsGravada -eq $Observacao.Trim())
+        }
+        if ($gravouMesmoAssim) {
+            return [PSCustomObject]@{ Ok = $true; Mensagem = "Confirmado: zona $zonaPad foi gravada na planilha apesar do erro HTTP (falso alarme conhecido do Apps Script)." }
+        }
+        return [PSCustomObject]@{ Ok = $false; Mensagem = "Falha ao atualizar zona $zonaPad na planilha: $($_.Exception.Message)" }
+    }
+
+    if (-not $resp.ok) {
+        return [PSCustomObject]@{ Ok = $false; Mensagem = "Planilha recusou atualizar a zona $zonaPad`: $($resp.erro)" }
+    }
+    return [PSCustomObject]@{ Ok = $true; Mensagem = "Zona $zonaPad atualizada na planilha." }
+}
+
 function Send-ArquivoParaGoogleDriveRemoto {
     <#
         Manda um arquivo (nome + conteudo em base64) por HTTP POST direto
@@ -476,4 +527,4 @@ function Send-ArquivoParaGoogleDriveRemoto {
     return [PSCustomObject]@{ Ok = $true; Mensagem = "Arquivo '$NomeArquivo' enviado ao Google Drive."; Url = $resp.url }
 }
 
-Export-ModuleMember -Function Get-ZonasRemoto, Get-GruposSistemasRemoto, Get-CampanhasRemoto, Get-ResultadosCampanhasRemoto, Resolve-RedeDaZonaRemoto, Test-RedeEhCompartilhadaRemoto, Send-ResultadoCampanhaZonaRemoto, Send-ArquivoParaGoogleDriveRemoto
+Export-ModuleMember -Function Get-ZonasRemoto, Get-GruposSistemasRemoto, Get-CampanhasRemoto, Get-ResultadosCampanhasRemoto, Resolve-RedeDaZonaRemoto, Test-RedeEhCompartilhadaRemoto, Send-ResultadoCampanhaZonaRemoto, Send-ArquivoParaGoogleDriveRemoto, Send-AtualizacaoZonaRemoto

@@ -724,18 +724,11 @@ function Get-StatusPacoteRemoto {
 # Send-ResultadoCampanhaZonaRemoto NAO vive mais aqui - migrada pra
 # VisaoPlanilhas.psm1 em 2026-08-24 (decisao explicita do usuario:
 # RESULTADOS-CAMPANHAS nao e sensivel, token distribuido no pacote do
-# modulo). Send-ArquivoParaGoogleDriveRemoto (CVC) migrada pelo MESMO
-# motivo em 2026-08-27. Send-AtualizacaoZonaRemoto (zonas) CONTINUA
-# aqui - essa decisao nao foi generalizada pra ela.
+# modulo). Send-ArquivoParaGoogleDriveRemoto (CVC) e Send-AtualizacaoZonaRemoto
+# (zonas) migradas pelo MESMO motivo em 2026-08-27 - nenhuma das
+# escritas restantes daqui e trafego de broadcast, so Wake-on-LAN
+# (abaixo) continua de proposito.
 # ============================================================
-function Send-AtualizacaoZonaRemoto {
-    param(
-        [Parameter(Mandatory)][int]$Zona,
-        [string]$Substituta = "",
-        [string]$Observacao = ""
-    )
-    Invoke-ComandoRemoto -ScriptBlock { param($z, $s, $o) Send-AtualizacaoZonaViaAppsScript -Zona $z -Substituta $s -Observacao $o } -ArgumentList @($Zona, $Substituta, $Observacao)
-}
 
 # ============================================================
 # FASE B: Wake-on-LAN - request/resposta unico, sem polling.
@@ -801,7 +794,7 @@ function Set-ConfigEnvioDriveRemoto {
     Invoke-ComandoRemoto -ScriptBlock { param($u, $t) Set-ConfigEnvioDrive -UrlWebApp $u -Token $t } -ArgumentList @($UrlWebApp, $Token)
 }
 
-Export-ModuleMember -Function Connect-ServidorVisao, Disconnect-ServidorVisao, Invoke-ComandoRemoto, Get-IdSessaoAtualVisao, Start-VarreduraRemota, Get-VarreduraNovosResultadosRemoto, Start-VarreduraNovosResultadosRemotoAsync, Test-VarreduraNovosResultadosRemotoAsync, Get-VersoesRemoto, Get-SistemasEleitoraisExtraRemoto, Start-BaixarPacoteRemoto, Get-StatusPacoteRemoto, Send-AtualizacaoZonaRemoto, Invoke-LigarWolRemoto, Get-ConfigVersoesRemoto, Set-ConfigVersoesRemoto, Get-ConfigZonasWebAppRemoto, Set-ConfigZonasWebAppRemoto, Get-ConfigCampanhasWebAppRemoto, Set-ConfigCampanhasWebAppRemoto, Get-ConfigEnvioDriveRemoto, Set-ConfigEnvioDriveRemoto
+Export-ModuleMember -Function Connect-ServidorVisao, Disconnect-ServidorVisao, Invoke-ComandoRemoto, Get-IdSessaoAtualVisao, Start-VarreduraRemota, Get-VarreduraNovosResultadosRemoto, Start-VarreduraNovosResultadosRemotoAsync, Test-VarreduraNovosResultadosRemotoAsync, Get-VersoesRemoto, Get-SistemasEleitoraisExtraRemoto, Start-BaixarPacoteRemoto, Get-StatusPacoteRemoto, Invoke-LigarWolRemoto, Get-ConfigVersoesRemoto, Set-ConfigVersoesRemoto, Get-ConfigZonasWebAppRemoto, Set-ConfigZonasWebAppRemoto, Get-ConfigCampanhasWebAppRemoto, Set-ConfigCampanhasWebAppRemoto, Get-ConfigEnvioDriveRemoto, Set-ConfigEnvioDriveRemoto
 
 # NOTA: as consultas ao AD (Usuarios da ZE, status do Instalador) NAO
 # passam por aqui - ver VisaoAD.psm1. Nao sao trafego de varredura, e
