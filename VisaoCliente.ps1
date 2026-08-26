@@ -765,15 +765,28 @@ function Invoke-TickVarredura {
 # intermediario, nao codigo nosso) mesmo sem nenhuma acao do tecnico -
 # reproduzido so ficando parado ~4min, com ou sem antivirus, sem abrir
 # nenhuma janela. Este Timer dispara uma chamada bem leve pro servidor
-# a cada 60s enquanto a ferramenta esta ociosa (varredura NAO em
+# a cada ~60s enquanto a ferramenta esta ociosa (varredura NAO em
 # andamento), so pra manter a conexao TCP subjacente "viva" - nunca usa
 # DoEvents() nem forca Stop-Job/Remove-Job (ver Start/Test-
 # ChamadaRemotaAssincrona, VisaoRemoting.psm1). Nao dispara durante uma
 # varredura ativa de proposito - o polling dela ja gera trafego
 # constante, nao precisa de mais nada.
+#
+# Achado ao vivo (2026-08-27): o INTERVALO do Timer NAO pode ser os
+# mesmos 60s do disparo - isso so CONFERE se a chamada terminou uma vez
+# a cada 60s tambem, entao $script:SessaoOcupada ficava travado em
+# $true por quase 1 minuto inteiro a cada ciclo (mesmo o Get-Date
+# remoto terminando em 1-2s), bloqueando QUALQUER outra acao do
+# tecnico (Iniciar Varredura, Atualizar Zona, etc) com "Ja ha uma
+# chamada remota em andamento" durante essa janela. Por isso o Timer
+# roda a cada 2s (confere rapido), mas so DISPARA uma chamada nova a
+# cada 60s de verdade ($ultimoKeepAlive, um Stopwatch mutavel).
 # ============================================================
+$ultimoKeepAlive = [System.Diagnostics.Stopwatch]::StartNew()
+$intervaloKeepAliveSegundos = 60
+
 $timerKeepAlive = New-Object System.Windows.Forms.Timer
-$timerKeepAlive.Interval = 60000
+$timerKeepAlive.Interval = 2000
 $timerKeepAlive.Add_Tick({
     if ($timer.Enabled) { return }
 
@@ -783,12 +796,16 @@ $timerKeepAlive.Add_Tick({
         return
     }
 
+    if ($ultimoKeepAlive.Elapsed.TotalSeconds -lt $intervaloKeepAliveSegundos) { return }
+
     try {
         $script:Estado.EsperaAsyncKeepAlive = Start-ChamadaRemotaAssincrona -ScriptBlock { Get-Date }
     } catch {
         # Silencioso de proposito - se a sessao ainda nao existir, ou
         # estiver ocupada com outra coisa (ex: Verificar Campanha, Enviar
-        # CVC), so tenta de novo no proximo tick, 60s depois.
+        # CVC), so tenta de novo no proximo ciclo de 60s.
+    } finally {
+        $ultimoKeepAlive.Restart()
     }
 }.GetNewClosure())
 $timerKeepAlive.Start()
