@@ -822,9 +822,22 @@ $btnIniciar.Add_Click({
     # levar alguns segundos e travam a repintura da janela nesse meio
     # tempo. Sem isto aqui, o clique parece "nao fez nada" ate a
     # primeira chamada terminar.
+    #
+    # Achado ao vivo (2026-08-27): isto usava DoEvents() aqui, ANTES de
+    # qualquer chamada remota comecar - ou seja, FORA de qualquer protecao
+    # de $script:SessaoOcupada. Isso abria uma janela real (mesmo que
+    # curta) pro Timer do keepalive (VisaoRemoting.psm1) disparar sua
+    # propria chamada nesse meio tempo, exatamente quando a sessao ainda
+    # parecia livre - achado como uma das causas do "pipeline ja esta em
+    # execucao" que reapareceu depois do keepalive existir (mesmo com o
+    # Wait-RunspaceDisponivelParaNovoComando em vigor). Control.Refresh()
+    # forca a repintura IMEDIATA do controle especifico sem bombear a
+    # fila inteira de mensagens do Windows - da o mesmo feedback visual,
+    # sem reentrancia nenhuma.
     $btnIniciar.Enabled = $false
     $lblStatus.Text = "Iniciando varredura..."
-    [System.Windows.Forms.Application]::DoEvents()
+    $btnIniciar.Refresh()
+    $lblStatus.Refresh()
 
     try {
         $resolucao = Resolve-RedeDaZonaRemoto -Zona $zona -Zonas $script:Estado.Zonas
