@@ -900,10 +900,30 @@ $btnIniciar.Add_Click({
     # em Invoke-TickVarredura).
     $script:Estado.EsperaAsyncVarredura = $null
 
-    try {
-        $script:Estado.IdSessaoVarredura = Start-VarreduraRemota -Ips $ips -Zona $zona -RedeCompartilhada $script:Estado.RedeCompartilhada -AoAtualizarStatus { param($t) Add-Log $t "Gray" }.GetNewClosure()
-    } catch {
-        Add-Log "[ERRO] Falha ao iniciar a varredura no servidor: $($_.Exception.Message)" "OrangeRed"
+    # Achado ao vivo (2026-08-27): "Ja ha uma chamada remota em andamento"
+    # e uma corrida BENIGNA e curta (o keepalive - VisaoRemoting.psm1 -
+    # terminando bem na hora do clique), que normalmente se resolve
+    # sozinha em 1-2s - antes o tecnico tinha que perceber o erro e
+    # clicar em Iniciar Varredura de novo na mao. Tenta UMA vez de novo,
+    # sozinho, so quando o erro for especificamente esse (nao repete pra
+    # erro de conexao de verdade, ex: "Nao foi possivel conectar ao
+    # POLICY-SERVER").
+    $erroFinalVarredura = $null
+    for ($tentativaVarredura = 1; $tentativaVarredura -le 2; $tentativaVarredura++) {
+        try {
+            $script:Estado.IdSessaoVarredura = Start-VarreduraRemota -Ips $ips -Zona $zona -RedeCompartilhada $script:Estado.RedeCompartilhada -AoAtualizarStatus { param($t) Add-Log $t "Gray" }.GetNewClosure()
+            $erroFinalVarredura = $null
+            break
+        } catch {
+            $erroFinalVarredura = $_
+            if ($tentativaVarredura -eq 1 -and $_.Exception.Message -eq "Ja ha uma chamada remota em andamento - aguarde terminar e tente de novo.") {
+                Add-Log "Sessao momentaneamente ocupada (provavelmente o keepalive terminando agora) - tentando de novo..." "Gray"
+                Start-Sleep -Seconds 2
+            }
+        }
+    }
+    if ($erroFinalVarredura) {
+        Add-Log "[ERRO] Falha ao iniciar a varredura no servidor: $($erroFinalVarredura.Exception.Message)" "OrangeRed"
         $numZona.Enabled = $true
         $btnIniciar.Enabled = $true
         return
