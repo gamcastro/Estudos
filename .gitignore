@@ -10,3 +10,9 @@ VisaoHomolog/
 
 # Binarios
 *.exe
+
+# Cache/saida gerados em tempo de execucao (ScannerRedeZona2.ps1/Visao) -
+# regeneram sozinhos, nao sao codigo-fonte.
+zonas_cache.csv
+vnc_config.txt
+ocs_diagnostico_saida.txt
