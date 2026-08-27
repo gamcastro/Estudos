@@ -788,7 +788,26 @@ $intervaloKeepAliveSegundos = 60
 $timerKeepAlive = New-Object System.Windows.Forms.Timer
 $timerKeepAlive.Interval = 2000
 $timerKeepAlive.Add_Tick({
-    if ($timer.Enabled) { return }
+    if ($timer.Enabled) {
+        # Achado ao vivo (2026-08-27): $ultimoKeepAlive so era reiniciado
+        # quando o keepalive DISPARAVA de verdade - enquanto a varredura
+        # esta ativa, este tick so retornava aqui (nunca disparava, nao
+        # precisa - a propria varredura ja gera trafego constante), mas o
+        # cronometro CONTINUAVA contando por baixo. Numa varredura
+        # demorada, isso significava que o keepalive ja estava "no limite"
+        # (ou passou dele) assim que a varredura terminava - disparando
+        # quase IMEDIATAMENTE depois, bem na hora que o tecnico costuma
+        # estar explorando os resultados (Sistemas Eleitorais etc.) antes
+        # da PROXIMA varredura - aumentando bastante a chance real de
+        # colisao (mais do que um calculo ingenuo de "corrida rara"
+        # sugeriria - confirmado ao vivo pelo usuario acontecendo repetidas
+        # vezes). Reiniciar aqui, a cada tick durante a varredura, garante
+        # que o keepalive so volte a contar os 60s de verdade a PARTIR de
+        # quando a varredura efetivamente termina - nao importa qual
+        # caminho de codigo parou o timer (concluida, cancelada, erro).
+        $ultimoKeepAlive.Restart()
+        return
+    }
 
     if ($script:Estado.EsperaAsyncKeepAlive) {
         $status = Test-ChamadaRemotaAssincronaConcluida -EstadoAsync $script:Estado.EsperaAsyncKeepAlive
