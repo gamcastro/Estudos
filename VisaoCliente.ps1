@@ -1026,6 +1026,15 @@ $script:Estado.LinhaContextoAtual = $null
 $grid.Add_MouseDown({
     param($sender, $e)
     if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Right) {
+        # Achado ao vivo (2026-08-27): sem isso, o PRIMEIRO clique direito
+        # depois do grid perder o foco (ex: acabou de digitar no campo
+        # Numero da Zona) so tira o foco do outro controle e devolve pro
+        # grid - o Windows consome esse clique so pra ativar/focar o
+        # controle, sem chegar a abrir o ContextMenuStrip; um SEGUNDO
+        # clique direito, com o grid ja focado, ai sim abre o menu.
+        # Focar explicitamente aqui garante que o MESMO clique que ativa
+        # o grid tambem consiga abrir o menu.
+        if (-not $grid.Focused) { $grid.Focus() | Out-Null }
         $hit = $grid.HitTest($e.X, $e.Y)
         if ($hit.RowIndex -ge 0) {
             $grid.ClearSelection()
@@ -1116,10 +1125,12 @@ $menuContextoGrid.Add_Opening({
             }.GetNewClosure())
         }
 
-        # So aparece se a planilha de Pacotes de Sistemas tiver ao menos 1
-        # pacote configurado OU a maquina tiver SIS instalado (mesmo sem
-        # pacote configurado ainda, da pra ver o status de versao).
-        if ($pacotesLocal.Count -gt 0 -or $temSis) {
+        # So aparece se a maquina TEM SIS instalado - pedido explicito do
+        # usuario (2026-08-27): antes tambem aparecia so por ter algum
+        # pacote configurado na planilha, mesmo sem SIS na maquina, o que
+        # nao faz sentido pro tecnico (nao ha nada de Sistemas Eleitorais
+        # pra verificar/copiar numa maquina sem SIS).
+        if ($temSis) {
             [void]$menuContextoGrid.Items.Add("-")
             $itemSistemas = $menuContextoGrid.Items.Add("Sistemas Eleitorais...")
             $itemSistemas.Add_Click({
