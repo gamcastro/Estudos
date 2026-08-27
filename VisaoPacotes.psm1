@@ -84,7 +84,9 @@ function Get-ArquivosInstSeg {
         (2026-08-21, zona 34) que isso pode passar de 3 MINUTOS sem
         terminar num link de zona ruim - MUITO mais lento do que o
         Test-Path no caminho exato (~600ms no mesmo link, no mesmo
-        teste). Por isso roda com um LIMITE DE TEMPO (padrao: 15s) num
+        teste). Por isso roda com um LIMITE DE TEMPO (padrao: 20s - ajustado
+        de 15s em 2026-08-27, pedido do usuario apos ver "Verificacao
+        incompleta" com frequencia na janela Sistemas Eleitorais) num
         runspace em segundo plano - se estourar, cancela e devolve
         $null (equivale a "nao achei por essa busca", nao a erro fatal -
         Get-StatusPacoteNoDestino ja trata $null normalmente,
@@ -111,7 +113,7 @@ function Get-ArquivosInstSeg {
         vazamento de recurso num cenario raro (link realmente travado),
         aceitavel em troca de nunca mais travar a ferramenta inteira.
     #>
-    param($Resultado, [int]$TimeoutSec = 15)
+    param($Resultado, [int]$TimeoutSec = 20)
 
     $raizInstSeg = "\\$($Resultado.IP)\InstSeg"
     if (-not (Test-Path $raizInstSeg)) { return $null }
@@ -196,7 +198,7 @@ function Test-ArquivosInstSegAsync {
         vez de mostrar "Nao copiado ainda" com a mesma cara de um
         resultado definitivo.
     #>
-    param($EstadoAsync, [int]$TimeoutSec = 15)
+    param($EstadoAsync, [int]$TimeoutSec = 20)
 
     if ($EstadoAsync.NaoExiste) {
         return [PSCustomObject]@{ Concluido = $true; Arquivos = $null; Timeout = $false }
