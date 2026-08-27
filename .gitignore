@@ -1,0 +1,12 @@
+# Pastas de staging/build do modulo PowerShell (geradas a partir dos
+# arquivos-fonte na raiz a cada publicacao - Publish-Module) - nao sao
+# codigo-fonte, so artefato reconstruivel.
+Visao/
+VisaoHomolog/
+
+# Configuracao local do Claude Code (settings.local.json) - preferencia
+# de maquina/usuario, nao do projeto.
+.claude/
+
+# Binarios
+*.exe
