@@ -1,11 +1,11 @@
-# Estudos - Toolkit PowerShell TRE-MA (SEASU-COINF-STIC)
+# Visão - Toolkit PowerShell TRE-MA (SEASU-COINF-STIC)
 
-Coleção de ferramentas PowerShell (GUI WinForms) usadas pelo suporte técnico
-do TRE-MA para dar manutenção nas estações das zonas eleitorais - varredura
-de rede, controle remoto, verificação de sistemas eleitorais instalados,
-campanhas de atualização, e diagnósticos pontuais.
+Ferramenta PowerShell (GUI WinForms) usada pelo suporte técnico do TRE-MA
+para dar manutenção nas estações das zonas eleitorais - varredura de rede,
+controle remoto, verificação de sistemas eleitorais instalados, e campanhas
+de atualização.
 
-## Ferramenta principal: Visão
+## Visão geral
 
 `VisaoCliente.ps1` (+ módulos `Visao*.psm1`) é a ferramenta central: varre a
 rede de uma zona eleitoral, identifica hosts/impressoras, cruza com o OCS
@@ -38,14 +38,6 @@ Mudanças arriscadas passam primeiro pelo branch `homolog` + módulo
 `VisaoHomolog` (instalado lado a lado com o `Visao` de produção, sem
 conflito) para validação por técnicos-chave antes de promover pra produção.
 Ver `Instalar-VisaoHomolog.ps1`/`.bat`.
-
-## Outras ferramentas standalone
-
-- `ScannerRedeZona.ps1` - scanner de rede portátil (USB, sem dependências), predecessor mais simples da Visão
-- `ConectarVNC-GUI.ps1` - abre sessão VNC numa lista de máquinas
-- `ConsultarGruposAD-GUI.ps1` - consulta grupos do Active Directory
-- `wol_habilitar.ps1` - habilita Wake-on-LAN numa máquina
-- `ocs_diagnostico.ps1`, `rcviewer_diagnostico.ps1`, `vnc_diagnostico.ps1` - scripts de diagnóstico pontual
 
 ## Requisitos
 
