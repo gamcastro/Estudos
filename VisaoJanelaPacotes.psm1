@@ -245,7 +245,7 @@ function Show-JanelaSistemasEleitorais {
     # ja estar visivel (Add_Shown) ou apos uma acao de copiar/verificar
     # mudar o status de uma linha especifica.
     $popularLinhaPacoteSis = {
-        param([System.Windows.Forms.DataGridView]$Grid, [int]$Indice, $Item, $Resultado2, $ArquivosInstSeg = '__NAO_INFORMADO__')
+        param([System.Windows.Forms.DataGridView]$Grid, [int]$Indice, $Item, $Resultado2, $ArquivosInstSeg = '__NAO_INFORMADO__', [bool]$BuscaTimeout = $false)
         $row = $Grid.Rows[$Indice]
         if (-not $Item.Pacote) { return }
 
@@ -277,6 +277,16 @@ function Show-JanelaSistemasEleitorais {
                 $row.Cells["StatusPacote"].ToolTipText = "Tamanho no destino ($($statusInfo.Tamanho) bytes) diferente do oficial da planilha ($($Item.Pacote.TamanhoEsperado) bytes) - copia pode estar corrompida/incompleta. Copie de novo.`r`n$($statusInfo.ArquivoDestino)"
             }
             $row.Cells["Copiar"].Value = "Copiar Novamente"
+        } elseif ($BuscaTimeout) {
+            # Achado ao vivo (2026-08-27): a busca tolerante em todo o
+            # InstSeg pode nao terminar a tempo (link de zona lento) - sem
+            # ela, um pacote copiado FORA do caminho padrao fica
+            # indistinguivel de "realmente nao copiado". Avisa que a
+            # verificacao pode estar incompleta em vez de afirmar que nao
+            # foi copiado.
+            $row.Cells["StatusPacote"].Value = "Verificacao incompleta (rede lenta) - clique Atualizar Status"
+            $row.Cells["StatusPacote"].Style.ForeColor = [System.Drawing.Color]::FromArgb(180, 140, 0)
+            $row.Cells["Copiar"].Value = "Baixar e Copiar"
         } else {
             $tamanhoEsperadoTxt = if ($Item.Pacote.TamanhoEsperado) { " ($([Math]::Round($Item.Pacote.TamanhoEsperado / 1MB, 1)) MB)" } else { "" }
             $row.Cells["StatusPacote"].Value = "Nao copiado ainda$tamanhoEsperadoTxt"
@@ -329,7 +339,7 @@ function Show-JanelaSistemasEleitorais {
         if ($lblCarregandoSis) { $lblCarregandoSis.Visible = $false }
 
         for ($i = 0; $i -lt $itens.Count; $i++) {
-            & $popularLinhaPacoteSis -Grid $gridSis -Indice $i -Item $itens[$i] -Resultado2 $Resultado -ArquivosInstSeg $status.Arquivos
+            & $popularLinhaPacoteSis -Grid $gridSis -Indice $i -Item $itens[$i] -Resultado2 $Resultado -ArquivosInstSeg $status.Arquivos -BuscaTimeout $status.Timeout
         }
     }.GetNewClosure())
 

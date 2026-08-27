@@ -788,7 +788,26 @@ $intervaloKeepAliveSegundos = 60
 $timerKeepAlive = New-Object System.Windows.Forms.Timer
 $timerKeepAlive.Interval = 2000
 $timerKeepAlive.Add_Tick({
-    if ($timer.Enabled) { return }
+    if ($timer.Enabled) {
+        # Achado ao vivo (2026-08-27): $ultimoKeepAlive so era reiniciado
+        # quando o keepalive DISPARAVA de verdade - enquanto a varredura
+        # esta ativa, este tick so retornava aqui (nunca disparava, nao
+        # precisa - a propria varredura ja gera trafego constante), mas o
+        # cronometro CONTINUAVA contando por baixo. Numa varredura
+        # demorada, isso significava que o keepalive ja estava "no limite"
+        # (ou passou dele) assim que a varredura terminava - disparando
+        # quase IMEDIATAMENTE depois, bem na hora que o tecnico costuma
+        # estar explorando os resultados (Sistemas Eleitorais etc.) antes
+        # da PROXIMA varredura - aumentando bastante a chance real de
+        # colisao (mais do que um calculo ingenuo de "corrida rara"
+        # sugeriria - confirmado ao vivo pelo usuario acontecendo repetidas
+        # vezes). Reiniciar aqui, a cada tick durante a varredura, garante
+        # que o keepalive so volte a contar os 60s de verdade a PARTIR de
+        # quando a varredura efetivamente termina - nao importa qual
+        # caminho de codigo parou o timer (concluida, cancelada, erro).
+        $ultimoKeepAlive.Restart()
+        return
+    }
 
     if ($script:Estado.EsperaAsyncKeepAlive) {
         $status = Test-ChamadaRemotaAssincronaConcluida -EstadoAsync $script:Estado.EsperaAsyncKeepAlive
@@ -822,9 +841,22 @@ $btnIniciar.Add_Click({
     # levar alguns segundos e travam a repintura da janela nesse meio
     # tempo. Sem isto aqui, o clique parece "nao fez nada" ate a
     # primeira chamada terminar.
+    #
+    # Achado ao vivo (2026-08-27): isto usava DoEvents() aqui, ANTES de
+    # qualquer chamada remota comecar - ou seja, FORA de qualquer protecao
+    # de $script:SessaoOcupada. Isso abria uma janela real (mesmo que
+    # curta) pro Timer do keepalive (VisaoRemoting.psm1) disparar sua
+    # propria chamada nesse meio tempo, exatamente quando a sessao ainda
+    # parecia livre - achado como uma das causas do "pipeline ja esta em
+    # execucao" que reapareceu depois do keepalive existir (mesmo com o
+    # Wait-RunspaceDisponivelParaNovoComando em vigor). Control.Refresh()
+    # forca a repintura IMEDIATA do controle especifico sem bombear a
+    # fila inteira de mensagens do Windows - da o mesmo feedback visual,
+    # sem reentrancia nenhuma.
     $btnIniciar.Enabled = $false
     $lblStatus.Text = "Iniciando varredura..."
-    [System.Windows.Forms.Application]::DoEvents()
+    $btnIniciar.Refresh()
+    $lblStatus.Refresh()
 
     try {
         $resolucao = Resolve-RedeDaZonaRemoto -Zona $zona -Zonas $script:Estado.Zonas
@@ -887,10 +919,30 @@ $btnIniciar.Add_Click({
     # em Invoke-TickVarredura).
     $script:Estado.EsperaAsyncVarredura = $null
 
-    try {
-        $script:Estado.IdSessaoVarredura = Start-VarreduraRemota -Ips $ips -Zona $zona -RedeCompartilhada $script:Estado.RedeCompartilhada -AoAtualizarStatus { param($t) Add-Log $t "Gray" }.GetNewClosure()
-    } catch {
-        Add-Log "[ERRO] Falha ao iniciar a varredura no servidor: $($_.Exception.Message)" "OrangeRed"
+    # Achado ao vivo (2026-08-27): "Ja ha uma chamada remota em andamento"
+    # e uma corrida BENIGNA e curta (o keepalive - VisaoRemoting.psm1 -
+    # terminando bem na hora do clique), que normalmente se resolve
+    # sozinha em 1-2s - antes o tecnico tinha que perceber o erro e
+    # clicar em Iniciar Varredura de novo na mao. Tenta UMA vez de novo,
+    # sozinho, so quando o erro for especificamente esse (nao repete pra
+    # erro de conexao de verdade, ex: "Nao foi possivel conectar ao
+    # POLICY-SERVER").
+    $erroFinalVarredura = $null
+    for ($tentativaVarredura = 1; $tentativaVarredura -le 2; $tentativaVarredura++) {
+        try {
+            $script:Estado.IdSessaoVarredura = Start-VarreduraRemota -Ips $ips -Zona $zona -RedeCompartilhada $script:Estado.RedeCompartilhada -AoAtualizarStatus { param($t) Add-Log $t "Gray" }.GetNewClosure()
+            $erroFinalVarredura = $null
+            break
+        } catch {
+            $erroFinalVarredura = $_
+            if ($tentativaVarredura -eq 1 -and $_.Exception.Message -eq "Ja ha uma chamada remota em andamento - aguarde terminar e tente de novo.") {
+                Add-Log "Sessao momentaneamente ocupada (provavelmente o keepalive terminando agora) - tentando de novo..." "Gray"
+                Start-Sleep -Seconds 2
+            }
+        }
+    }
+    if ($erroFinalVarredura) {
+        Add-Log "[ERRO] Falha ao iniciar a varredura no servidor: $($erroFinalVarredura.Exception.Message)" "OrangeRed"
         $numZona.Enabled = $true
         $btnIniciar.Enabled = $true
         return
@@ -970,48 +1022,137 @@ $btnExportar.Add_Click({
 
 # ============================================================
 # ATUALIZAR STATUS DE 1 MAQUINA (menu de contexto)
+#
+# Modelo NAO-BLOQUEANTE (2026-08-27, mesmo padrao ja usado no polling da
+# varredura principal - Start/Test-VarreduraNovosResultadosRemotoAsync)
+# - a versao anterior tinha seu PROPRIO loop de espera com Start-Sleep +
+# DoEvents() em cima da chamada ja assincrona, fora de qualquer protecao
+# de $script:SessaoOcupada - reproduzido ao vivo repetidas vezes que isso
+# colidia com o keepalive, caindo em "Ja ha uma chamada remota em
+# andamento" (as vezes varias vezes seguidas, cada clique manual de
+# retry caindo na mesma corrida de novo). Aqui, sem DoEvents nenhum: um
+# Timer proprio confere o status a cada 200ms.
 # ============================================================
+$script:EstadoAtualizarHost = @{ Async = $null; Resultado = $null; NovoResultado = $null }
+
+$timerAtualizarHost = New-Object System.Windows.Forms.Timer
+$timerAtualizarHost.Interval = 200
+$timerAtualizarHost.Add_Tick({
+    if (-not $script:EstadoAtualizarHost.Async) { $timerAtualizarHost.Stop(); return }
+
+    $status = Test-VarreduraNovosResultadosRemotoAsync -EstadoAsync $script:EstadoAtualizarHost.Async -AoAtualizarStatus { param($t) Add-Log $t "Gray" }.GetNewClosure()
+    if (-not $status.Concluido) { return }
+
+    $ipAtual = $script:EstadoAtualizarHost.Resultado.IP
+
+    if ($status.Erro -or ($status.Resposta -and $status.Resposta.SessaoPerdida)) {
+        $msgErro = if ($status.Erro) { $status.Erro.Message } else { "Conexao com o servidor foi perdida." }
+        Add-Log "[ERRO] Falha ao atualizar '$ipAtual': $msgErro" "OrangeRed"
+        $script:EstadoAtualizarHost.Async = $null
+        $grid.Cursor = [System.Windows.Forms.Cursors]::Default
+        $timerAtualizarHost.Stop()
+        return
+    }
+
+    $resposta = $status.Resposta
+    foreach ($n in $resposta.Novos) { $script:EstadoAtualizarHost.NovoResultado = $n }
+
+    if ($resposta.EmAndamento) {
+        # Ainda nao terminou do lado do servidor - dispara a proxima
+        # checagem (mesmo IdSessaoEsperado) e continua no proximo tick.
+        try {
+            $proximo = Start-VarreduraNovosResultadosRemotoAsync -IdSessaoEsperado $script:EstadoAtualizarHost.Async.IdSessaoEsperado
+        } catch {
+            Add-Log "[ERRO] Falha ao atualizar '$ipAtual': $($_.Exception.Message)" "OrangeRed"
+            $script:EstadoAtualizarHost.Async = $null
+            $grid.Cursor = [System.Windows.Forms.Cursors]::Default
+            $timerAtualizarHost.Stop()
+            return
+        }
+        if ($proximo.SessaoPerdidaImediato) {
+            Add-Log "[ERRO] Falha ao atualizar '$ipAtual': Conexao com o servidor foi perdida." "OrangeRed"
+            $script:EstadoAtualizarHost.Async = $null
+            $grid.Cursor = [System.Windows.Forms.Cursors]::Default
+            $timerAtualizarHost.Stop()
+            return
+        }
+        $script:EstadoAtualizarHost.Async = $proximo
+        return
+    }
+
+    $timerAtualizarHost.Stop()
+    $script:EstadoAtualizarHost.Async = $null
+    $grid.Cursor = [System.Windows.Forms.Cursors]::Default
+    $novoResultado = $script:EstadoAtualizarHost.NovoResultado
+
+    if (-not $novoResultado) {
+        Add-Log "[ERRO] Falha ao atualizar '$ipAtual' (tempo esgotado)." "OrangeRed"
+        return
+    }
+
+    # Achado ao vivo (2026-08-27): uma maquina cujo nome so era conhecido
+    # via OCS Inventory (ver Invoke-BuscarDesligadosOcs - DNS reverso/
+    # NetBIOS nunca resolveram esse nome, so o OCS por ultimo IP
+    # conhecido) reaparecia como "Tipo Desconhecido" so por ter sido
+    # atualizada individualmente aqui - o re-scan de 1 IP so faz
+    # ping+DNS/NetBIOS, sem passar pela mesma correcao via OCS que a
+    # varredura completa da zona ja aplica. Reaplica aqui, so pra esta
+    # 1 maquina, se ela respondeu mas ainda ficou sem nome.
+    if ($novoResultado.Online -and (-not $novoResultado.Hostname -or $novoResultado.Hostname -eq "(sem resolucao de nome)")) {
+        try {
+            $prefixoRedeAtual = (Resolve-RedeDaZonaRemoto -Zona $script:Estado.ZonaAtual -Zonas $script:Estado.Zonas).Prefixo
+            $respostaOcs = Get-MaquinasDesligadasOcsRemoto -Zona $script:Estado.ZonaAtual -RedeCompartilhada $script:Estado.RedeCompartilhada -ResultadosOnline @($novoResultado) -PrefixoRede $prefixoRedeAtual -SistemasEleitoraisExtra $script:Estado.SistemasEleitoraisExtra
+            if ($respostaOcs.Ok) {
+                $correcao = $respostaOcs.Correcoes | Where-Object { $_.IP -eq $novoResultado.IP } | Select-Object -First 1
+                if ($correcao) { $novoResultado = $correcao }
+            }
+        } catch {
+            # Silencioso - se a consulta ao OCS falhar aqui, so mantem
+            # sem nome resolvido, igual ja acontecia antes desta melhoria.
+        }
+    }
+
+    # A varredura nova ja devolve a classificacao (EhGateway/
+    # PertenceZonaAtual/etc) pronta, diferente do original (que
+    # calculava so 1x e preservava por cima do objeto antigo) - aqui
+    # da pra so SUBSTITUIR a entrada antiga pela nova inteira.
+    $indice = -1
+    for ($i = 0; $i -lt $script:Resultados.Count; $i++) {
+        if ($script:Resultados[$i].IP -eq $novoResultado.IP) { $indice = $i; break }
+    }
+    if ($indice -ge 0) { $script:Resultados[$indice] = $novoResultado } else { $script:Resultados.Add($novoResultado) }
+
+    try { $script:Estado.MaquinasLiberadasInstalador = Get-MaquinasLiberadasInstalador } catch {}
+
+    Reconstruir-Grid
+    Add-Log "Status de '$($novoResultado.Hostname)' ($($novoResultado.IP)) atualizado." "Green"
+}.GetNewClosure())
+
 function Invoke-AcaoAtualizarHost {
     param($Resultado)
     if (-not $Resultado -or -not $Resultado.IP) { return }
+    if ($script:EstadoAtualizarHost.Async) {
+        Add-Log "[AVISO] Ja existe uma atualizacao de status em andamento - aguarde terminar." "Yellow"
+        return
+    }
 
     Add-Log "Atualizando status de '$($Resultado.Hostname)' ($($Resultado.IP))..." "Cyan"
     $grid.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
+    $script:EstadoAtualizarHost.Resultado = $Resultado
+    $script:EstadoAtualizarHost.NovoResultado = $null
+
     try {
         $idSessao = Start-VarreduraRemota -Ips @($Resultado.IP) -Zona $script:Estado.ZonaAtual -RedeCompartilhada $script:Estado.RedeCompartilhada
-        $novoResultado = $null
-        $tentativas = 0
-        do {
-            Start-Sleep -Milliseconds 400
-            [System.Windows.Forms.Application]::DoEvents()
-            $resp = Get-VarreduraNovosResultadosRemoto -IdSessaoEsperado $idSessao
-            if ($resp.SessaoPerdida) { throw "Conexao com o servidor foi perdida." }
-            foreach ($n in $resp.Novos) { $novoResultado = $n }
-            $tentativas++
-        } while ($resp.EmAndamento -and $tentativas -lt 30)
-
-        if (-not $novoResultado) {
-            Add-Log "[ERRO] Falha ao atualizar '$($Resultado.IP)' (tempo esgotado)." "OrangeRed"
+        $inicioAsync = Start-VarreduraNovosResultadosRemotoAsync -IdSessaoEsperado $idSessao
+        if ($inicioAsync.SessaoPerdidaImediato) {
+            Add-Log "[ERRO] Falha ao atualizar '$($Resultado.IP)': Conexao com o servidor foi perdida." "OrangeRed"
+            $grid.Cursor = [System.Windows.Forms.Cursors]::Default
             return
         }
-
-        # A varredura nova ja devolve a classificacao (EhGateway/
-        # PertenceZonaAtual/etc) pronta, diferente do original (que
-        # calculava so 1x e preservava por cima do objeto antigo) - aqui
-        # da pra so SUBSTITUIR a entrada antiga pela nova inteira.
-        $indice = -1
-        for ($i = 0; $i -lt $script:Resultados.Count; $i++) {
-            if ($script:Resultados[$i].IP -eq $Resultado.IP) { $indice = $i; break }
-        }
-        if ($indice -ge 0) { $script:Resultados[$indice] = $novoResultado } else { $script:Resultados.Add($novoResultado) }
-
-        try { $script:Estado.MaquinasLiberadasInstalador = Get-MaquinasLiberadasInstalador } catch {}
-
-        Reconstruir-Grid
-        Add-Log "Status de '$($novoResultado.Hostname)' ($($novoResultado.IP)) atualizado." "Green"
+        $script:EstadoAtualizarHost.Async = $inicioAsync
+        $timerAtualizarHost.Start()
     } catch {
         Add-Log "[ERRO] Falha ao atualizar '$($Resultado.IP)': $($_.Exception.Message)" "OrangeRed"
-    } finally {
         $grid.Cursor = [System.Windows.Forms.Cursors]::Default
     }
 }
@@ -1026,6 +1167,15 @@ $script:Estado.LinhaContextoAtual = $null
 $grid.Add_MouseDown({
     param($sender, $e)
     if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Right) {
+        # Achado ao vivo (2026-08-27): sem isso, o PRIMEIRO clique direito
+        # depois do grid perder o foco (ex: acabou de digitar no campo
+        # Numero da Zona) so tira o foco do outro controle e devolve pro
+        # grid - o Windows consome esse clique so pra ativar/focar o
+        # controle, sem chegar a abrir o ContextMenuStrip; um SEGUNDO
+        # clique direito, com o grid ja focado, ai sim abre o menu.
+        # Focar explicitamente aqui garante que o MESMO clique que ativa
+        # o grid tambem consiga abrir o menu.
+        if (-not $grid.Focused) { $grid.Focus() | Out-Null }
         $hit = $grid.HitTest($e.X, $e.Y)
         if ($hit.RowIndex -ge 0) {
             $grid.ClearSelection()
@@ -1116,10 +1266,12 @@ $menuContextoGrid.Add_Opening({
             }.GetNewClosure())
         }
 
-        # So aparece se a planilha de Pacotes de Sistemas tiver ao menos 1
-        # pacote configurado OU a maquina tiver SIS instalado (mesmo sem
-        # pacote configurado ainda, da pra ver o status de versao).
-        if ($pacotesLocal.Count -gt 0 -or $temSis) {
+        # So aparece se a maquina TEM SIS instalado - pedido explicito do
+        # usuario (2026-08-27): antes tambem aparecia so por ter algum
+        # pacote configurado na planilha, mesmo sem SIS na maquina, o que
+        # nao faz sentido pro tecnico (nao ha nada de Sistemas Eleitorais
+        # pra verificar/copiar numa maquina sem SIS).
+        if ($temSis) {
             [void]$menuContextoGrid.Items.Add("-")
             $itemSistemas = $menuContextoGrid.Items.Add("Sistemas Eleitorais...")
             $itemSistemas.Add_Click({

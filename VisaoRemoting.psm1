@@ -122,18 +122,33 @@ function Wait-RunspaceDisponivelParaNovoComando {
         executado porque um pipeline ja esta em execucao" - um erro
         RARO antes do keepalive existir (as chamadas ficavam bem mais
         espacadas), que passou a acontecer com chamadas costurando uma
-        atras da outra na mesma sessao. Espera curta (no maximo ~2s,
+        atras da outra na mesma sessao. Espera curta (no maximo ~3s,
         SEM DoEvents de proposito - ver historico de bugs de DoEvents
         aninhado) ate a Runspace realmente ficar disponivel de novo
         antes de tentar o proximo Invoke-Command -AsJob - na pratica
-        deve resolver em bem menos de 1s; se estourar os 2s, so segue
-        em frente mesmo assim (deixa o proprio Invoke-Command decidir).
+        deve resolver em bem menos de 1s.
+
+        Achado ao vivo nº2 (2026-08-27): a versao anterior desistia
+        SILENCIOSAMENTE apos o prazo e deixava o chamador tentar o
+        Invoke-Command mesmo assim - reproduzido ao vivo (inclusive
+        relatado por um tecnico na producao) que isso deixava o erro CRU
+        do WinRM/PSRP escapar pro tecnico ("O pipeline nao foi executado
+        porque um pipeline ja esta em execucao..."), uma mensagem tecnica
+        confusa, em vez da mensagem ja padronizada e amigavel que o resto
+        da ferramenta usa pra essa mesma situacao. Agora, se a Runspace
+        continuar ocupada depois do prazo, lanca a MESMA excecao/mensagem
+        de "Ja ha uma chamada remota em andamento" que $script:SessaoOcupada
+        ja lanca em Invoke-ComandoRemoto/Start-VarreduraNovosResultadosRemotoAsync/
+        Start-ChamadaRemotaAssincrona - o tecnico ve sempre a MESMA
+        orientacao ("aguarde e tente de novo"), nunca o erro tecnico cru.
     #>
     param([Parameter(Mandatory)]$Sessao)
 
     $cronometro = [System.Diagnostics.Stopwatch]::StartNew()
     while ($Sessao.Runspace -and $Sessao.Runspace.RunspaceAvailability -ne [System.Management.Automation.Runspaces.RunspaceAvailability]::Available) {
-        if ($cronometro.Elapsed.TotalSeconds -ge 2) { return }
+        if ($cronometro.Elapsed.TotalSeconds -ge 3) {
+            throw [System.InvalidOperationException]::new("Ja ha uma chamada remota em andamento - aguarde terminar e tente de novo.")
+        }
         Start-Sleep -Milliseconds 50
     }
 }

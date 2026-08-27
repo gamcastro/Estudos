@@ -84,7 +84,9 @@ function Get-ArquivosInstSeg {
         (2026-08-21, zona 34) que isso pode passar de 3 MINUTOS sem
         terminar num link de zona ruim - MUITO mais lento do que o
         Test-Path no caminho exato (~600ms no mesmo link, no mesmo
-        teste). Por isso roda com um LIMITE DE TEMPO (padrao: 15s) num
+        teste). Por isso roda com um LIMITE DE TEMPO (padrao: 20s - ajustado
+        de 15s em 2026-08-27, pedido do usuario apos ver "Verificacao
+        incompleta" com frequencia na janela Sistemas Eleitorais) num
         runspace em segundo plano - se estourar, cancela e devolve
         $null (equivale a "nao achei por essa busca", nao a erro fatal -
         Get-StatusPacoteNoDestino ja trata $null normalmente,
@@ -111,7 +113,7 @@ function Get-ArquivosInstSeg {
         vazamento de recurso num cenario raro (link realmente travado),
         aceitavel em troca de nunca mais travar a ferramenta inteira.
     #>
-    param($Resultado, [int]$TimeoutSec = 15)
+    param($Resultado, [int]$TimeoutSec = 20)
 
     $raizInstSeg = "\\$($Resultado.IP)\InstSeg"
     if (-not (Test-Path $raizInstSeg)) { return $null }
@@ -183,13 +185,23 @@ function Test-ArquivosInstSegAsync {
         Chamada a cada tick de um Timer - devolve na hora, sem DoEvents()
         nenhum. .Concluido indica se ja da pra usar .Arquivos (que pode
         vir $null tanto por nao existir \\IP\InstSeg quanto por estourar
-        o prazo - mesmo significado de sempre: "nao achei por essa
-        busca", nao erro fatal).
+        o prazo).
+
+        .Timeout (2026-08-27) distingue os dois motivos de .Arquivos vir
+        $null: \\IP\InstSeg simplesmente NAO EXISTE (negativo definitivo -
+        se o compartilhamento nao existe, nada foi copiado mesmo) versus a
+        busca ESTOUROU O PRAZO sem terminar (link de zona lento - achado
+        ao vivo: pode acontecer na primeira tentativa e nao repetir numa
+        segunda, com o caminho ja "aquecido" no redirecionador SMB do
+        Windows). So o segundo caso e realmente inconclusivo - quem chama
+        deve avisar o tecnico que a verificacao pode estar incompleta, em
+        vez de mostrar "Nao copiado ainda" com a mesma cara de um
+        resultado definitivo.
     #>
-    param($EstadoAsync, [int]$TimeoutSec = 15)
+    param($EstadoAsync, [int]$TimeoutSec = 20)
 
     if ($EstadoAsync.NaoExiste) {
-        return [PSCustomObject]@{ Concluido = $true; Arquivos = $null }
+        return [PSCustomObject]@{ Concluido = $true; Arquivos = $null; Timeout = $false }
     }
 
     if (-not $EstadoAsync.Handle.IsCompleted) {
@@ -197,24 +209,37 @@ function Test-ArquivosInstSegAsync {
             # Abandona o pipeline preso - NUNCA Stop()/Dispose() aqui, ver
             # comentario grande em Get-ArquivosInstSeg (o mesmo achado se
             # aplica igual aqui).
-            return [PSCustomObject]@{ Concluido = $true; Arquivos = $null }
+            return [PSCustomObject]@{ Concluido = $true; Arquivos = $null; Timeout = $true }
         }
-        return [PSCustomObject]@{ Concluido = $false; Arquivos = $null }
+        return [PSCustomObject]@{ Concluido = $false; Arquivos = $null; Timeout = $false }
     }
 
     try {
-        return [PSCustomObject]@{ Concluido = $true; Arquivos = @($EstadoAsync.Ps.EndInvoke($EstadoAsync.Handle)) }
+        return [PSCustomObject]@{ Concluido = $true; Arquivos = @($EstadoAsync.Ps.EndInvoke($EstadoAsync.Handle)); Timeout = $false }
     } catch {
-        return [PSCustomObject]@{ Concluido = $true; Arquivos = $null }
+        return [PSCustomObject]@{ Concluido = $true; Arquivos = $null; Timeout = $false }
     } finally {
         $EstadoAsync.Ps.Dispose()
     }
 }
 
 function Find-PacoteEmArquivosInstSeg {
-    param($Pacote, $ArquivosInstSeg)
-    if (-not $ArquivosInstSeg -or -not $Pacote.NomeArquivo) { return $null }
-    return ($ArquivosInstSeg | Where-Object { $_.Name -eq $Pacote.NomeArquivo } | Select-Object -First 1)
+    <#
+        Achado ao vivo (2026-08-27): antes comparava com $Pacote.NomeArquivo
+        (so a coluna da planilha) - mas o nome esperado de um pacote pode
+        vir de DUAS fontes (ver Get-NomeArquivoConhecidoPacote): a coluna
+        da planilha OU, se ela estiver vazia, o sidecar .nome gravado no
+        cache do servidor. Se a planilha nao tiver a coluna preenchida
+        pra um pacote (resolve so pelo sidecar), a busca tolerante
+        desistia na hora sem comparar nada - pacote existente em local
+        fora do padrao aparecia como "Nao copiado ainda". Corrigido
+        recebendo o nome JA RESOLVIDO ($nomeConhecido, calculado por
+        Get-StatusPacoteNoDestino) em vez de reler $Pacote.NomeArquivo
+        aqui dentro.
+    #>
+    param($NomeArquivo, $ArquivosInstSeg)
+    if (-not $ArquivosInstSeg -or -not $NomeArquivo) { return $null }
+    return ($ArquivosInstSeg | Where-Object { $_.Name -eq $NomeArquivo } | Select-Object -First 1)
 }
 
 function Get-StatusPacoteNoDestino {
@@ -248,7 +273,7 @@ function Get-StatusPacoteNoDestino {
     }
 
     $arquivosInstSeg = if ("$ArquivosInstSeg" -eq '__NAO_INFORMADO__') { Get-ArquivosInstSeg -Resultado $Resultado } else { $ArquivosInstSeg }
-    $achadoFora = Find-PacoteEmArquivosInstSeg -Pacote $Pacote -ArquivosInstSeg $arquivosInstSeg
+    $achadoFora = Find-PacoteEmArquivosInstSeg -NomeArquivo $nomeConhecido -ArquivosInstSeg $arquivosInstSeg
     if ($achadoFora) {
         $tamanhoConfere = if ($Pacote.TamanhoEsperado) { $achadoFora.Length -eq $Pacote.TamanhoEsperado } else { $null }
         return [PSCustomObject]@{ Existe = $true; NomeConhecido = [bool]$nomeConhecido; Tamanho = $achadoFora.Length; TamanhoConfere = $tamanhoConfere; Data = $achadoFora.LastWriteTime; ArquivoDestino = $achadoFora.FullName; PastaDestinoUnc = $pastaDestinoUnc; ForaDoPadrao = $true }
